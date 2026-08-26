@@ -2,23 +2,33 @@
 # -*- coding: utf-8 -*-
 """八股抽问系统 - SQLite + 艾宾浩斯复习调度"""
 import argparse
+import contextvars
 import csv
 import datetime as dt
 import html as html_lib
 import io
 import json
+import logging
 import os
 import re
 import secrets
 import sqlite3
 import sys
+import time
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "bagu.db"
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
+EVENT_LOGGER = logging.getLogger("bagu.events")
+EVENT_LOGGER.setLevel(logging.INFO)
+EVENT_LOGGER.propagate = False
+REQUEST_ID = contextvars.ContextVar("bagu_request_id", default=None)
 
 PAGES = {
     "MySQL": "https://xiaolincoding.com/interview/mysql.html",
@@ -1177,6 +1187,57 @@ def _settings_root(root=None):
     return Path(root) if root else Path(__file__).parent
 
 
+def configure_logging(root=None):
+    """配置结构化事件日志，同时写入 stderr 与轮转文件。"""
+    log_dir = _settings_root(root) / ".superpowers"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "bagu-server.log"
+    for handler in list(EVENT_LOGGER.handlers):
+        EVENT_LOGGER.removeHandler(handler)
+        handler.close()
+    formatter = logging.Formatter("%(message)s")
+    terminal = logging.StreamHandler(sys.stderr)
+    terminal.setFormatter(formatter)
+    rotating = RotatingFileHandler(
+        log_path,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    rotating.setFormatter(formatter)
+    EVENT_LOGGER.addHandler(terminal)
+    EVENT_LOGGER.addHandler(rotating)
+    return log_path
+
+
+def close_logging():
+    """刷新并关闭本应用创建的日志处理器。"""
+    for handler in list(EVENT_LOGGER.handlers):
+        EVENT_LOGGER.removeHandler(handler)
+        handler.close()
+
+
+def _elapsed_ms(started_at):
+    return round((time.perf_counter() - started_at) * 1000, 1)
+
+
+def log_event(event, level="INFO", **fields):
+    """输出不含正文的单行 JSON 诊断事件。"""
+    request_id = fields.pop("request_id", None) or REQUEST_ID.get()
+    payload = {
+        "time": dt.datetime.now().astimezone().isoformat(timespec="milliseconds"),
+        "level": level.upper(),
+        "event": event,
+    }
+    if request_id:
+        payload["request_id"] = request_id
+    payload.update(fields)
+    EVENT_LOGGER.log(
+        getattr(logging, payload["level"], logging.INFO),
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+    )
+
+
 def mask_api_key(key):
     if not key:
         return ""
@@ -1450,10 +1511,20 @@ def _openai_chat(prompt, settings):
     key = (settings or {}).get("api_key") or ""
     if not key:
         raise JudgeError("未配置模型")
+    started_at = time.perf_counter()
+    model = settings.get("model") or "deepseek-chat"
+    provider = settings.get("provider") or ""
+    log_event(
+        "model.request",
+        provider=provider,
+        model=model,
+        stream=False,
+        prompt_chars=len(prompt),
+    )
     url = (settings.get("base_url") or "").rstrip("/") + "/chat/completions"
     body = json.dumps(
         {
-            "model": settings.get("model") or "deepseek-chat",
+            "model": model,
             "temperature": 0.2,
             "messages": [{"role": "user", "content": prompt}],
         }
@@ -1469,13 +1540,47 @@ def _openai_chat(prompt, settings):
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
+            log_event(
+                "model.connected",
+                provider=provider,
+                model=model,
+                stream=False,
+                duration_ms=_elapsed_ms(started_at),
+            )
             payload = json.loads(resp.read().decode("utf-8", "ignore"))
     except Exception as e:  # noqa: BLE001
+        log_event(
+            "model.error",
+            level="ERROR",
+            provider=provider,
+            model=model,
+            stream=False,
+            duration_ms=_elapsed_ms(started_at),
+            error_type=type(e).__name__,
+        )
         raise JudgeError(f"模型调用失败: {e}") from e
     try:
-        return payload["choices"][0]["message"]["content"]
+        content = payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:
+        log_event(
+            "model.error",
+            level="ERROR",
+            provider=provider,
+            model=model,
+            stream=False,
+            duration_ms=_elapsed_ms(started_at),
+            error_type="ResponseParseError",
+        )
         raise JudgeError("模型返回无法解析") from e
+    log_event(
+        "model.done",
+        provider=provider,
+        model=model,
+        stream=False,
+        duration_ms=_elapsed_ms(started_at),
+        content_chars=len(content) if isinstance(content, str) else 0,
+    )
+    return content
 
 
 def _openai_chat_stream(prompt, settings):
@@ -1483,10 +1588,26 @@ def _openai_chat_stream(prompt, settings):
     key = (settings or {}).get("api_key") or ""
     if not key:
         raise JudgeError("未配置模型")
+    started_at = time.perf_counter()
+    model = settings.get("model") or "deepseek-chat"
+    provider = settings.get("provider") or ""
+    reasoning_chunks = 0
+    reasoning_chars = 0
+    content_chunks = 0
+    content_chars = 0
+    first_reasoning_logged = False
+    first_content_logged = False
+    log_event(
+        "model.request",
+        provider=provider,
+        model=model,
+        stream=True,
+        prompt_chars=len(prompt),
+    )
     url = (settings.get("base_url") or "").rstrip("/") + "/chat/completions"
     body = json.dumps(
         {
-            "model": settings.get("model") or "deepseek-chat",
+            "model": model,
             "temperature": 0.2,
             "stream": True,
             "messages": [{"role": "user", "content": prompt}],
@@ -1504,6 +1625,13 @@ def _openai_chat_stream(prompt, settings):
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
+            log_event(
+                "model.connected",
+                provider=provider,
+                model=model,
+                stream=True,
+                duration_ms=_elapsed_ms(started_at),
+            )
             fallback_lines = []
             saw_sse = False
             for raw_line in resp:
@@ -1531,12 +1659,34 @@ def _openai_chat_stream(prompt, settings):
                     delta = choices[0].get("delta")
                     if not isinstance(delta, dict):
                         raise KeyError("delta")
+                    reasoning = delta.get("reasoning_content")
                     content = delta.get("content")
                 except JudgeError:
                     raise
                 except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
                     raise JudgeError("模型流式返回无法解析") from e
+                if isinstance(reasoning, str) and reasoning:
+                    reasoning_chunks += 1
+                    reasoning_chars += len(reasoning)
+                    if not first_reasoning_logged:
+                        first_reasoning_logged = True
+                        log_event(
+                            "model.first_reasoning",
+                            provider=provider,
+                            model=model,
+                            duration_ms=_elapsed_ms(started_at),
+                        )
                 if isinstance(content, str) and content:
+                    content_chunks += 1
+                    content_chars += len(content)
+                    if not first_content_logged:
+                        first_content_logged = True
+                        log_event(
+                            "model.first_content",
+                            provider=provider,
+                            model=model,
+                            duration_ms=_elapsed_ms(started_at),
+                        )
                     yield content
             if not saw_sse and fallback_lines:
                 try:
@@ -1545,29 +1695,83 @@ def _openai_chat_stream(prompt, settings):
                 except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
                     raise JudgeError("模型流式返回无法解析") from e
                 if isinstance(content, str) and content:
+                    content_chunks += 1
+                    content_chars += len(content)
+                    if not first_content_logged:
+                        first_content_logged = True
+                        log_event(
+                            "model.first_content",
+                            provider=provider,
+                            model=model,
+                            duration_ms=_elapsed_ms(started_at),
+                        )
                     yield content
-    except JudgeError:
+        log_event(
+            "model.done",
+            provider=provider,
+            model=model,
+            stream=True,
+            duration_ms=_elapsed_ms(started_at),
+            reasoning_chunks=reasoning_chunks,
+            reasoning_chars=reasoning_chars,
+            content_chunks=content_chunks,
+            content_chars=content_chars,
+        )
+    except JudgeError as e:
+        log_event(
+            "model.error",
+            level="ERROR",
+            provider=provider,
+            model=model,
+            stream=True,
+            duration_ms=_elapsed_ms(started_at),
+            error_type=type(e).__name__,
+        )
         raise
     except Exception as e:  # noqa: BLE001
+        log_event(
+            "model.error",
+            level="ERROR",
+            provider=provider,
+            model=model,
+            stream=True,
+            duration_ms=_elapsed_ms(started_at),
+            error_type=type(e).__name__,
+        )
         raise JudgeError(f"模型调用失败: {e}") from e
 
 
 def fetch_reference_text(url, limit=4000):
     if not url:
         return ""
+    started_at = time.perf_counter()
+    log_event("reference.request", limit=limit)
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", "ignore")
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        log_event(
+            "reference.error",
+            level="WARNING",
+            duration_ms=_elapsed_ms(started_at),
+            error_type=type(e).__name__,
+        )
         return ""
     text = re.sub(r"<script[\s\S]*?</script>", " ", html, flags=re.I)
     text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.I)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-    return text[:limit]
+    text = text[:limit]
+    log_event(
+        "reference.done",
+        duration_ms=_elapsed_ms(started_at),
+        content_chars=len(text),
+    )
+    return text
 
 
 def _judge_context(conn, session_id, qid, user_text, root=None, require_model=True):
+    started_at = time.perf_counter()
     row = conn.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
     if not row:
         raise GradeRejected(f"题目不存在: id={qid}")
@@ -1576,6 +1780,7 @@ def _judge_context(conn, session_id, qid, user_text, root=None, require_model=Tr
         raise JudgeError("未配置模型")
     stored_answer = row["answer"] or ""
     ref = stored_answer or fetch_reference_text(row["url"] or "")
+    reference_source = "stored" if stored_answer else ("remote" if ref else "missing")
     prompt = (
         "你是面试官。根据用户回答给出评级，必须严格用下面格式，不要输出其它内容：\n"
         "GRADE: again|hard|good|easy\n"
@@ -1589,10 +1794,22 @@ def _judge_context(conn, session_id, qid, user_text, root=None, require_model=Tr
         prompt += f"\n参考资料（可能不完整）：{ref}\n"
     else:
         prompt += "\n（未拉到参考页，按面试口径作答）\n"
+    log_event(
+        "judge.context_ready",
+        session_id=session_id,
+        question_id=qid,
+        provider=settings.get("provider") or "",
+        model=settings.get("model") or "",
+        reference_source=reference_source,
+        user_answer_chars=len(user_text),
+        prompt_chars=len(prompt),
+        duration_ms=_elapsed_ms(started_at),
+    )
     return settings, stored_answer, prompt
 
 
 def _finish_judge(conn, session_id, qid, raw, stored_answer):
+    started_at = time.perf_counter()
     parsed = parse_judge_output(raw)
     if parsed["grade"] == "easy":
         parsed["full_answer"] = ""
@@ -1600,6 +1817,14 @@ def _finish_judge(conn, session_id, qid, raw, stored_answer):
         parsed["full_answer"] = stored_answer
     parsed["full_answer_html"] = render_answer_html(parsed["full_answer"])
     grade(conn, session_id, qid, parsed["grade"])
+    log_event(
+        "judge.graded",
+        session_id=session_id,
+        question_id=qid,
+        grade=parsed["grade"],
+        used_stored_answer=bool(stored_answer and parsed["grade"] != "easy"),
+        duration_ms=_elapsed_ms(started_at),
+    )
     return parsed
 
 
@@ -1845,7 +2070,43 @@ def make_http_handler(root=None, stream_fn=None):
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
-            sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+            return
+
+        def _begin_request(self):
+            self._request_id = "r_" + secrets.token_hex(4)
+            self._request_started_at = time.perf_counter()
+            self._request_completed = False
+            self._request_token = REQUEST_ID.set(self._request_id)
+            log_event(
+                "request.start",
+                method=self.command,
+                path=urllib.parse.urlsplit(self.path).path,
+            )
+
+        def _request_error(self, error, stage):
+            log_event(
+                "request.error",
+                level="ERROR",
+                method=self.command,
+                path=urllib.parse.urlsplit(self.path).path,
+                stage=stage,
+                error_type=type(error).__name__,
+                duration_ms=_elapsed_ms(self._request_started_at),
+            )
+
+        def _complete_request(self, status, outcome=None):
+            if self._request_completed:
+                return
+            self._request_completed = True
+            log_event(
+                "request.done",
+                method=self.command,
+                path=urllib.parse.urlsplit(self.path).path,
+                status=status,
+                outcome=outcome or ("ok" if status < 400 else "error"),
+                duration_ms=_elapsed_ms(self._request_started_at),
+            )
+            REQUEST_ID.reset(self._request_token)
 
         def _write(self, code, payload, ctype):
             if ctype.startswith("application/json"):
@@ -1859,7 +2120,10 @@ def make_http_handler(root=None, stream_fn=None):
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(raw)
+            try:
+                self.wfile.write(raw)
+            finally:
+                self._complete_request(code)
 
         def _dispatch(self, method, body):
             conn = get_conn()
@@ -1868,6 +2132,10 @@ def make_http_handler(root=None, stream_fn=None):
                 code, payload, ctype = handle_http(
                     method, self.path, body, conn, root=root
                 )
+            except Exception as e:  # noqa: BLE001
+                self._request_error(e, "dispatch")
+                self._complete_request(500, "error")
+                raise
             finally:
                 conn.close()
             self._write(code, payload, ctype)
@@ -1885,6 +2153,7 @@ def make_http_handler(root=None, stream_fn=None):
 
         def _stream_answer(self, body):
             conn = get_conn()
+            outcome = "ok"
             try:
                 init_db(conn)
                 self.send_response(200)
@@ -1900,18 +2169,26 @@ def make_http_handler(root=None, stream_fn=None):
                     )
                     for event in events:
                         if not self._write_sse(event):
+                            outcome = "client_disconnected"
                             return
                 except (JudgeError, GradeRejected, ValueError, LookupError) as e:
+                    outcome = "error"
+                    self._request_error(e, "stream")
                     self._write_sse({"type": "error", "error": str(e)})
-                except Exception:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001
+                    outcome = "error"
+                    self._request_error(e, "stream")
                     self._write_sse({"type": "error", "error": "评卷失败"})
             finally:
                 conn.close()
+                self._complete_request(200, outcome)
 
         def do_GET(self):
+            self._begin_request()
             self._dispatch("GET", None)
 
         def do_POST(self):
+            self._begin_request()
             n = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(n) if n else b"{}"
             try:
@@ -1925,6 +2202,7 @@ def make_http_handler(root=None, stream_fn=None):
                 self._dispatch("POST", body)
 
         def do_PUT(self):
+            self._begin_request()
             n = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(n) if n else b"{}"
             try:
@@ -1935,15 +2213,22 @@ def make_http_handler(root=None, stream_fn=None):
             self._dispatch("PUT", body)
 
         def do_DELETE(self):
+            self._begin_request()
             self._dispatch("DELETE", None)
 
     return Handler
 
 
-def serve(host="127.0.0.1", port=8765):
-    httpd = ThreadingHTTPServer((host, port), make_http_handler())
+def serve(host="127.0.0.1", port=8765, root=None):
+    log_path = configure_logging(root)
+    httpd = ThreadingHTTPServer((host, port), make_http_handler(root=root))
+    log_event("server.start", host=host, port=port, log_path=str(log_path))
     print(f"八股抽问: http://{host}:{port}")
-    httpd.serve_forever()
+    try:
+        httpd.serve_forever()
+    finally:
+        log_event("server.stop", host=host, port=port)
+        close_logging()
 
 
 def stats(conn):

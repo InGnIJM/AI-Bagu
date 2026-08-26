@@ -694,6 +694,85 @@ def test_openai_chat_and_fetch_reference(monkeypatch):
     assert bagu.fetch_reference_text("") == ""
 
 
+def test_non_stream_model_logs_timings_without_payloads(tmp_path, monkeypatch):
+    class FakeResp:
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "PRIVATE_MODEL_RESPONSE"}}]}
+            ).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(bagu.urllib.request, "urlopen", lambda *a, **k: FakeResp())
+    log_path = bagu.configure_logging(tmp_path)
+    try:
+        result = bagu._openai_chat(
+            "PRIVATE_PROMPT",
+            {
+                "provider": "custom",
+                "api_key": "sk-private-key",
+                "base_url": "https://example.invalid/v1",
+                "model": "model-x",
+            },
+        )
+        raw_log = log_path.read_text(encoding="utf-8")
+        events = _read_log_events(log_path)
+
+        assert result == "PRIVATE_MODEL_RESPONSE"
+        assert [event["event"] for event in events] == [
+            "model.request",
+            "model.connected",
+            "model.done",
+        ]
+        assert events[-1]["stream"] is False
+        assert events[-1]["content_chars"] == len("PRIVATE_MODEL_RESPONSE")
+        assert "PRIVATE_PROMPT" not in raw_log
+        assert "PRIVATE_MODEL_RESPONSE" not in raw_log
+        assert "sk-private-key" not in raw_log
+    finally:
+        _close_log_handlers()
+
+
+def test_reference_fetch_logs_success_and_error_without_url(tmp_path, monkeypatch):
+    class FakeResp:
+        def read(self):
+            return b"<p>PRIVATE_REFERENCE_TEXT</p>"
+
+    log_path = bagu.configure_logging(tmp_path)
+    try:
+        monkeypatch.setattr(bagu.urllib.request, "urlopen", lambda *a, **k: FakeResp())
+        assert "PRIVATE_REFERENCE_TEXT" in bagu.fetch_reference_text(
+            "https://example.invalid/private-path"
+        )
+        monkeypatch.setattr(
+            bagu.urllib.request,
+            "urlopen",
+            lambda *a, **k: (_ for _ in ()).throw(TimeoutError("PRIVATE_ERROR")),
+        )
+        assert bagu.fetch_reference_text("https://example.invalid/secret-path") == ""
+
+        raw_log = log_path.read_text(encoding="utf-8")
+        events = _read_log_events(log_path)
+        assert [event["event"] for event in events] == [
+            "reference.request",
+            "reference.done",
+            "reference.request",
+            "reference.error",
+        ]
+        assert events[1]["content_chars"] == len("PRIVATE_REFERENCE_TEXT")
+        assert events[-1]["error_type"] == "TimeoutError"
+        assert "PRIVATE_REFERENCE_TEXT" not in raw_log
+        assert "private-path" not in raw_log
+        assert "secret-path" not in raw_log
+        assert "PRIVATE_ERROR" not in raw_log
+    finally:
+        _close_log_handlers()
+
+
 def test_openai_chat_stream_parses_sse(monkeypatch):
     seen = {}
 
@@ -779,6 +858,116 @@ def test_openai_chat_stream_ignores_mimo_reasoning_and_usage(monkeypatch):
     )
 
     assert chunks == ["GRADE: good\nCOMMENT: 通过\nANSWER:"]
+
+
+def _read_log_events(path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _close_log_handlers():
+    for handler in list(bagu.EVENT_LOGGER.handlers):
+        bagu.EVENT_LOGGER.removeHandler(handler)
+        handler.close()
+
+
+def test_event_logging_writes_json_to_terminal_and_rotating_file(tmp_path, capsys):
+    log_path = bagu.configure_logging(tmp_path)
+    try:
+        bagu.log_event("diagnostic.ready", request_id="req_test", duration_ms=12.3)
+        terminal_event = json.loads(capsys.readouterr().err.strip())
+        file_event = _read_log_events(log_path)[-1]
+
+        assert terminal_event["event"] == "diagnostic.ready"
+        assert terminal_event["request_id"] == "req_test"
+        assert terminal_event["duration_ms"] == 12.3
+        assert terminal_event["level"] == "INFO"
+        assert "time" in terminal_event
+        assert file_event == terminal_event
+        file_handlers = [
+            handler
+            for handler in bagu.EVENT_LOGGER.handlers
+            if handler.__class__.__name__ == "RotatingFileHandler"
+        ]
+        assert len(file_handlers) == 1
+        assert file_handlers[0].maxBytes == 5 * 1024 * 1024
+        assert file_handlers[0].backupCount == 3
+    finally:
+        _close_log_handlers()
+
+
+def test_mimo_stream_logs_hidden_reasoning_and_visible_content_without_payloads(
+    tmp_path, monkeypatch
+):
+    class FakeMimoStreamResp:
+        def __iter__(self):
+            chunks = [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": None,
+                                "reasoning_content": "SECRET_REASONING",
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": "SECRET_CONTENT",
+                            }
+                        }
+                    ]
+                },
+            ]
+            lines = [f"data: {json.dumps(chunk)}\n".encode() for chunk in chunks]
+            return iter(lines + [b"data: [DONE]\n"])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(
+        bagu.urllib.request, "urlopen", lambda *args, **kwargs: FakeMimoStreamResp()
+    )
+    log_path = bagu.configure_logging(tmp_path)
+    try:
+        chunks = list(
+            bagu._openai_chat_stream(
+                "SECRET_PROMPT",
+                {
+                    "provider": "custom",
+                    "api_key": "sk-super-secret",
+                    "base_url": "https://api.xiaomimimo.com/v1",
+                    "model": "mimo-v2.5",
+                },
+            )
+        )
+        raw_log = log_path.read_text(encoding="utf-8")
+        events = _read_log_events(log_path)
+        names = [event["event"] for event in events]
+
+        assert chunks == ["SECRET_CONTENT"]
+        assert names == [
+            "model.request",
+            "model.connected",
+            "model.first_reasoning",
+            "model.first_content",
+            "model.done",
+        ]
+        assert events[-1]["reasoning_chunks"] == 1
+        assert events[-1]["content_chunks"] == 1
+        assert events[-1]["reasoning_chars"] == len("SECRET_REASONING")
+        assert events[-1]["content_chars"] == len("SECRET_CONTENT")
+        assert "SECRET_PROMPT" not in raw_log
+        assert "SECRET_REASONING" not in raw_log
+        assert "SECRET_CONTENT" not in raw_log
+        assert "sk-super-secret" not in raw_log
+    finally:
+        _close_log_handlers()
 
 
 def test_stream_answer_events_grade_only_after_complete(conn):
@@ -868,6 +1057,130 @@ def test_stream_http_endpoint_emits_sse(monkeypatch, tmp_path):
     assert content_type.startswith("text/event-stream")
     assert [event["type"] for event in events] == ["start", "delta", "delta", "done"]
     assert events[-1]["result"]["grade"] == "good"
+
+
+def test_stream_http_logs_request_judge_and_completion_events(monkeypatch, tmp_path):
+    db = tmp_path / "stream-log.db"
+    monkeypatch.setattr(bagu, "DB_PATH", db)
+    conn = bagu.get_conn()
+    bagu.init_db(conn)
+    conn.execute(
+        "INSERT INTO questions(category, question, answer) VALUES(?,?,?)",
+        ("A", "PRIVATE_QUESTION", "PRIVATE_REFERENCE"),
+    )
+    conn.commit()
+    sid, rows = bagu.draw(conn, 1)
+    conn.close()
+
+    def fake_stream(prompt, settings):
+        yield "GRADE: good\n"
+        yield "COMMENT: PRIVATE_MODEL_TEXT\nANSWER:"
+
+    log_path = bagu.configure_logging(tmp_path)
+    handler = bagu.make_http_handler(root=tmp_path, stream_fn=fake_stream)
+    server = bagu.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = bagu.urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/answer/stream",
+            data=json.dumps(
+                {
+                    "session_id": sid,
+                    "question_id": rows[0]["id"],
+                    "text": "PRIVATE_USER_ANSWER",
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with bagu.urllib.request.urlopen(request, timeout=5) as response:
+            response.read()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    try:
+        raw_log = log_path.read_text(encoding="utf-8")
+        events = _read_log_events(log_path)
+        names = [event["event"] for event in events]
+        request_ids = {event.get("request_id") for event in events}
+
+        assert names == [
+            "request.start",
+            "judge.context_ready",
+            "judge.graded",
+            "request.done",
+        ]
+        assert len(request_ids) == 1
+        assert None not in request_ids
+        assert events[-1]["status"] == 200
+        assert events[-1]["outcome"] == "ok"
+        assert events[-1]["duration_ms"] >= 0
+        assert "PRIVATE_QUESTION" not in raw_log
+        assert "PRIVATE_REFERENCE" not in raw_log
+        assert "PRIVATE_USER_ANSWER" not in raw_log
+        assert "PRIVATE_MODEL_TEXT" not in raw_log
+    finally:
+        _close_log_handlers()
+
+
+def test_stream_http_logs_handled_model_error(monkeypatch, tmp_path):
+    db = tmp_path / "stream-error-log.db"
+    monkeypatch.setattr(bagu, "DB_PATH", db)
+    conn = bagu.get_conn()
+    bagu.init_db(conn)
+    conn.execute(
+        "INSERT INTO questions(category, question, answer) VALUES(?,?,?)",
+        ("A", "题", "答案"),
+    )
+    conn.commit()
+    sid, rows = bagu.draw(conn, 1)
+    conn.close()
+
+    def broken_stream(prompt, settings):
+        raise bagu.JudgeError("upstream unavailable")
+        yield  # pragma: no cover
+
+    log_path = bagu.configure_logging(tmp_path)
+    handler = bagu.make_http_handler(root=tmp_path, stream_fn=broken_stream)
+    server = bagu.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = bagu.urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/answer/stream",
+            data=json.dumps(
+                {
+                    "session_id": sid,
+                    "question_id": rows[0]["id"],
+                    "text": "回答",
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with bagu.urllib.request.urlopen(request, timeout=5) as response:
+            response.read()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    try:
+        events = _read_log_events(log_path)
+        assert [event["event"] for event in events] == [
+            "request.start",
+            "judge.context_ready",
+            "request.error",
+            "request.done",
+        ]
+        assert events[-2]["error_type"] == "JudgeError"
+        assert events[-1]["status"] == 200
+        assert events[-1]["outcome"] == "error"
+    finally:
+        _close_log_handlers()
 
 
 def test_judge_uses_model_and_reference(conn, tmp_path, monkeypatch):
@@ -1104,8 +1417,9 @@ def test_main_skip_and_grade_rejected(monkeypatch, tmp_path, capsys):
         bagu.main(["grade", sid, "999", "good"])
 
 
-def test_serve_and_main_serve(monkeypatch):
+def test_serve_and_main_serve(monkeypatch, tmp_path):
     called = {}
+    logged = []
 
     class FakeServer:
         def __init__(self, addr, handler):
@@ -1116,8 +1430,20 @@ def test_serve_and_main_serve(monkeypatch):
             called["run"] = True
 
     monkeypatch.setattr(bagu, "ThreadingHTTPServer", FakeServer)
-    bagu.serve(port=8765)
+    monkeypatch.setattr(
+        bagu,
+        "configure_logging",
+        lambda root=None: called.setdefault("log_root", root)
+        or (tmp_path / ".superpowers" / "bagu-server.log"),
+    )
+    monkeypatch.setattr(
+        bagu, "log_event", lambda event, **fields: logged.append((event, fields))
+    )
+    monkeypatch.setattr(bagu, "close_logging", lambda: called.setdefault("log_closed", True))
+    bagu.serve(port=8765, root=tmp_path)
     assert called["addr"] == ("127.0.0.1", 8765) and called["run"]
+    assert called["log_root"] == tmp_path and called["log_closed"]
+    assert [event for event, _ in logged] == ["server.start", "server.stop"]
     ports = []
     monkeypatch.setattr(bagu, "serve", lambda port=8765: ports.append(port))
     bagu.main(["serve", "--port", "9001"])
