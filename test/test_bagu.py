@@ -3,6 +3,7 @@ import datetime as dt
 import json
 import re
 import sqlite3
+import threading
 
 import pytest
 
@@ -45,17 +46,61 @@ def test_get_open_session_none(conn):
 
 
 def test_fetch_questions_h2_with_h3():
-    html = "<h2 id='a'>\\# 索引</h2><h3 id='b'>\\# 什么是B+树</h3><h3 id='c'>为什么不用红黑树</h3><h2 id='d'>事务</h2>"
+    html = (
+        "<h2 id='a'>\\# 索引</h2><p>本节导语</p>"
+        "<h3 id='b'>\\# 什么是B+树</h3><p>B+ 树答案<strong>重点</strong></p>"
+        "<ul><li>索引项一</li><li>索引项二</li></ul>"
+        "<h3 id='c'>为什么不用红黑树</h3><pre><code>SELECT 1;</code></pre>"
+        "<h2 id='d'>事务</h2><p>事务答案</p>"
+    )
     import unittest.mock as mock
 
     with mock.patch.object(bagu.urllib.request, "urlopen") as mu:
         mu.return_value.read.return_value = html.encode()
         qs = bagu.fetch_questions("MySQL", "http://x")
     assert qs == [
-        ("MySQL", "索引｜什么是B+树", "http://x"),
-        ("MySQL", "索引｜为什么不用红黑树", "http://x"),
-        ("MySQL", "事务", "http://x"),
+        (
+            "MySQL",
+            "索引｜什么是B+树",
+            "本节导语\n\nB+ 树答案重点\n\n- 索引项一\n- 索引项二",
+            "http://x#b",
+        ),
+        ("MySQL", "索引｜为什么不用红黑树", "SELECT 1;", "http://x#c"),
+        ("MySQL", "事务", "事务答案", "http://x#d"),
     ]
+
+
+def test_init_db_migrates_existing_questions_with_answer(tmp_path):
+    db = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(db)
+    legacy.execute(
+        """CREATE TABLE questions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            question TEXT NOT NULL,
+            url TEXT DEFAULT '',
+            level INTEGER DEFAULT 0,
+            times_seen INTEGER DEFAULT 0,
+            times_right INTEGER DEFAULT 0,
+            next_due DATE,
+            last_reviewed DATE,
+            UNIQUE(category, question)
+        )"""
+    )
+    legacy.execute(
+        "INSERT INTO questions(category, question, url, level, times_seen) VALUES(?,?,?,?,?)",
+        ("MySQL", "事务", "https://example.com", 2, 3),
+    )
+    legacy.commit()
+    legacy.close()
+
+    migrated = bagu.get_conn(db)
+    bagu.init_db(migrated)
+    row = migrated.execute("SELECT answer, level, times_seen FROM questions").fetchone()
+    migrated.close()
+
+    assert row["answer"] == ""
+    assert row["level"] == 2 and row["times_seen"] == 3
 
 
 def test_draw_prefers_due_and_new(conn):
@@ -211,6 +256,64 @@ def test_import_all_with_mock(monkeypatch, conn):
         n = bagu.import_all(conn)
     assert n == 1
     assert conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 1
+
+
+def test_import_all_refreshes_answer_without_resetting_progress(monkeypatch, conn):
+    conn.execute(
+        """INSERT INTO questions(category, question, answer, url, level, times_seen)
+           VALUES(?,?,?,?,?,?)""",
+        ("A", "旧题", "", "http://old", 2, 3),
+    )
+    conn.commit()
+    monkeypatch.setattr(bagu, "PAGES", {"A": "http://page"})
+    monkeypatch.setattr(
+        bagu,
+        "fetch_questions",
+        lambda cat, url: [
+            ("A", "旧题", "已补全的正文", "http://page#old"),
+            ("A", "新题", "新题正文", "http://page#new"),
+        ],
+    )
+
+    inserted = bagu.import_all(conn)
+
+    old = conn.execute(
+        "SELECT answer, url, level, times_seen FROM questions WHERE question='旧题'"
+    ).fetchone()
+    assert inserted == 1
+    assert old["answer"] == "已补全的正文" and old["url"] == "http://page#old"
+    assert old["level"] == 2 and old["times_seen"] == 3
+
+
+def test_import_all_matches_legacy_question_whitespace_without_duplicate(monkeypatch, conn):
+    conn.execute(
+        """INSERT INTO questions(category, question, answer, url, level, times_seen)
+           VALUES(?,?,?,?,?,?)""",
+        ("MySQL", "索引｜ 联合索引 ABC and C &lt; XXX", "", "http://old", 3, 8),
+    )
+    conn.commit()
+    original_id = conn.execute("SELECT id FROM questions").fetchone()[0]
+    monkeypatch.setattr(bagu, "PAGES", {"MySQL": "http://page"})
+    monkeypatch.setattr(
+        bagu,
+        "fetch_questions",
+        lambda cat, url: [
+            (
+                "MySQL",
+                "索引｜联合索引ABC and C < XXX",
+                "完整正文",
+                "http://page#nosql",
+            )
+        ],
+    )
+
+    inserted = bagu.import_all(conn)
+
+    rows = conn.execute("SELECT * FROM questions").fetchall()
+    assert inserted == 0 and len(rows) == 1
+    assert rows[0]["id"] == original_id and rows[0]["times_seen"] == 8
+    assert rows[0]["question"] == "索引｜联合索引ABC and C < XXX"
+    assert rows[0]["answer"] == "完整正文"
 
 
 def test_main_full_flow(monkeypatch, tmp_path, capsys):
@@ -390,6 +493,30 @@ def test_judge_easy_omits_full_answer(conn):
     assert conn.execute("SELECT times_seen FROM questions WHERE id=?", (qid,)).fetchone()[0] == 1
 
 
+def test_judge_uses_stored_answer_without_fetching_page(monkeypatch, conn):
+    conn.execute(
+        "INSERT INTO questions(category, question, answer, url) VALUES(?,?,?,?)",
+        ("MySQL", "事务是什么？", "题库中的标准答案", "http://reference"),
+    )
+    conn.commit()
+    sid, rows = bagu.draw(conn, 1)
+    monkeypatch.setattr(
+        bagu,
+        "fetch_reference_text",
+        lambda url, limit=4000: (_ for _ in ()).throw(AssertionError("不应抓取网页")),
+    )
+    seen = {}
+
+    def fake_chat(prompt):
+        seen["prompt"] = prompt
+        return "GRADE: hard\nCOMMENT: 需要补充\nANSWER:\n模型生成的答案"
+
+    result = bagu.judge_answer(conn, sid, rows[0]["id"], "用户回答", chat_fn=fake_chat)
+
+    assert "题库中的标准答案" in seen["prompt"]
+    assert result["full_answer"] == "题库中的标准答案"
+
+
 def test_api_draw_and_session(conn, tmp_path):
     _seed(conn, 3)
     code, data, _ = bagu.handle_http("POST", "/api/draw", {"n": 2}, conn, tmp_path)
@@ -479,6 +606,182 @@ def test_openai_chat_and_fetch_reference(monkeypatch):
     assert bagu.fetch_reference_text("") == ""
 
 
+def test_openai_chat_stream_parses_sse(monkeypatch):
+    seen = {}
+
+    class FakeStreamResp:
+        def __iter__(self):
+            chunks = [
+                {"choices": [{"delta": {"content": "GRADE: hard\n"}}]},
+                {"choices": [{"delta": {"content": "COMMENT: 需要补充\nANSWER:\n完整"}}]},
+            ]
+            lines = [f"data: {json.dumps(chunk, ensure_ascii=False)}\n".encode() for chunk in chunks]
+            return iter(lines + [b"data: [DONE]\n"])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        seen["request"] = json.loads(req.data.decode())
+        seen["timeout"] = timeout
+        return FakeStreamResp()
+
+    monkeypatch.setattr(bagu.urllib.request, "urlopen", fake_urlopen)
+
+    chunks = list(
+        bagu._openai_chat_stream(
+            "prompt", {"api_key": "sk-test", "base_url": "http://x/v1", "model": "m"}
+        )
+    )
+
+    assert "".join(chunks) == "GRADE: hard\nCOMMENT: 需要补充\nANSWER:\n完整"
+    assert seen["request"]["stream"] is True
+    assert seen["timeout"] == 60
+
+
+def test_openai_chat_stream_ignores_mimo_reasoning_and_usage(monkeypatch):
+    class FakeMimoStreamResp:
+        def __iter__(self):
+            chunks = [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": None,
+                                "reasoning_content": "内部分析",
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {"delta": {"content": "GRADE: good\nCOMMENT: 通过\nANSWER:"}}
+                    ]
+                },
+                {
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 20,
+                        "total_tokens": 30,
+                    },
+                },
+            ]
+            lines = [f"data: {json.dumps(chunk, ensure_ascii=False)}\n".encode() for chunk in chunks]
+            return iter(lines + [b"data: [DONE]\n"])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(
+        bagu.urllib.request, "urlopen", lambda *args, **kwargs: FakeMimoStreamResp()
+    )
+
+    chunks = list(
+        bagu._openai_chat_stream(
+            "prompt",
+            {"api_key": "sk-test", "base_url": "https://api.xiaomimimo.com/v1", "model": "mimo-v2.5"},
+        )
+    )
+
+    assert chunks == ["GRADE: good\nCOMMENT: 通过\nANSWER:"]
+
+
+def test_stream_answer_events_grade_only_after_complete(conn):
+    conn.execute(
+        "INSERT INTO questions(category, question, answer) VALUES(?,?,?)",
+        ("MySQL", "事务", "题库标准答案"),
+    )
+    conn.commit()
+    sid, rows = bagu.draw(conn, 1)
+
+    def fake_stream(prompt, settings):
+        yield "GRADE: hard\n"
+        yield "COMMENT: 缺少隔离性\nANSWER:\n模型答案"
+
+    events = list(
+        bagu.stream_answer_events(
+            conn,
+            {"session_id": sid, "question_id": rows[0]["id"], "text": "用户回答"},
+            stream_fn=fake_stream,
+        )
+    )
+
+    assert [event["type"] for event in events] == ["start", "delta", "delta", "done"]
+    assert events[-1]["result"]["grade"] == "hard"
+    assert events[-1]["result"]["full_answer"] == "题库标准答案"
+    assert conn.execute("SELECT times_seen FROM questions").fetchone()[0] == 1
+
+
+def test_stream_answer_failure_does_not_grade(conn):
+    _seed(conn, 1)
+    sid, rows = bagu.draw(conn, 1)
+
+    def broken_stream(prompt, settings):
+        yield "GRADE: good\n"
+        raise bagu.JudgeError("流式连接中断")
+
+    with pytest.raises(bagu.JudgeError, match="中断"):
+        list(
+            bagu.stream_answer_events(
+                conn,
+                {"session_id": sid, "question_id": rows[0]["id"], "text": "回答"},
+                stream_fn=broken_stream,
+            )
+        )
+    assert conn.execute("SELECT times_seen FROM questions").fetchone()[0] == 0
+
+
+def test_stream_http_endpoint_emits_sse(monkeypatch, tmp_path):
+    db = tmp_path / "stream.db"
+    monkeypatch.setattr(bagu, "DB_PATH", db)
+    conn = bagu.get_conn()
+    bagu.init_db(conn)
+    _seed(conn, 1)
+    sid, rows = bagu.draw(conn, 1)
+    conn.close()
+
+    def fake_stream(prompt, settings):
+        yield "GRADE: good\n"
+        yield "COMMENT: 通过\nANSWER:"
+
+    handler = bagu.make_http_handler(root=tmp_path, stream_fn=fake_stream)
+    server = bagu.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = bagu.urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/answer/stream",
+            data=json.dumps(
+                {
+                    "session_id": sid,
+                    "question_id": rows[0]["id"],
+                    "text": "用户回答",
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with bagu.urllib.request.urlopen(request, timeout=5) as response:
+            payload = response.read().decode()
+            content_type = response.headers.get("Content-Type")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    events = [json.loads(line[6:]) for line in payload.splitlines() if line.startswith("data: ")]
+    assert content_type.startswith("text/event-stream")
+    assert [event["type"] for event in events] == ["start", "delta", "delta", "done"]
+    assert events[-1]["result"]["grade"] == "good"
+
+
 def test_judge_uses_model_and_reference(conn, tmp_path, monkeypatch):
     conn.execute("INSERT INTO questions(category, question, url) VALUES(?,?,?)", ("A", "题", "http://ref"))
     conn.commit()
@@ -527,6 +830,10 @@ def test_http_more_routes(conn, tmp_path, monkeypatch):
     assert "从 Hermes 导入" not in html
     assert "tab-cfg" not in html
     assert "bagu-draft:" in html
+    assert 'id="judge-progress"' in html
+    assert 'aria-live="polite"' in html
+    assert '"/api/answer/stream"' in html
+    assert "streamAnswer" in html
     code, st, _ = bagu.handle_http("GET", "/api/stats", None, conn, tmp_path)
     assert code == 200 and st["open_session_id"] is None
     code, sess, _ = bagu.handle_http("GET", "/api/session", None, conn, tmp_path)
@@ -832,14 +1139,14 @@ def test_fetch_questions_skips_empty_heading():
     with mock.patch.object(bagu.urllib.request, "urlopen") as mu:
         mu.return_value.read.return_value = html.encode()
         qs = bagu.fetch_questions("OS", "http://x")
-    assert qs == [("OS", "真题", "http://x")]
+    assert qs == [("OS", "真题", "", "http://x")]
     html = "<h2>甲</h2><h2>乙</h2>"
     import unittest.mock as mock
 
     with mock.patch.object(bagu.urllib.request, "urlopen") as mu:
         mu.return_value.read.return_value = html.encode()
         qs = bagu.fetch_questions("OS", "http://x")
-    assert qs == [("OS", "甲", "http://x"), ("OS", "乙", "http://x")]
+    assert qs == [("OS", "甲", "", "http://x"), ("OS", "乙", "", "http://x")]
 
 
 def test_load_settings_bad_active_id_falls_back(tmp_path):
@@ -979,3 +1286,256 @@ def test_delete_non_active_keeps_active_id(tmp_path, monkeypatch):
 def test_get_api_models_test_404(conn, tmp_path):
     code, err, _ = bagu.handle_http("GET", "/api/models/test", None, conn, tmp_path)
     assert code == 404 and err["error"] == "not found"
+
+
+def test_parse_question_csv_accepts_bom_quotes_and_blank_rows():
+    text = (
+        "\ufeffcategory,question,url\n"
+        'MySQL,"事务的 ACID, 分别是什么？",https://example.com/mysql\n'
+        "\n"
+        "Redis,什么是缓存穿透？,\n"
+    )
+    rows = bagu.parse_question_csv(text)
+    assert rows == [
+        {
+            "category": "MySQL",
+            "question": "事务的 ACID, 分别是什么？",
+            "answer": "",
+            "url": "https://example.com/mysql",
+        },
+        {"category": "Redis", "question": "什么是缓存穿透？", "answer": "", "url": ""},
+    ]
+
+
+def test_parse_question_csv_accepts_answer_column_and_multiline_text():
+    text = (
+        "category,question,answer,url\n"
+        'MySQL,什么是事务？,"事务具有 ACID。\n可包含多行。",https://example.com#transaction\n'
+    )
+
+    rows = bagu.parse_question_csv(text)
+
+    assert rows == [
+        {
+            "category": "MySQL",
+            "question": "什么是事务？",
+            "answer": "事务具有 ACID。\n可包含多行。",
+            "url": "https://example.com#transaction",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("category,title,url\nMySQL,事务,x\n", "表头"),
+        ("category,question,url\n,事务,x\n", "第 2 行"),
+        ("category,question,url\nMySQL,,x\n", "第 2 行"),
+        ("category,question,url\n", "没有可导入"),
+    ],
+)
+def test_parse_question_csv_rejects_invalid_files(text, message):
+    with pytest.raises(bagu.QuestionValidationError, match=message):
+        bagu.parse_question_csv(text)
+
+
+def test_import_question_csv_is_atomic_and_skips_duplicates(conn):
+    conn.execute(
+        "INSERT INTO questions(category, question, url) VALUES(?,?,?)",
+        ("MySQL", "已有题", "old"),
+    )
+    conn.commit()
+    text = (
+        "category,question,url\n"
+        "MySQL,已有题,new\n"
+        "Redis,新增题,https://example.com/redis\n"
+        "Redis,新增题,https://example.com/duplicate\n"
+    )
+    result = bagu.import_question_csv(conn, text)
+    assert result == {"total": 3, "inserted": 1, "skipped": 2}
+    assert conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT url FROM questions WHERE category='MySQL' AND question='已有题'"
+    ).fetchone()[0] == "old"
+
+    with pytest.raises(bagu.QuestionValidationError):
+        bagu.import_question_csv(
+            conn,
+            "category,question,url\nOS,不会写入,x\n,坏数据,x\n",
+        )
+    assert conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 2
+
+
+def test_list_questions_supports_search_filter_and_pagination(conn):
+    for cat, question in [
+        ("MySQL", "事务隔离级别"),
+        ("MySQL", "索引失效场景"),
+        ("Redis", "缓存穿透"),
+        ("Redis", "缓存雪崩"),
+    ]:
+        conn.execute(
+            "INSERT INTO questions(category, question) VALUES(?,?)", (cat, question)
+        )
+    conn.commit()
+
+    page = bagu.list_questions(conn, query="缓存", category="Redis", page=1, page_size=1)
+    assert page["total"] == 2
+    assert page["pages"] == 2
+    assert len(page["items"]) == 1
+    assert page["items"][0]["category"] == "Redis"
+    assert page["categories"] == ["MySQL", "Redis"]
+
+
+def test_question_crud_and_search_include_answer(conn):
+    created = bagu.create_question(
+        conn,
+        {
+            "category": "MySQL",
+            "question": "什么是 MVCC？",
+            "answer": "通过 undo log 和 Read View 实现多版本并发控制。",
+            "url": "https://example.com#mvcc",
+        },
+    )
+    assert created["answer"].startswith("通过 undo log")
+
+    listed = bagu.list_questions(conn, query="Read View")
+    assert listed["total"] == 1 and listed["items"][0]["id"] == created["id"]
+
+    updated = bagu.update_question(
+        conn,
+        created["id"],
+        {
+            "category": "MySQL",
+            "question": "什么是 MVCC？",
+            "answer": "更新后的标准答案",
+            "url": "https://example.com#mvcc",
+        },
+    )
+    assert updated["answer"] == "更新后的标准答案"
+
+
+def test_question_public_renders_only_safe_answer_images(conn):
+    created = bagu.create_question(
+        conn,
+        {
+            "category": "MySQL",
+            "question": "安全渲染",
+            "answer": (
+                "<script>alert(1)</script>\n"
+                "[图片：架构图](https://cdn.example.com/a.png)\n"
+                "[图片：危险](javascript:alert(2))"
+            ),
+            "url": "",
+        },
+    )
+
+    rendered = created["answer_html"]
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
+    assert '<img data-answer-image src="https://cdn.example.com/a.png"' in rendered
+    assert 'alt="架构图"' in rendered
+    assert 'loading="lazy"' in rendered and 'referrerpolicy="no-referrer"' in rendered
+    assert 'target="_blank"' in rendered and 'rel="noreferrer"' in rendered
+    assert '<span class="image-fallback hidden" data-image-fallback>' in rendered
+    assert 'src="javascript:' not in rendered
+
+
+def test_question_crud_preserves_progress_and_protects_history(conn):
+    created = bagu.create_question(
+        conn,
+        {"category": "MySQL", "question": "什么是 MVCC？", "url": "https://example.com"},
+    )
+    assert created["id"] > 0 and created["level"] == 0
+    conn.execute(
+        "UPDATE questions SET level=2, times_seen=3, times_right=2 WHERE id=?",
+        (created["id"],),
+    )
+    conn.commit()
+    updated = bagu.update_question(
+        conn,
+        created["id"],
+        {"category": "数据库", "question": "MVCC 的原理是什么？", "url": ""},
+    )
+    assert updated["category"] == "数据库"
+    assert updated["level"] == 2 and updated["times_seen"] == 3
+
+    sid, _ = bagu.draw(conn, 1, "数据库")
+    with pytest.raises(bagu.QuestionInUseError):
+        bagu.delete_question(conn, created["id"])
+    bagu.skip_session(conn, sid)
+
+    extra = bagu.create_question(
+        conn, {"category": "OS", "question": "可删除题", "url": ""}
+    )
+    bagu.delete_question(conn, extra["id"])
+    assert conn.execute("SELECT 1 FROM questions WHERE id=?", (extra["id"],)).fetchone() is None
+
+
+def test_question_crud_rejects_invalid_or_duplicate_data(conn):
+    with pytest.raises(bagu.QuestionValidationError, match="分类"):
+        bagu.create_question(conn, {"category": "", "question": "题", "url": ""})
+    first = bagu.create_question(
+        conn, {"category": "MySQL", "question": "重复题", "url": ""}
+    )
+    with pytest.raises(bagu.QuestionValidationError, match="已存在"):
+        bagu.create_question(conn, {"category": "MySQL", "question": "重复题", "url": "x"})
+    with pytest.raises(LookupError, match="题目不存在"):
+        bagu.update_question(
+            conn, 999999, {"category": "A", "question": "B", "url": ""}
+        )
+    with pytest.raises(LookupError, match="题目不存在"):
+        bagu.delete_question(conn, 999999)
+    assert first["id"] > 0
+
+
+def test_api_questions_crud_import_and_management_page(conn, tmp_path):
+    code, created, _ = bagu.handle_http(
+        "POST",
+        "/api/questions",
+        {"category": "MySQL", "question": "事务是什么？", "url": ""},
+        conn,
+        tmp_path,
+    )
+    assert code == 201 and created["question"] == "事务是什么？"
+
+    code, listed, _ = bagu.handle_http(
+        "GET", "/api/questions?q=事务&cat=MySQL&page=1&page_size=20", None, conn, tmp_path
+    )
+    assert code == 200 and listed["total"] == 1
+
+    code, updated, _ = bagu.handle_http(
+        "PUT",
+        f"/api/questions/{created['id']}",
+        {"category": "数据库", "question": "数据库事务是什么？", "url": "https://example.com"},
+        conn,
+        tmp_path,
+    )
+    assert code == 200 and updated["category"] == "数据库"
+
+    code, imported, _ = bagu.handle_http(
+        "POST",
+        "/api/questions/import",
+        {"content": "category,question,url\nRedis,缓存穿透,\n"},
+        conn,
+        tmp_path,
+    )
+    assert code == 200 and imported["inserted"] == 1
+
+    code, deleted, _ = bagu.handle_http(
+        "DELETE", f"/api/questions/{created['id']}", None, conn, tmp_path
+    )
+    assert code == 200 and deleted["deleted"] is True
+
+    code, err, _ = bagu.handle_http(
+        "POST", "/api/questions/import", {"content": "bad"}, conn, tmp_path
+    )
+    assert code == 400 and "表头" in err["error"]
+
+    code, html, _ = bagu.handle_http("GET", "/", None, conn, tmp_path)
+    assert code == 200
+    assert 'id="btn-question-bank"' in html
+    assert 'id="view-questions"' in html
+    assert "category,question,answer,url" in html
+    assert 'id="qe-answer"' in html
+    assert "查看答案" in html
+    assert "bindAnswerImageFallbacks" in html
+    assert "item.answer_html" in html

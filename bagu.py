@@ -2,14 +2,19 @@
 # -*- coding: utf-8 -*-
 """八股抽问系统 - SQLite + 艾宾浩斯复习调度"""
 import argparse
+import csv
 import datetime as dt
+import html as html_lib
+import io
 import json
 import os
 import re
 import secrets
 import sqlite3
 import sys
+import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -29,6 +34,13 @@ PAGES = {
 # SM-2简化版：等级 -> 下次间隔天数
 GRADE_INTERVALS = {"again": 0, "hard": 1, "good": 3, "easy": 7}
 LEVEL_MULT = {0: 1, 1: 1, 2: 2, 3: 4}  # 连续答对倍率
+QUESTION_IMPORT_FIELDS = ["category", "question", "answer", "url"]
+LEGACY_QUESTION_IMPORT_FIELDS = ["category", "question", "url"]
+MAX_IMPORT_BYTES = 2 * 1024 * 1024
+MAX_IMPORT_ROWS = 5000
+ANSWER_IMAGE_RE = re.compile(
+    r"\[图片[：:](?P<alt>[^\]\r\n]*)\]\((?P<url>https?://[^\s)]+)\)", re.I
+)
 
 
 def get_conn(db_path=None):
@@ -43,6 +55,7 @@ def init_db(conn):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             category TEXT NOT NULL,
             question TEXT NOT NULL,
+            answer TEXT DEFAULT '',
             url TEXT DEFAULT '',
             level INTEGER DEFAULT 0,
             times_seen INTEGER DEFAULT 0,
@@ -52,6 +65,9 @@ def init_db(conn):
             UNIQUE(category, question)
         )"""
     )
+    question_columns = {row[1] for row in conn.execute("PRAGMA table_info(questions)")}
+    if "answer" not in question_columns:
+        conn.execute("ALTER TABLE questions ADD COLUMN answer TEXT DEFAULT ''")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
@@ -84,52 +100,418 @@ def get_open_session(conn):
     return conn.execute("SELECT * FROM sessions WHERE status='open' LIMIT 1").fetchone()
 
 
-def fetch_questions(cat, url):
-    """抓取页面，提取 h2 小节名 + h3 问题标题"""
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
+class _AnswerTextParser(HTMLParser):
+    """把题目章节 HTML 转成可读纯文本，并保留列表、代码和图片来源。"""
+
+    def __init__(self, base_url):
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.parts = []
+        self.in_pre = False
+
+    def _break(self, count=1):
+        self.parts.append("\n" * count)
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        attr_map = dict(attrs)
+        if tag in {"p", "div", "blockquote", "table", "tr", "h4", "h5", "h6"}:
+            self._break(2)
+        elif tag == "br":
+            self._break()
+        elif tag == "li":
+            self._break()
+            self.parts.append("- ")
+        elif tag == "pre":
+            self._break(2)
+            self.in_pre = True
+        elif tag == "img":
+            src = urllib.parse.urljoin(self.base_url, attr_map.get("src", ""))
+            alt = (attr_map.get("alt") or "图片").strip()
+            if src:
+                self.parts.append(f"[图片：{alt}]({src})")
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag == "pre":
+            self.in_pre = False
+            self._break(2)
+        elif tag in {"p", "div", "blockquote", "table", "tr", "h4", "h5", "h6"}:
+            self._break(2)
+
+    def handle_data(self, data):
+        if self.in_pre:
+            self.parts.append(data)
+        else:
+            self.parts.append(re.sub(r"\s+", " ", data))
+
+    def text(self):
+        raw = html_lib.unescape("".join(self.parts)).replace("\xa0", " ")
+        lines = [line.strip() for line in raw.splitlines()]
+        cleaned = []
+        for line in lines:
+            if line:
+                cleaned.append(line)
+            elif cleaned and cleaned[-1] != "":
+                cleaned.append("")
+        return "\n".join(cleaned).strip()
+
+
+def _html_text(fragment, base_url):
+    parser = _AnswerTextParser(base_url)
+    parser.feed(fragment)
+    parser.close()
+    return parser.text()
+
+
+def _heading_text(fragment, base_url):
+    return _html_text(fragment, base_url).replace("\\#", "").strip().lstrip("#").strip()
+
+
+def _anchored_url(url, attrs):
+    match = re.search(r"\bid\s*=\s*(['\"])(.*?)\1", attrs, re.I | re.S)
+    if not match or not match.group(2).strip():
+        return url
+    base, _ = urllib.parse.urldefrag(url)
+    return f"{base}#{urllib.parse.quote(match.group(2).strip(), safe='-._~')}"
+
+
+def parse_question_page(cat, url, html):
+    """按 h2 分组、h3 分题，返回每道题对应的正文和锚点链接。"""
+    heading_re = re.compile(
+        r"<h(?P<level>[23])\b(?P<attrs>[^>]*)>(?P<title>.*?)</h(?P=level)\s*>",
+        re.I | re.S,
+    )
+    headings = list(heading_re.finditer(html))
+    if not headings:
+        return []
+    footer = re.search(r"<footer\b[^>]*class=['\"][^'\"]*page-edit", html, re.I)
+    content_end = footer.start() if footer else len(html)
     questions = []
     section = ""
-    pending_h2 = None  # 记录上一个h2，若无h3子题则h2本身即题目
-    # VuePress 渲染后的正文区
-    for m in re.finditer(r'<h[23][^>]*>(.*?)</h[23]>', html, re.S):
-        tag = m.group(0)
-        text = re.sub(r"<[^>]+>", "", m.group(1))
-        text = text.replace("\\#", "").strip().lstrip("#").strip()
-        if not text:
+    section_intro = ""
+    first_h3_in_section = False
+    for index, heading in enumerate(headings):
+        level = heading.group("level")
+        title = _heading_text(heading.group("title"), url)
+        if not title:
             continue
-        if tag.startswith("<h2"):
-            if pending_h2:
-                questions.append((cat, pending_h2, url))
-            pending_h2 = text
-            section = text
-        else:
-            q = f"{section}｜{text}" if section else text
-            q = q.replace("｜#", "｜")
-            questions.append((cat, q, url))
-            pending_h2 = None
-    if pending_h2:
-        questions.append((cat, pending_h2, url))
+        next_start = headings[index + 1].start() if index + 1 < len(headings) else content_end
+        body_html = html[heading.end() : next_start]
+        if level == "2":
+            section = title
+            next_h2 = next(
+                (i for i in range(index + 1, len(headings)) if headings[i].group("level") == "2"),
+                len(headings),
+            )
+            has_h3 = any(headings[i].group("level") == "3" for i in range(index + 1, next_h2))
+            if has_h3:
+                section_intro = _html_text(body_html, url)
+                first_h3_in_section = True
+            else:
+                questions.append(
+                    (cat, title, _html_text(body_html, url), _anchored_url(url, heading.group("attrs")))
+                )
+                section_intro = ""
+                first_h3_in_section = False
+            continue
+        question = f"{section}｜{title}" if section else title
+        question = question.replace("｜#", "｜")
+        answer = _html_text(body_html, url)
+        if first_h3_in_section and section_intro:
+            answer = f"{section_intro}\n\n{answer}".strip()
+        first_h3_in_section = False
+        questions.append(
+            (cat, question, answer, _anchored_url(url, heading.group("attrs")))
+        )
     return questions
+
+
+def fetch_questions(cat, url):
+    """抓取页面，提取题目、对应正文与标题锚点。"""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
+    return parse_question_page(cat, url, html)
+
+
+def _question_identity(category, question):
+    normalized = html_lib.unescape(question)
+    return category.casefold(), re.sub(r"\s+", "", normalized).casefold()
 
 
 def import_all(conn):
     total_new = 0
+    total_updated = 0
+    existing = {}
+    for row in conn.execute("SELECT id, category, question, answer, url FROM questions"):
+        existing.setdefault(_question_identity(row["category"], row["question"]), []).append(row)
     for cat, url in PAGES.items():
         try:
             qs = fetch_questions(cat, url)
         except Exception as e:  # noqa: BLE001
             print(f"[WARN] {cat} 抓取失败: {e}")
             continue
-        for c, q, u in qs:
+        category_new = 0
+        category_updated = 0
+        for c, q, answer, u in qs:
+            matches = existing.get(_question_identity(c, q), [])
+            exact = [row for row in matches if row["category"] == c and row["question"] == q]
+            old = exact[0] if len(exact) == 1 else matches[0] if len(matches) == 1 else None
+            if old:
+                next_answer = answer or old["answer"] or ""
+                if (
+                    q != old["question"]
+                    or next_answer != (old["answer"] or "")
+                    or u != (old["url"] or "")
+                ):
+                    conn.execute(
+                        "UPDATE questions SET question=?, answer=?, url=? WHERE id=?",
+                        (q, next_answer, u, old["id"]),
+                    )
+                    category_updated += 1
+                    total_updated += 1
+                continue
             cur = conn.execute(
-                "INSERT OR IGNORE INTO questions(category, question, url) VALUES(?,?,?)",
-                (c, q, u),
+                """INSERT OR IGNORE INTO questions(category, question, answer, url)
+                   VALUES(?,?,?,?)""",
+                (c, q, answer, u),
             )
             total_new += cur.rowcount
-        print(f"[OK] {cat}: 累计新增 {total_new}")
+            category_new += cur.rowcount
+            if cur.rowcount:
+                row = conn.execute(
+                    "SELECT id, category, question, answer, url FROM questions WHERE id=?",
+                    (cur.lastrowid,),
+                ).fetchone()
+                existing.setdefault(_question_identity(c, q), []).append(row)
+        print(f"[OK] {cat}: 新增 {category_new}，补全/更新 {category_updated}")
     conn.commit()
+    print(f"[OK] 合计: 新增 {total_new}，补全/更新 {total_updated}")
     return total_new
+
+
+class QuestionValidationError(Exception):
+    pass
+
+
+class QuestionInUseError(Exception):
+    pass
+
+
+def _clean_question(data):
+    if not isinstance(data, dict):
+        raise QuestionValidationError("题目数据必须是对象")
+    values = {}
+    for key in QUESTION_IMPORT_FIELDS:
+        value = data.get(key, "")
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            raise QuestionValidationError(f"{key} 必须是文本")
+        values[key] = value.strip()
+    if not values["category"]:
+        raise QuestionValidationError("分类不能为空")
+    if not values["question"]:
+        raise QuestionValidationError("题目不能为空")
+    if len(values["category"]) > 100:
+        raise QuestionValidationError("分类不能超过 100 个字符")
+    if len(values["question"]) > 2000:
+        raise QuestionValidationError("题目不能超过 2000 个字符")
+    if len(values["answer"]) > 100000:
+        raise QuestionValidationError("答案不能超过 100000 个字符")
+    if len(values["url"]) > 2048:
+        raise QuestionValidationError("URL 不能超过 2048 个字符")
+    return values
+
+
+def parse_question_csv(text):
+    """解析 UTF-8 CSV；全部行通过校验后才返回。"""
+    if not isinstance(text, str):
+        raise QuestionValidationError("导入内容必须是 UTF-8 文本")
+    if len(text.encode("utf-8")) > MAX_IMPORT_BYTES:
+        raise QuestionValidationError("导入文件不能超过 2 MiB")
+    source = text.lstrip("\ufeff")
+    try:
+        reader = csv.DictReader(io.StringIO(source, newline=""), strict=True)
+        if reader.fieldnames not in (QUESTION_IMPORT_FIELDS, LEGACY_QUESTION_IMPORT_FIELDS):
+            expected = ",".join(QUESTION_IMPORT_FIELDS)
+            raise QuestionValidationError(f"CSV 表头必须是 {expected}")
+        rows = []
+        for raw in reader:
+            if raw is None or all(not str(v or "").strip() for v in raw.values()):
+                continue
+            if None in raw:
+                raise QuestionValidationError(f"第 {reader.line_num} 行列数超过表头")
+            try:
+                if "answer" not in raw:
+                    raw["answer"] = ""
+                rows.append(_clean_question(raw))
+            except QuestionValidationError as e:
+                raise QuestionValidationError(f"第 {reader.line_num} 行：{e}") from e
+            if len(rows) > MAX_IMPORT_ROWS:
+                raise QuestionValidationError(f"一次最多导入 {MAX_IMPORT_ROWS} 道题")
+    except csv.Error as e:
+        raise QuestionValidationError(f"CSV 无法解析：{e}") from e
+    if not rows:
+        raise QuestionValidationError("没有可导入的题目")
+    return rows
+
+
+def import_question_csv(conn, text):
+    rows = parse_question_csv(text)
+    inserted = 0
+    try:
+        for item in rows:
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO questions(category, question, answer, url)
+                   VALUES(?,?,?,?)""",
+                (item["category"], item["question"], item["answer"], item["url"]),
+            )
+            inserted += cur.rowcount
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {"total": len(rows), "inserted": inserted, "skipped": len(rows) - inserted}
+
+
+def render_answer_html(answer):
+    """只渲染抓取器生成的 HTTP(S) 图片标记，其余内容全部转义。"""
+    source = str(answer or "")
+    parts = []
+    cursor = 0
+    for match in ANSWER_IMAGE_RE.finditer(source):
+        parsed = urllib.parse.urlsplit(match.group("url"))
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            continue
+        parts.append(html_lib.escape(source[cursor : match.start()]))
+        url = html_lib.escape(match.group("url"), quote=True)
+        alt_text = match.group("alt").strip() or "参考图片"
+        alt = html_lib.escape(alt_text, quote=True)
+        parts.append(
+            '<figure class="answer-media">'
+            f'<a class="answer-image-link" href="{url}" target="_blank" '
+            f'rel="noreferrer" aria-label="打开原图：{alt}">'
+            f'<img data-answer-image src="{url}" alt="{alt}" loading="lazy" '
+            'decoding="async" referrerpolicy="no-referrer">'
+            '<span class="image-fallback hidden" data-image-fallback>'
+            '图片加载失败，点击打开原图</span></a>'
+            f'<figcaption>{alt}</figcaption></figure>'
+        )
+        cursor = match.end()
+    parts.append(html_lib.escape(source[cursor:]))
+    return "".join(parts)
+
+
+def _question_public(row):
+    answer = row["answer"] or ""
+    return {
+        "id": row["id"],
+        "category": row["category"],
+        "question": row["question"],
+        "answer": answer,
+        "answer_html": render_answer_html(answer),
+        "url": row["url"] or "",
+        "level": row["level"],
+        "times_seen": row["times_seen"],
+        "times_right": row["times_right"],
+        "next_due": row["next_due"],
+        "last_reviewed": row["last_reviewed"],
+    }
+
+
+def _like_literal(value):
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def list_questions(conn, query="", category="", page=1, page_size=20):
+    try:
+        page = int(page)
+        page_size = int(page_size)
+    except (TypeError, ValueError) as e:
+        raise QuestionValidationError("分页参数必须是整数") from e
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise QuestionValidationError("page 必须至少为 1，page_size 必须在 1 到 100 之间")
+    query = str(query or "").strip()
+    category = str(category or "").strip()
+    where = []
+    params = []
+    if query:
+        needle = f"%{_like_literal(query)}%"
+        where.append(
+            """(question LIKE ? ESCAPE '\\' OR category LIKE ? ESCAPE '\\'
+                OR answer LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\')"""
+        )
+        params.extend([needle, needle, needle, needle])
+    if category:
+        where.append("category = ?")
+        params.append(category)
+    clause = " WHERE " + " AND ".join(where) if where else ""
+    total = conn.execute(f"SELECT COUNT(*) FROM questions{clause}", params).fetchone()[0]
+    offset = (page - 1) * page_size
+    items = conn.execute(
+        f"SELECT * FROM questions{clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+        params + [page_size, offset],
+    ).fetchall()
+    categories = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT category FROM questions ORDER BY category COLLATE NOCASE"
+        )
+    ]
+    pages = (total + page_size - 1) // page_size if total else 0
+    return {
+        "items": [_question_public(r) for r in items],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": pages,
+        "categories": categories,
+    }
+
+
+def create_question(conn, data):
+    item = _clean_question(data)
+    try:
+        cur = conn.execute(
+            "INSERT INTO questions(category, question, answer, url) VALUES(?,?,?,?)",
+            (item["category"], item["question"], item["answer"], item["url"]),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        raise QuestionValidationError("同一分类下已存在相同题目") from e
+    row = conn.execute("SELECT * FROM questions WHERE id=?", (cur.lastrowid,)).fetchone()
+    return _question_public(row)
+
+
+def update_question(conn, qid, data):
+    if not conn.execute("SELECT 1 FROM questions WHERE id=?", (qid,)).fetchone():
+        raise LookupError(f"题目不存在: id={qid}")
+    item = _clean_question(data)
+    try:
+        conn.execute(
+            "UPDATE questions SET category=?, question=?, answer=?, url=? WHERE id=?",
+            (item["category"], item["question"], item["answer"], item["url"], qid),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        raise QuestionValidationError("同一分类下已存在相同题目") from e
+    return _question_public(conn.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone())
+
+
+def delete_question(conn, qid):
+    if not conn.execute("SELECT 1 FROM questions WHERE id=?", (qid,)).fetchone():
+        raise LookupError(f"题目不存在: id={qid}")
+    used = conn.execute(
+        "SELECT 1 FROM session_items WHERE question_id=? LIMIT 1", (qid,)
+    ).fetchone()
+    if used:
+        raise QuestionInUseError("题目已有复习记录，不能删除；可以修改题目内容")
+    conn.execute("DELETE FROM questions WHERE id=?", (qid,))
+    conn.commit()
+    return True
 
 
 class SessionOpenError(Exception):
@@ -646,6 +1028,80 @@ def _openai_chat(prompt, settings):
         raise JudgeError("模型返回无法解析") from e
 
 
+def _openai_chat_stream(prompt, settings):
+    """调用 OpenAI 兼容 SSE 接口，逐段产出文本。"""
+    key = (settings or {}).get("api_key") or ""
+    if not key:
+        raise JudgeError("未配置模型")
+    url = (settings.get("base_url") or "").rstrip("/") + "/chat/completions"
+    body = json.dumps(
+        {
+            "model": settings.get("model") or "deepseek-chat",
+            "temperature": 0.2,
+            "stream": True,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Authorization": f"Bearer {key}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            fallback_lines = []
+            saw_sse = False
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", "ignore").strip()
+                if not line:
+                    continue
+                if not line.startswith("data:"):
+                    fallback_lines.append(line)
+                    continue
+                saw_sse = True
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    payload = json.loads(data)
+                    if payload.get("error"):
+                        error = payload["error"]
+                        message = error.get("message") if isinstance(error, dict) else str(error)
+                        raise JudgeError(f"模型调用失败: {message}")
+                    choices = payload.get("choices")
+                    if choices == [] and payload.get("usage") is not None:
+                        continue
+                    if not isinstance(choices, list) or not choices:
+                        raise KeyError("choices")
+                    delta = choices[0].get("delta")
+                    if not isinstance(delta, dict):
+                        raise KeyError("delta")
+                    content = delta.get("content")
+                except JudgeError:
+                    raise
+                except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+                    raise JudgeError("模型流式返回无法解析") from e
+                if isinstance(content, str) and content:
+                    yield content
+            if not saw_sse and fallback_lines:
+                try:
+                    payload = json.loads("".join(fallback_lines))
+                    content = payload["choices"][0]["message"]["content"]
+                except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+                    raise JudgeError("模型流式返回无法解析") from e
+                if isinstance(content, str) and content:
+                    yield content
+    except JudgeError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise JudgeError(f"模型调用失败: {e}") from e
+
+
 def fetch_reference_text(url, limit=4000):
     if not url:
         return ""
@@ -661,16 +1117,15 @@ def fetch_reference_text(url, limit=4000):
     return text[:limit]
 
 
-def judge_answer(conn, session_id, qid, user_text, chat_fn=None, root=None):
+def _judge_context(conn, session_id, qid, user_text, root=None, require_model=True):
     row = conn.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
     if not row:
         raise GradeRejected(f"题目不存在: id={qid}")
     settings = load_settings(root)
-    if chat_fn is None:
-        if not settings.get("api_key"):
-            raise JudgeError("未配置模型")
-        chat_fn = lambda prompt: _openai_chat(prompt, settings)
-    ref = fetch_reference_text(row["url"] or "")
+    if require_model and not settings.get("api_key"):
+        raise JudgeError("未配置模型")
+    stored_answer = row["answer"] or ""
+    ref = stored_answer or fetch_reference_text(row["url"] or "")
     prompt = (
         "你是面试官。根据用户回答给出评级，必须严格用下面格式，不要输出其它内容：\n"
         "GRADE: again|hard|good|easy\n"
@@ -684,12 +1139,62 @@ def judge_answer(conn, session_id, qid, user_text, chat_fn=None, root=None):
         prompt += f"\n参考资料（可能不完整）：{ref}\n"
     else:
         prompt += "\n（未拉到参考页，按面试口径作答）\n"
-    raw = chat_fn(prompt)
+    return settings, stored_answer, prompt
+
+
+def _finish_judge(conn, session_id, qid, raw, stored_answer):
     parsed = parse_judge_output(raw)
     if parsed["grade"] == "easy":
         parsed["full_answer"] = ""
+    elif stored_answer:
+        parsed["full_answer"] = stored_answer
+    parsed["full_answer_html"] = render_answer_html(parsed["full_answer"])
     grade(conn, session_id, qid, parsed["grade"])
     return parsed
+
+
+def judge_answer(conn, session_id, qid, user_text, chat_fn=None, root=None):
+    settings, stored_answer, prompt = _judge_context(
+        conn, session_id, qid, user_text, root=root, require_model=chat_fn is None
+    )
+    if chat_fn is None:
+        raw = _openai_chat(prompt, settings)
+    else:
+        raw = chat_fn(prompt)
+    return _finish_judge(conn, session_id, qid, raw, stored_answer)
+
+
+def stream_answer_events(conn, body, root=None, stream_fn=None):
+    body = body or {}
+    session_id = body.get("session_id")
+    qid = body.get("question_id")
+    user_text = (body.get("text") or "").strip()
+    if not session_id or qid is None or not user_text:
+        raise ValueError("缺少 session_id / question_id / text")
+    try:
+        qid = int(qid)
+    except (TypeError, ValueError) as e:
+        raise ValueError("question_id 必须是整数") from e
+    settings, stored_answer, prompt = _judge_context(
+        conn,
+        session_id,
+        qid,
+        user_text,
+        root=root,
+        require_model=stream_fn is None,
+    )
+    yield {"type": "start"}
+    chunks = []
+    fn = stream_fn or _openai_chat_stream
+    for chunk in fn(prompt, settings):
+        if not isinstance(chunk, str) or not chunk:
+            continue
+        chunks.append(chunk)
+        yield {"type": "delta", "text": chunk}
+    if not chunks:
+        raise JudgeError("模型未返回内容")
+    result = _finish_judge(conn, session_id, qid, "".join(chunks), stored_answer)
+    yield {"type": "done", "result": result}
 
 
 def _q_public(row, grade_v=None):
@@ -729,6 +1234,9 @@ def handle_http(method, path, body, conn, root=None):
     root = _settings_root(root)
     body = body or {}
     json_ct = "application/json"
+    parsed_url = urllib.parse.urlsplit(path)
+    query_args = urllib.parse.parse_qs(parsed_url.query)
+    path = parsed_url.path
     if method == "GET" and path in ("/", "/index.html"):
         html_path = Path(__file__).parent / "web" / "index.html"
         if not html_path.is_file():
@@ -741,6 +1249,44 @@ def handle_http(method, path, body, conn, root=None):
         return 200, s, json_ct
     if method == "GET" and path == "/api/session":
         return 200, _session_payload(conn), json_ct
+    if method == "GET" and path == "/api/questions":
+        try:
+            payload = list_questions(
+                conn,
+                query=(query_args.get("q") or [""])[0],
+                category=(query_args.get("cat") or [""])[0],
+                page=(query_args.get("page") or [1])[0],
+                page_size=(query_args.get("page_size") or [20])[0],
+            )
+        except QuestionValidationError as e:
+            return 400, {"error": str(e)}, json_ct
+        return 200, payload, json_ct
+    if method == "POST" and path == "/api/questions/import":
+        try:
+            payload = import_question_csv(conn, body.get("content", ""))
+        except QuestionValidationError as e:
+            return 400, {"error": str(e)}, json_ct
+        return 200, payload, json_ct
+    if method == "POST" and path == "/api/questions":
+        try:
+            payload = create_question(conn, body)
+        except QuestionValidationError as e:
+            return 400, {"error": str(e)}, json_ct
+        return 201, payload, json_ct
+
+    question_match = re.fullmatch(r"/api/questions/(\d+)", path)
+    if question_match:
+        qid = int(question_match.group(1))
+        try:
+            if method == "PUT":
+                return 200, update_question(conn, qid, body), json_ct
+            if method == "DELETE":
+                delete_question(conn, qid)
+                return 200, {"deleted": True, "id": qid}, json_ct
+        except QuestionInUseError as e:
+            return 409, {"error": str(e)}, json_ct
+        except (QuestionValidationError, LookupError) as e:
+            return 400, {"error": str(e)}, json_ct
     if method == "POST" and path == "/api/draw":
         try:
             n = int(body.get("n") or 5)
@@ -830,7 +1376,9 @@ def handle_http(method, path, body, conn, root=None):
     return 404, {"error": "not found"}, json_ct
 
 
-def serve(host="127.0.0.1", port=8765):
+def make_http_handler(root=None, stream_fn=None):
+    root = _settings_root(root)
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -850,14 +1398,51 @@ def serve(host="127.0.0.1", port=8765):
             self.wfile.write(raw)
 
         def _dispatch(self, method, body):
-            path = self.path.split("?", 1)[0]
             conn = get_conn()
             try:
                 init_db(conn)
-                code, payload, ctype = handle_http(method, path, body, conn)
+                code, payload, ctype = handle_http(
+                    method, self.path, body, conn, root=root
+                )
             finally:
                 conn.close()
             self._write(code, payload, ctype)
+
+        def _write_sse(self, payload):
+            raw = (
+                "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+            ).encode("utf-8")
+            try:
+                self.wfile.write(raw)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return False
+            return True
+
+        def _stream_answer(self, body):
+            conn = get_conn()
+            try:
+                init_db(conn)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Accel-Buffering", "no")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.close_connection = True
+                try:
+                    events = stream_answer_events(
+                        conn, body, root=root, stream_fn=stream_fn
+                    )
+                    for event in events:
+                        if not self._write_sse(event):
+                            return
+                except (JudgeError, GradeRejected, ValueError, LookupError) as e:
+                    self._write_sse({"type": "error", "error": str(e)})
+                except Exception:  # noqa: BLE001
+                    self._write_sse({"type": "error", "error": "评卷失败"})
+            finally:
+                conn.close()
 
         def do_GET(self):
             self._dispatch("GET", None)
@@ -870,7 +1455,10 @@ def serve(host="127.0.0.1", port=8765):
             except json.JSONDecodeError:
                 self._write(400, {"error": "JSON 无法解析"}, "application/json")
                 return
-            self._dispatch("POST", body)
+            if urllib.parse.urlsplit(self.path).path == "/api/answer/stream":
+                self._stream_answer(body)
+            else:
+                self._dispatch("POST", body)
 
         def do_PUT(self):
             n = int(self.headers.get("Content-Length") or 0)
@@ -885,7 +1473,11 @@ def serve(host="127.0.0.1", port=8765):
         def do_DELETE(self):
             self._dispatch("DELETE", None)
 
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    return Handler
+
+
+def serve(host="127.0.0.1", port=8765):
+    httpd = ThreadingHTTPServer((host, port), make_http_handler())
     print(f"八股抽问: http://{host}:{port}")
     httpd.serve_forever()
 

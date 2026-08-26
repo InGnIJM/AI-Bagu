@@ -11,6 +11,7 @@
 - 全局最多 1 条进行中会话；同一题只认第一次评分
 - CLI：`draw` / `grade` / `skip` / `stats`
 - 本机网页：作答 + OpenAI 兼容模型评卷
+- 题库管理：搜索、分类筛选、新增、修改、删除未使用题目、CSV 批量导入
 - Hermes 聊天：由 Hermes 自己的 AI 评卷，再调用本仓库 CLI 落库
 
 ## 环境
@@ -25,7 +26,7 @@
 
 ```bash
 python bagu.py init
-python bagu.py import          # 抓题入库（已有库可跳过）
+python bagu.py import          # 抓取题目和对应正文，无损补全已有库
 python bagu.py stats
 python bagu.py serve           # 打开 http://127.0.0.1:8765
 ```
@@ -37,7 +38,7 @@ python bagu.py serve           # 打开 http://127.0.0.1:8765
 | 命令 | 作用 |
 | --- | --- |
 | `python bagu.py init` | 初始化 SQLite（`bagu.db`） |
-| `python bagu.py import` | 抓题入库，已有题 `INSERT OR IGNORE` |
+| `python bagu.py import` | 按章节抓取题目与答案；已有题更新正文/锚点且保留复习进度 |
 | `python bagu.py stats` | 总题 / 今日到期 / 已掌握 / 分类进度 |
 | `python bagu.py list` | 列出全部题目 |
 | `python bagu.py draw -n 5 [--cat MySQL]` | 开一轮会话并打印题目 |
@@ -81,10 +82,34 @@ python bagu.py serve --port 8765
 打开 http://127.0.0.1:8765 （只监听本机）。
 
 - 空闲：抽 5 题；点分类名 = `draw --cat`
-- 作答：用自己的话描述 → 模型评判 → 自动 `grade`
+- 作答：用自己的话描述 → 显示分析动画与耗时 → 流式展示评判内容 → 自动 `grade`
 - 非 `easy` 才展开完整答案
-- 模型失败不落库，可重试
+- 模型失败、断流或结果解析失败都不落库，可保留草稿重试
 - 「结束本轮 skip」关闭会话
+
+## 题库管理与 CSV 导入
+
+点击页面右上角「题库管理」进入管理页。支持按题目、答案、分类或 URL 搜索，可直接展开答案正文，正文中的图片会安全渲染并可点击打开原图；也可打开带题目锚点的来源链接。为保留复习历史，已经进入过会话的题目不能删除，但仍可修改题干、答案、分类和来源 URL。
+
+批量导入文件必须是 UTF-8 CSV，固定表头如下：
+
+```csv
+category,question,answer,url
+MySQL,什么是事务？,事务是一组不可分割的数据库操作,https://example.com/mysql#transaction
+Redis,什么是缓存穿透？,,
+```
+
+- `category`：分类，必填，最多 100 个字符
+- `question`：题目，必填，最多 2000 个字符
+- `answer`：参考答案正文，可空，最多 100000 个字符
+- `url`：来源链接，可空，最多 2048 个字符
+- 仍兼容旧表头 `category,question,url`，导入后答案留空
+- 支持带 BOM、双引号和字段内逗号
+- 单文件不超过 2 MiB，一次最多 5000 道题
+- 先校验整份文件；任一行错误则整批不写入
+- 相同 `category + question` 视为重复并跳过，不覆盖已有题目
+
+管理页可直接下载 CSV 模板。
 
 ## 模型配置（仅网页评卷）
 
@@ -121,8 +146,14 @@ Hermes 路径**不**调用本仓库配置的 LLM。禁止：不带 session 的 g
 | GET | `/` | 单页 `web/index.html` |
 | GET | `/api/stats` | 看板；含 `open_session_id` |
 | GET | `/api/session` | 当前 open 会话及题目 |
+| GET | `/api/questions` | 分页查询；支持 `q`、`cat`、`page`、`page_size` |
+| POST | `/api/questions` | 新增题目 |
+| PUT | `/api/questions/:id` | 修改题目，不重置复习进度 |
+| DELETE | `/api/questions/:id` | 删除未进入过会话的题目 |
+| POST | `/api/questions/import` | 解析并导入 UTF-8 CSV 文本 |
 | POST | `/api/draw` | `{n, cat?}`；已有会话返回 409 |
 | POST | `/api/answer` | `{session_id, question_id, text}` → 调模型 → grade |
+| POST | `/api/answer/stream` | 同上；SSE 推送 `start` / `delta` / `done` / `error`，完整解析后才 grade |
 | POST | `/api/skip` | 关闭本轮 |
 | GET | `/api/models` | 模型列表 + `active_id` + 掩码 Key + 预设 |
 | POST | `/api/models` | 新建（服务端先测再写） |

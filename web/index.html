@@ -41,12 +41,20 @@
       outline: 3px solid var(--color-ring); outline-offset: 2px;
     }
     button:disabled { opacity: .45; cursor: not-allowed; }
-    .app { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+    .app { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; transition: max-width .2s ease; }
+    .app.wide { max-width: 1080px; }
     .topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
     .brand { display: flex; align-items: center; gap: 12px; }
     .mark { width: 40px; height: 40px; border-radius: 12px; background: var(--color-primary); color: #fff; display: grid; place-items: center; }
     .brand h1 { font-size: 18px; font-weight: 600; }
     .brand p { font-size: 13px; color: var(--color-muted-fg); }
+    .top-actions { display: flex; gap: 8px; }
+    .nav-btn {
+      min-height: 44px; padding: 0 16px; display: inline-flex; align-items: center; gap: 8px;
+      border: 1px solid var(--color-border); border-radius: var(--radius-btn);
+      background: var(--color-card); color: var(--color-primary); font-weight: 600;
+    }
+    .nav-btn:hover { background: var(--color-muted); }
     .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 20px; }
     .stat { background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: 16px; }
     .stat .k { font-size: 12px; color: var(--color-muted-fg); font-weight: 500; }
@@ -68,6 +76,29 @@
     .cta:hover:not(:disabled) { background: var(--color-primary-hover); }
     .ghost { width: 100%; min-height: 44px; margin-top: 8px; border: 0; background: transparent; color: var(--color-muted-fg); border-radius: var(--radius-btn); }
     .hidden { display: none !important; }
+    .judge-progress {
+      margin-top: 16px; padding: 16px; border: 1px solid #DDD6FE; border-radius: var(--radius-card);
+      background: linear-gradient(135deg, #F5F3FF, #FAF5FF); color: #4C1D95;
+    }
+    .judge-progress-head { display: flex; align-items: center; gap: 10px; }
+    .judge-progress-head strong { flex: 1; font-size: 14px; }
+    .judge-elapsed { font-family: var(--font-mono); font-size: 12px; color: var(--color-muted-fg); }
+    .thinking-dots { display: inline-flex; align-items: center; gap: 4px; min-width: 32px; }
+    .thinking-dots i {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--color-primary);
+      animation: thinking-bounce 1.15s ease-in-out infinite;
+    }
+    .thinking-dots i:nth-child(2) { animation-delay: .15s; }
+    .thinking-dots i:nth-child(3) { animation-delay: .3s; }
+    .judge-stream {
+      max-height: 220px; margin-top: 12px; padding: 12px; overflow: auto; white-space: pre-wrap;
+      overflow-wrap: anywhere; border-radius: 10px; background: rgba(255,255,255,.72);
+      color: var(--color-foreground); font-family: var(--font-mono); font-size: 13px; line-height: 1.6;
+    }
+    @keyframes thinking-bounce {
+      0%, 60%, 100% { transform: translateY(0); opacity: .45; }
+      30% { transform: translateY(-5px); opacity: 1; }
+    }
     .verdict { margin-top: 16px; padding: 16px; border-radius: 12px; background: var(--color-muted); }
     .verdict.easy { background: #ECFDF5; }
     .verdict.hard, .verdict.again, .verdict.good { background: #FFFBEB; }
@@ -105,13 +136,66 @@
     .lib-ops { margin-top: 8px; display: flex; gap: 12px; }
     .lib-ops button { border: 0; background: transparent; color: var(--color-primary); min-height: 44px; font-weight: 600; }
     .back { border: 0; background: transparent; color: var(--color-primary); min-height: 44px; font-weight: 600; margin-bottom: 8px; }
+    .manage-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 20px; }
+    .manage-head h2 { font-size: 24px; letter-spacing: -.03em; }
+    .manage-head p { color: var(--color-muted-fg); margin-top: 4px; }
+    .manage-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .compact-btn {
+      min-height: 44px; padding: 0 16px; border: 1px solid var(--color-border);
+      border-radius: var(--radius-btn); background: var(--color-card); color: var(--color-foreground); font-weight: 600;
+    }
+    .compact-btn.primary { border-color: var(--color-primary); background: var(--color-primary); color: var(--color-on-primary); }
+    .compact-btn:hover:not(:disabled) { background: var(--color-muted); }
+    .compact-btn.primary:hover:not(:disabled) { background: var(--color-primary-hover); }
+    .manage-toolbar { display: grid; grid-template-columns: minmax(220px, 1.4fr) minmax(160px, .8fr) auto; gap: 8px; align-items: end; margin-bottom: 16px; }
+    .manage-toolbar .field { margin: 0; }
+    .format-note { padding: 14px 16px; margin-bottom: 16px; border-radius: var(--radius-card); background: var(--color-muted); color: var(--color-muted-fg); font-size: 14px; }
+    .format-note code { font-family: var(--font-mono); color: var(--color-foreground); }
+    .question-list { display: grid; gap: 10px; }
+    .question-item {
+      display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px;
+      border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: 16px; background: var(--color-card);
+    }
+    .question-item h3 { font-size: 17px; line-height: 1.45; margin: 6px 0; overflow-wrap: anywhere; }
+    .question-item .qid { font-family: var(--font-mono); color: var(--color-muted-fg); font-size: 12px; }
+    .question-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--color-muted-fg); font-size: 13px; }
+    .question-meta a { color: var(--color-primary); overflow-wrap: anywhere; }
+    .question-answer { margin-top: 10px; border-top: 1px solid var(--color-border); padding-top: 6px; }
+    .question-answer summary { color: var(--color-primary); min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 600; }
+    .question-answer .answer-text { padding: 2px 0 8px; white-space: pre-wrap; line-height: 1.65; overflow-wrap: anywhere; }
+    .answer-media { margin: 16px 0; white-space: normal; }
+    .answer-image-link {
+      display: block; border: 1px solid var(--color-border); border-radius: var(--radius-card);
+      overflow: hidden; background: var(--color-muted); color: var(--color-primary); text-decoration: none;
+    }
+    .answer-image-link:focus-visible { outline: 3px solid var(--color-ring); outline-offset: 3px; }
+    .answer-media img { display: block; width: 100%; max-height: 560px; object-fit: contain; background: #fff; }
+    .answer-media figcaption { margin-top: 6px; color: var(--color-muted-fg); font-size: 13px; }
+    .image-fallback { display: flex; min-height: 96px; align-items: center; justify-content: center; padding: 16px; text-align: center; }
+    .question-ops { display: flex; gap: 8px; align-items: flex-start; }
+    .question-ops button { min-width: 64px; min-height: 44px; border: 0; border-radius: var(--radius-btn); background: var(--color-muted); color: var(--color-primary); font-weight: 600; }
+    .question-ops button.danger { color: var(--color-danger); background: #FEF2F2; }
+    .pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 18px; }
+    .pager span { font-family: var(--font-mono); font-size: 13px; color: var(--color-muted-fg); }
+    .empty-state { text-align: center; color: var(--color-muted-fg); padding: 32px 16px; border: 1px dashed var(--color-border); border-radius: var(--radius-card); }
+    .success { margin-top: 12px; color: #047857; font-size: 14px; }
+    .question-form { max-width: 760px; }
     @media (max-width: 640px) {
       .stats, .row, .actions { grid-template-columns: 1fr 1fr; }
       .stats { grid-template-columns: 1fr 1fr; }
       h2.q, .idle-hero h2 { font-size: 22px; }
+      .topbar, .manage-head { align-items: stretch; }
+      .top-actions, .nav-btn { width: 100%; }
+      .nav-btn { justify-content: center; }
+      .manage-head { flex-direction: column; }
+      .manage-actions { display: grid; grid-template-columns: 1fr 1fr; }
+      .manage-toolbar { grid-template-columns: 1fr; }
+      .question-item { grid-template-columns: 1fr; }
+      .question-ops { width: 100%; }
+      .question-ops button { flex: 1; }
     }
     @media (prefers-reduced-motion: reduce) {
-      * { transition: none !important; }
+      * { transition: none !important; animation: none !important; }
     }
   </style>
 </head>
@@ -126,6 +210,12 @@
           <h1>八股抽问</h1>
           <p>你描述 · 模型判 · 每题只记一次</p>
         </div>
+      </div>
+      <div class="top-actions">
+        <button type="button" class="nav-btn" id="btn-question-bank">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5v-16Z"/><path d="M4 18.5A2.5 2.5 0 0 1 6.5 16H20"/></svg>
+          题库管理
+        </button>
       </div>
     </header>
 
@@ -160,6 +250,14 @@
         <button class="cta" type="button" id="btn-submit">发给模型评判</button>
         <button class="ghost" type="button" id="btn-skip">结束本轮 skip</button>
         <p class="error hidden" id="q-err" role="alert"></p>
+        <div id="judge-progress" class="judge-progress hidden">
+          <div class="judge-progress-head">
+            <span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <strong id="judge-status" role="status" aria-live="polite">模型正在分析</strong>
+            <span class="judge-elapsed" id="judge-elapsed" aria-hidden="true">0.0 秒</span>
+          </div>
+          <pre id="judge-stream" class="judge-stream hidden" aria-live="off"></pre>
+        </div>
         <div id="verdict" class="verdict hidden"></div>
       </div>
     </section>
@@ -205,6 +303,71 @@
       </div>
     </section>
 
+    <section id="view-questions" class="card hidden">
+      <button type="button" class="back" id="btn-questions-back">返回作答</button>
+      <div class="manage-head">
+        <div>
+          <h2>题库管理</h2>
+          <p>维护题目和答案，或按固定 CSV 格式批量导入。</p>
+        </div>
+        <div class="manage-actions">
+          <button type="button" class="compact-btn" id="btn-download-template">下载模板</button>
+          <button type="button" class="compact-btn" id="btn-import-questions">导入 CSV</button>
+          <input class="hidden" id="q-import-file" type="file" accept=".csv,text/csv">
+          <button type="button" class="compact-btn primary" id="btn-new-question">新增题目</button>
+        </div>
+      </div>
+      <div class="format-note">
+        UTF-8 CSV 固定表头：<code>category,question,answer,url</code>。分类和题目必填，答案和 URL 可空；仍兼容旧的三列格式。
+      </div>
+      <div class="manage-toolbar">
+        <div class="field">
+          <label for="q-search">搜索题目</label>
+          <input id="q-search" type="search" placeholder="题目、答案、分类或 URL">
+        </div>
+        <div class="field">
+          <label for="q-filter-cat">分类</label>
+          <select id="q-filter-cat"><option value="">全部分类</option></select>
+        </div>
+        <button type="button" class="compact-btn" id="btn-question-search">搜索</button>
+      </div>
+      <p class="help" id="q-list-summary" aria-live="polite"></p>
+      <p class="success hidden" id="q-import-ok" role="status"></p>
+      <p class="error hidden" id="q-manage-err" role="alert"></p>
+      <div class="question-list" id="question-list"></div>
+      <div class="pager" id="q-pager">
+        <button type="button" class="compact-btn" id="q-prev">上一页</button>
+        <span id="q-page-info">第 1 / 1 页</span>
+        <button type="button" class="compact-btn" id="q-next">下一页</button>
+      </div>
+    </section>
+
+    <section id="view-question-edit" class="card question-form hidden">
+      <button type="button" class="back" id="btn-question-edit-back">返回题库</button>
+      <h2 class="q" style="font-size:22px;margin-bottom:18px" id="question-edit-title">新增题目</h2>
+      <div class="field">
+        <label for="qe-category">分类 <span aria-hidden="true">*</span></label>
+        <input id="qe-category" maxlength="100" autocomplete="off" required>
+      </div>
+      <div class="field">
+        <label for="qe-question">题目 <span aria-hidden="true">*</span></label>
+        <textarea id="qe-question" maxlength="2000" required></textarea>
+      </div>
+      <div class="field">
+        <label for="qe-answer">参考答案</label>
+        <textarea id="qe-answer" maxlength="100000" placeholder="可留空；重新抓取后会自动补全"></textarea>
+      </div>
+      <div class="field">
+        <label for="qe-url">参考 URL</label>
+        <input id="qe-url" type="url" maxlength="2048" autocomplete="url" placeholder="可留空">
+      </div>
+      <p class="error hidden" id="qe-err" role="alert"></p>
+      <div class="actions">
+        <button type="button" class="secondary" id="btn-question-cancel">取消</button>
+        <button type="button" class="cta" id="btn-question-save" style="margin-top:0">保存题目</button>
+      </div>
+    </section>
+
     <section class="cats" id="cats"></section>
   </div>
   <script>
@@ -226,6 +389,10 @@
     let editingId = null;
     let testedOk = false;
     let testGen = 0;
+    let questionState = { items: [], total: 0, page: 1, pages: 0, categories: [] };
+    let editingQuestionId = null;
+    let judgeTimer = null;
+    let judgeStartedAt = 0;
 
     async function api(method, path, body) {
       const opt = { method, headers: { "Content-Type": "application/json" } };
@@ -238,6 +405,90 @@
         throw new Error(msg);
       }
       return data;
+    }
+
+    async function streamAnswer(body, onEvent) {
+      const response = await fetch("/api/answer/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+        body: JSON.stringify(body)
+      });
+      const contentType = response.headers.get("content-type") || "";
+      if (!contentType.includes("text/event-stream")) {
+        if (response.status === 404) return api("POST", "/api/answer", body);
+        const data = contentType.includes("json") ? await response.json() : await response.text();
+        throw new Error((data && data.error) || response.statusText || "评卷失败");
+      }
+      if (!response.body) throw new Error("当前浏览器不支持流式输出");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let result = null;
+
+      function consumeBlock(block) {
+        const data = block.split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (!data) return;
+        let event;
+        try {
+          event = JSON.parse(data);
+        } catch (_) {
+          throw new Error("流式评判返回无法解析");
+        }
+        onEvent(event);
+        if (event.type === "error") throw new Error(event.error || "评卷失败");
+        if (event.type === "done") result = event.result;
+      }
+
+      while (true) {
+        const part = await reader.read();
+        buffer += decoder.decode(part.value || new Uint8Array(), { stream: !part.done });
+        buffer = buffer.replace(/\r\n/g, "\n");
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          consumeBlock(buffer.slice(0, boundary));
+          buffer = buffer.slice(boundary + 2);
+          boundary = buffer.indexOf("\n\n");
+        }
+        if (part.done) break;
+      }
+      if (buffer.trim()) consumeBlock(buffer);
+      if (!result) throw new Error("流式评判未正常结束，请重试");
+      return result;
+    }
+
+    function startJudgeProgress() {
+      if (judgeTimer) clearInterval(judgeTimer);
+      judgeStartedAt = performance.now();
+      $("judge-status").textContent = "模型正在分析";
+      $("judge-elapsed").textContent = "0.0 秒";
+      $("judge-stream").textContent = "";
+      $("judge-stream").classList.add("hidden");
+      $("judge-progress").classList.remove("hidden");
+      $("quiz").setAttribute("aria-busy", "true");
+      judgeTimer = setInterval(() => {
+        const seconds = (performance.now() - judgeStartedAt) / 1000;
+        $("judge-elapsed").textContent = `${seconds.toFixed(1)} 秒`;
+      }, 100);
+    }
+
+    function appendJudgeDelta(text) {
+      if (!text) return;
+      $("judge-status").textContent = "模型正在生成评语";
+      const output = $("judge-stream");
+      output.classList.remove("hidden");
+      output.textContent += text;
+      output.scrollTop = output.scrollHeight;
+    }
+
+    function stopJudgeProgress() {
+      if (judgeTimer) clearInterval(judgeTimer);
+      judgeTimer = null;
+      $("judge-progress").classList.add("hidden");
+      $("quiz").removeAttribute("aria-busy");
     }
 
     function draftKey(sid, qid) { return "bagu-draft:" + sid + ":" + qid; }
@@ -254,11 +505,27 @@
     function clearDraft(sid, qid) {
       sessionStorage.removeItem(draftKey(sid, qid));
     }
+    function escapeHtml(value) {
+      return String(value == null ? "" : value).replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+    function safeHttpUrl(value) {
+      try {
+        const parsed = new URL(value);
+        return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : "";
+      } catch (_) {
+        return "";
+      }
+    }
     function showView(name) {
-      ["view-quiz", "view-lib", "view-edit"].forEach((id) => {
+      ["view-quiz", "view-lib", "view-edit", "view-questions", "view-question-edit"].forEach((id) => {
         $(id).classList.toggle("hidden", id !== "view-" + name);
       });
       $("cats").classList.toggle("hidden", name !== "quiz");
+      $("model-bar").classList.toggle("hidden", name !== "quiz");
+      document.querySelector(".app").classList.toggle("wide", name === "questions");
+      $("btn-question-bank").setAttribute("aria-current", name === "questions" ? "page" : "false");
     }
 
     function renderStats(s) {
@@ -276,7 +543,8 @@
       box.innerHTML = "<h3>分类 · 已刷 / 总数</h3>" + s.by_cat.map((c) => {
         const pct = c.total ? Math.round(100 * (c.seen || 0) / c.total) : 0;
         const name = c.category;
-        return `<div class="cat"><button type="button" data-cat="${name}">${name}</button><div class="bar"><span style="width:${pct}%"></span></div><div class="n">${c.seen || 0}/${c.total}</div></div>`;
+        const safeName = escapeHtml(name);
+        return `<div class="cat"><button type="button" data-cat="${safeName}">${safeName}</button><div class="bar"><span style="width:${pct}%"></span></div><div class="n">${c.seen || 0}/${c.total}</div></div>`;
       }).join("");
       box.querySelectorAll("button[data-cat]").forEach((b) => {
         b.addEventListener("click", () => draw(5, b.dataset.cat));
@@ -289,11 +557,14 @@
 
     function renderQuiz() {
       lastVerdict = null;
+      stopJudgeProgress();
       $("verdict").classList.add("hidden");
       $("q-err").classList.add("hidden");
       $("btn-submit").dataset.mode = "";
       $("btn-submit").textContent = "发给模型评判";
       $("btn-submit").disabled = false;
+      $("btn-skip").disabled = false;
+      $("ans").disabled = false;
       $("ans").value = loadDraft();
       const q = currentQuestion();
       if (!session.session_id || !q) {
@@ -464,6 +735,143 @@
       }
     }
 
+    function showQuestionMessage(kind, message) {
+      const ok = $("q-import-ok");
+      const err = $("q-manage-err");
+      ok.classList.add("hidden");
+      err.classList.add("hidden");
+      if (!message) return;
+      const target = kind === "success" ? ok : err;
+      target.textContent = message;
+      target.classList.remove("hidden");
+    }
+
+    function bindAnswerImageFallbacks(root) {
+      root.querySelectorAll("img[data-answer-image]").forEach((img) => {
+        const showFallback = () => {
+          img.hidden = true;
+          const fallback = img.closest(".answer-image-link")?.querySelector("[data-image-fallback]");
+          if (fallback) fallback.classList.remove("hidden");
+        };
+        img.addEventListener("error", showFallback, { once: true });
+        if (img.complete && img.naturalWidth === 0) showFallback();
+      });
+    }
+
+    function renderQuestionRows() {
+      const box = $("question-list");
+      if (!questionState.items.length) {
+        box.innerHTML = `<div class="empty-state">没有符合条件的题目。可以调整筛选，或新增、导入题目。</div>`;
+      } else {
+        box.innerHTML = questionState.items.map((item) => {
+          const url = safeHttpUrl(item.url || "");
+          const urlHtml = url
+            ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">打开来源</a>`
+            : "无来源链接";
+          const answerHtml = item.answer
+            ? `<details class="question-answer"><summary>查看答案</summary><div class="answer-text">${item.answer_html || escapeHtml(item.answer)}</div></details>`
+            : `<div class="question-answer"><span class="help">暂无答案正文</span></div>`;
+          const due = item.next_due ? `下次 ${escapeHtml(item.next_due)}` : "尚未复习";
+          return `<article class="question-item" data-id="${item.id}">
+            <div>
+              <div><span class="pill">${escapeHtml(item.category)}</span> <span class="qid">#${item.id}</span></div>
+              <h3>${escapeHtml(item.question)}</h3>
+              <div class="question-meta">
+                <span>等级 ${item.level}</span><span>已刷 ${item.times_seen} 次</span><span>答对 ${item.times_right} 次</span><span>${due}</span><span>${urlHtml}</span>
+              </div>
+              ${answerHtml}
+            </div>
+            <div class="question-ops">
+              <button type="button" data-act="edit">修改</button>
+              <button type="button" class="danger" data-act="delete">删除</button>
+            </div>
+          </article>`;
+        }).join("");
+      }
+      bindAnswerImageFallbacks(box);
+      $("q-list-summary").textContent = `共 ${questionState.total} 道题`;
+      const shownPage = questionState.pages ? questionState.page : 0;
+      $("q-page-info").textContent = `第 ${shownPage} / ${questionState.pages} 页`;
+      $("q-prev").disabled = questionState.page <= 1;
+      $("q-next").disabled = !questionState.pages || questionState.page >= questionState.pages;
+      $("q-pager").classList.toggle("hidden", questionState.pages <= 1);
+
+      box.querySelectorAll("[data-act='edit']").forEach((button) => {
+        button.addEventListener("click", () => openQuestionEdit(Number(button.closest("[data-id]").dataset.id)));
+      });
+      box.querySelectorAll("[data-act='delete']").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const id = Number(button.closest("[data-id]").dataset.id);
+          const item = questionState.items.find((q) => q.id === id);
+          if (!item || !confirm(`删除题目 #${id}？\n\n${item.question}`)) return;
+          button.disabled = true;
+          showQuestionMessage("", "");
+          try {
+            await api("DELETE", "/api/questions/" + id);
+            await loadQuestions(questionState.page);
+            showQuestionMessage("success", `题目 #${id} 已删除。`);
+          } catch (e) {
+            showQuestionMessage("error", e.message);
+            button.disabled = false;
+          }
+        });
+      });
+    }
+
+    function updateQuestionCategoryOptions(categories) {
+      const select = $("q-filter-cat");
+      const current = select.value;
+      select.innerHTML = `<option value="">全部分类</option>` + categories.map((cat) => (
+        `<option value="${escapeHtml(cat)}">${escapeHtml(cat)}</option>`
+      )).join("");
+      if (categories.includes(current)) select.value = current;
+    }
+
+    async function loadQuestions(page) {
+      showQuestionMessage("", "");
+      $("question-list").innerHTML = `<div class="empty-state">正在加载题库…</div>`;
+      const params = new URLSearchParams({
+        q: $("q-search").value.trim(),
+        cat: $("q-filter-cat").value,
+        page: String(page || 1),
+        page_size: "20"
+      });
+      try {
+        questionState = await api("GET", "/api/questions?" + params.toString());
+        updateQuestionCategoryOptions(questionState.categories || []);
+        renderQuestionRows();
+      } catch (e) {
+        $("question-list").innerHTML = "";
+        showQuestionMessage("error", e.message);
+      }
+    }
+
+    function openQuestionNew() {
+      editingQuestionId = null;
+      $("question-edit-title").textContent = "新增题目";
+      $("qe-category").value = $("q-filter-cat").value || "";
+      $("qe-question").value = "";
+      $("qe-answer").value = "";
+      $("qe-url").value = "";
+      $("qe-err").classList.add("hidden");
+      showView("question-edit");
+      $("qe-category").focus();
+    }
+
+    function openQuestionEdit(id) {
+      const item = questionState.items.find((q) => q.id === id);
+      if (!item) return;
+      editingQuestionId = id;
+      $("question-edit-title").textContent = `修改题目 #${id}`;
+      $("qe-category").value = item.category || "";
+      $("qe-question").value = item.question || "";
+      $("qe-answer").value = item.answer || "";
+      $("qe-url").value = item.url || "";
+      $("qe-err").classList.add("hidden");
+      showView("question-edit");
+      $("qe-question").focus();
+    }
+
     $("btn-draw").addEventListener("click", () => draw(5));
     $("btn-skip").addEventListener("click", async () => {
       try {
@@ -488,33 +896,136 @@
       const text = $("ans").value.trim();
       if (!q || !text) return;
       $("btn-submit").disabled = true;
+      $("btn-submit").textContent = "模型分析中…";
+      $("btn-skip").disabled = true;
+      $("ans").disabled = true;
       $("q-err").classList.add("hidden");
+      startJudgeProgress();
       try {
-        const out = await api("POST", "/api/answer", {
+        const out = await streamAnswer({
           session_id: session.session_id,
           question_id: q.id,
           text
+        }, (event) => {
+          if (event.type === "delta") appendJudgeDelta(event.text || "");
         });
+        stopJudgeProgress();
         clearDraft(session.session_id, q.id);
         const box = $("verdict");
         box.className = "verdict " + out.grade;
-        let html = `<span class="badge">模型判定 · ${out.grade}</span><p style="margin-top:10px">${out.comment || ""}</p>`;
+        let html = `<span class="badge">模型判定 · ${escapeHtml(out.grade)}</span><p style="margin-top:10px">${escapeHtml(out.comment || "")}</p>`;
         if (out.grade !== "easy" && out.full_answer) {
-          html += `<p style="margin-top:10px;white-space:pre-wrap">${out.full_answer}</p>`;
+          html += `<div style="margin-top:10px;white-space:pre-wrap">${out.full_answer_html || escapeHtml(out.full_answer)}</div>`;
         }
         box.innerHTML = html;
+        bindAnswerImageFallbacks(box);
         box.classList.remove("hidden");
         $("btn-submit").dataset.mode = "next";
         $("btn-submit").textContent = "下一题";
       } catch (e) {
+        stopJudgeProgress();
         $("q-err").textContent = e.message;
         $("q-err").classList.remove("hidden");
+        $("btn-submit").textContent = "重新评判";
         saveDraft();
       } finally {
         $("btn-submit").disabled = false;
+        $("btn-skip").disabled = false;
+        $("ans").disabled = false;
       }
     });
     $("ans").addEventListener("input", saveDraft);
+
+    $("btn-question-bank").addEventListener("click", async () => {
+      showView("questions");
+      await loadQuestions(1);
+    });
+    $("btn-questions-back").addEventListener("click", async () => {
+      showView("quiz");
+      await refresh();
+    });
+    $("btn-new-question").addEventListener("click", openQuestionNew);
+    $("btn-question-edit-back").addEventListener("click", async () => {
+      showView("questions");
+      await loadQuestions(questionState.page || 1);
+    });
+    $("btn-question-cancel").addEventListener("click", async () => {
+      showView("questions");
+      await loadQuestions(questionState.page || 1);
+    });
+    $("btn-question-search").addEventListener("click", () => loadQuestions(1));
+    $("q-search").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") loadQuestions(1);
+    });
+    $("q-filter-cat").addEventListener("change", () => loadQuestions(1));
+    $("q-prev").addEventListener("click", () => loadQuestions(Math.max(1, questionState.page - 1)));
+    $("q-next").addEventListener("click", () => loadQuestions(questionState.page + 1));
+
+    $("btn-question-save").addEventListener("click", async () => {
+      const payload = {
+        category: $("qe-category").value.trim(),
+        question: $("qe-question").value.trim(),
+        answer: $("qe-answer").value.trim(),
+        url: $("qe-url").value.trim()
+      };
+      const error = $("qe-err");
+      error.classList.add("hidden");
+      if (!payload.category || !payload.question) {
+        error.textContent = "分类和题目不能为空";
+        error.classList.remove("hidden");
+        (!payload.category ? $("qe-category") : $("qe-question")).focus();
+        return;
+      }
+      const button = $("btn-question-save");
+      const wasEditing = Boolean(editingQuestionId);
+      button.disabled = true;
+      button.textContent = "保存中…";
+      try {
+        if (editingQuestionId) await api("PUT", "/api/questions/" + editingQuestionId, payload);
+        else await api("POST", "/api/questions", payload);
+        showView("questions");
+        await loadQuestions(editingQuestionId ? questionState.page : 1);
+        showQuestionMessage("success", wasEditing ? "题目已更新。" : "题目已新增。");
+        editingQuestionId = null;
+      } catch (e) {
+        error.textContent = e.message;
+        error.classList.remove("hidden");
+      } finally {
+        button.disabled = false;
+        button.textContent = "保存题目";
+      }
+    });
+
+    $("btn-import-questions").addEventListener("click", () => $("q-import-file").click());
+    $("q-import-file").addEventListener("change", async () => {
+      const file = $("q-import-file").files[0];
+      if (!file) return;
+      const button = $("btn-import-questions");
+      button.disabled = true;
+      button.textContent = "导入中…";
+      showQuestionMessage("", "");
+      try {
+        if (file.size > 2 * 1024 * 1024) throw new Error("导入文件不能超过 2 MiB");
+        const result = await api("POST", "/api/questions/import", { content: await file.text() });
+        await loadQuestions(1);
+        showQuestionMessage("success", `导入完成：新增 ${result.inserted} 道，跳过重复 ${result.skipped} 道。`);
+      } catch (e) {
+        showQuestionMessage("error", e.message);
+      } finally {
+        button.disabled = false;
+        button.textContent = "导入 CSV";
+        $("q-import-file").value = "";
+      }
+    });
+    $("btn-download-template").addEventListener("click", () => {
+      const content = "\ufeffcategory,question,answer,url\nMySQL,什么是事务？,事务是一组不可分割的数据库操作,https://example.com/reference\n";
+      const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "bagu-questions-template.csv";
+      link.click();
+      URL.revokeObjectURL(url);
+    });
 
     $("model-bar").addEventListener("click", async () => {
       showView("lib");

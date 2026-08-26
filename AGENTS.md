@@ -13,7 +13,7 @@
 | 路径 | 职责 |
 | --- | --- |
 | `bagu.py` | CLI、SQLite、会话、抓题、HTTP、评卷、设置 |
-| `web/index.html` | 本机 UI（作答 + 配置库） |
+| `web/index.html` | 本机 UI（作答 + 配置库 + 题库管理） |
 | `test/test_bagu.py` | 单元测试，必须用临时目录，禁止写真实 `bagu.db` |
 | `docs/superpowers/specs/` | 已定设计。会话网页、多模型条目均已实现 |
 | `docs/superpowers/plans/` | 实现计划 |
@@ -54,7 +54,7 @@
 
 ## 数据表
 
-`questions`：题干、分类、url、level、times_seen、times_right、next_due、last_reviewed。`UNIQUE(category, question)`。
+`questions`：题干、分类、answer、url、level、times_seen、times_right、next_due、last_reviewed。`UNIQUE(category, question)`。旧库由 `init_db` 自动添加 `answer` 列。
 
 `sessions`：`id TEXT PK`，`status` 仅 `open|closed`，`created_at`，`n`，`cat`。
 
@@ -76,6 +76,7 @@
 | --- | --- |
 | `POST /api/draw` | 已有会话 → 409，带 `session_id` 和 `pending_ids` |
 | `POST /api/answer` | 未配置模型 → 400，不 grade；模型失败 → 502，不 grade |
+| `POST /api/answer/stream` | SSE `start/delta/done/error`；完整生成并解析后才 grade，模型断流或解析失败不 grade |
 | `POST /api/models` | 服务端先测再写；测挂 502 且不写盘 |
 | `POST /api/models/:id/activate` | 只改 `active_id` |
 
@@ -88,6 +89,7 @@
 - 图标用 SVG，**禁止 emoji**
 - 触控目标 ≥ 44px
 - 提交中按钮 `disabled`
+- 模型分析时展示动画、耗时和流式文本；遵循 `prefers-reduced-motion`
 - 一次一道题；非 easy 才展示 `full_answer`
 
 ## Hermes 调用顺序（改 CLI 行为时保持）
@@ -103,7 +105,17 @@
 
 ## 抓题
 
-`PAGES` 指向 xiaolincoding.com 面试页。`fetch_questions` 抽 `h2`/`h3`。`import` 失败单分类警告并继续，不要让整个 import 因一页挂掉而中止（现有行为）。
+`PAGES` 指向 xiaolincoding.com 面试页。`fetch_questions` 按 `h2` 分组、`h3` 分题，保存题目到下一标题前的正文、代码、列表和图片链接。`import` 对已有题补全 `answer` 和锚点 URL，不重置复习进度；失败单分类警告并继续。
+
+## 题库管理与文件导入
+
+- 网页管理 API：`GET/POST /api/questions`、`PUT/DELETE /api/questions/:id`、`POST /api/questions/import`
+- CSV 新表头：`category,question,answer,url`；兼容旧的 `category,question,url`；UTF-8，分类和题目必填，答案和 URL 可空
+- 解析采用整批校验；错误时不写库，重复 `category + question` 跳过且不覆盖
+- 单文件最多 2 MiB、5000 道题；字段长度限制由 `_clean_question` 统一执行
+- 修改题目不得重置调度字段；存在 `session_items` 引用的题目禁止物理删除
+- 答案渲染只允许 `render_answer_html` 识别的 HTTP(S) 图片标记；普通文本和属性必须转义，不得直接渲染题库 HTML
+- 管理页面继续放在 `web/index.html`，不要新增第二个 HTML 文件
 
 ## 测试
 
