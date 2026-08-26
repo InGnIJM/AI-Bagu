@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>八股抽问 - UI 风格全景交互预览</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* 顶部控制台 Bar */
+    .top-control-bar {
+      position: sticky;
+      top: 0;
+      z-index: 1000;
+      background: rgba(15, 23, 42, 0.95);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    }
+    .control-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 16px;
+      font-weight: 700;
+      color: #fff;
+    }
+    .badge-tag {
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: #F59E0B;
+      color: #000;
+      font-weight: 800;
+    }
+    .style-switcher {
+      display: flex;
+      background: rgba(255, 255, 255, 0.08);
+      padding: 4px;
+      border-radius: 12px;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+    .style-btn {
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 0;
+      background: transparent;
+      color: #94a3b8;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all .2s ease;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .style-btn:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.05);
+    }
+    .style-btn.active {
+      background: #3b82f6;
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.4);
+    }
+    .style-btn.highlight {
+      border: 1px solid #F59E0B;
+      color: #FDE68A;
+    }
+    .style-btn.highlight.active {
+      background: #F59E0B;
+      color: #000;
+      font-weight: 800;
+    }
+
+    .view-mode-group {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .action-pill-btn {
+      padding: 7px 14px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      background: rgba(255, 255, 255, 0.05);
+      color: #cbd5e1;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .2s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .action-pill-btn:hover {
+      background: rgba(255, 255, 255, 0.12);
+      color: #fff;
+    }
+
+    /* 预览容器 */
+    .preview-stage {
+      flex: 1;
+      padding: 28px 16px 64px;
+      display: flex;
+      justify-content: center;
+      transition: background .3s ease;
+    }
+
+    /* 通用 SVG 图标 */
+    .icon {
+      width: 18px;
+      height: 18px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      display: inline-block;
+      vertical-align: middle;
+    }
+
+    /* =========================================================================
+       ⭐ THEME: ARCADE BENTO (新野兽便签派 · Apple 布局 × 街机高对比色)
+       ========================================================================= */
+    .theme-arcade-bento {
+      background-color: #FFFDF0;
+      background-image: radial-gradient(#CBD5E1 1.2px, transparent 1.2px);
+      background-size: 24px 24px;
+      color: #0F172A;
+      width: 100%;
+      min-height: 100%;
+    }
+    .theme-arcade-bento .bagu-container {
+      max-width: 1060px;
+      margin: 0 auto;
+    }
+
+    /* Bento 双栏网格 */
+    .theme-arcade-bento .bento-layout {
+      display: grid;
+      grid-template-columns: 290px 1fr;
+      gap: 20px;
+    }
+
+    /* 模块化卡片通用（高对比粗边框 + 实体硬阴影） */
+    .theme-arcade-bento .arcade-card {
+      background: #FFFFFF;
+      border: 2.5px solid #0F172A;
+      border-radius: 16px;
+      box-shadow: 4px 4px 0px #0F172A;
+      padding: 20px;
+      transition: transform .15s ease, box-shadow .15s ease;
+    }
+    .theme-arcade-bento .arcade-card:hover {
+      box-shadow: 5px 5px 0px #0F172A;
+    }
+
+    /* 侧边栏卡片堆叠 */
+    .theme-arcade-bento .bento-sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* 品牌卡 */
+    .theme-arcade-bento .brand-box {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: #DDD6FE;
+    }
+    .theme-arcade-bento .brand-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      background: #FDE047;
+      border: 2px solid #0F172A;
+      box-shadow: 2px 2px 0px #0F172A;
+      color: #0F172A;
+      display: grid;
+      place-items: center;
+      font-weight: 900;
+    }
+    .theme-arcade-bento .brand-info h2 {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: #0F172A;
+    }
+    .theme-arcade-bento .brand-info p {
+      font-size: 12px;
+      font-weight: 600;
+      color: #4B5563;
+      font-family: 'Fira Code', monospace;
+    }
+
+    /* 侧边导航 */
+    .theme-arcade-bento .nav-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .theme-arcade-bento .nav-btn {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 700;
+      color: #0F172A;
+      cursor: pointer;
+      border: 2px solid transparent;
+      background: #F8FAFC;
+      text-align: left;
+      transition: all .15s;
+    }
+    .theme-arcade-bento .nav-btn:hover {
+      background: #FEF08A;
+      border-color: #0F172A;
+      transform: translate(-1px, -1px);
+      box-shadow: 2px 2px 0px #0F172A;
+    }
+    .theme-arcade-bento .nav-btn.active {
+      background: #FDE047;
+      border: 2px solid #0F172A;
+      box-shadow: 2.5px 2.5px 0px #0F172A;
+    }
+
+    /* 连胜与统计卡 */
+    .theme-arcade-bento .streak-card {
+      background: #FEF2F2;
+      border-color: #0F172A;
+    }
+    .theme-arcade-bento .streak-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .theme-arcade-bento .streak-badge {
+      font-size: 11px;
+      font-weight: 800;
+      padding: 2px 8px;
+      border-radius: 6px;
+      background: #F87171;
+      color: #FFFFFF;
+      border: 1.5px solid #0F172A;
+    }
+    .theme-arcade-bento .streak-val {
+      font-size: 24px;
+      font-weight: 900;
+      color: #991B1B;
+      letter-spacing: -0.03em;
+    }
+
+    /* 分类掌握度条 */
+    .theme-arcade-bento .category-stat-row {
+      margin-top: 10px;
+    }
+    .theme-arcade-bento .stat-row-head {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 4px;
+      color: #334155;
+    }
+    .theme-arcade-bento .stat-track {
+      height: 8px;
+      border-radius: 6px;
+      background: #F1F5F9;
+      border: 1.5px solid #0F172A;
+      overflow: hidden;
+    }
+    .theme-arcade-bento .stat-fill {
+      height: 100%;
+      border-radius: 4px;
+    }
+
+    /* 激活模型指示条 */
+    .theme-arcade-bento .model-card {
+      background: #F0FDF4;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .theme-arcade-bento .model-tag {
+      font-family: 'Fira Code', monospace;
+      font-size: 12px;
+      font-weight: 700;
+      color: #166534;
+    }
+
+    /* ================== 右侧主答题画布 ================== */
+    .theme-arcade-bento .main-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .theme-arcade-bento .question-card {
+      padding: 28px;
+    }
+    .theme-arcade-bento .q-meta-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .theme-arcade-bento .badge-pill {
+      font-family: 'Fira Code', monospace;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 8px;
+      border: 1.5px solid #0F172A;
+      box-shadow: 1.5px 1.5px 0px #0F172A;
+    }
+    .theme-arcade-bento .q-heading {
+      font-size: 25px;
+      font-weight: 800;
+      line-height: 1.35;
+      color: #0F172A;
+      letter-spacing: -0.02em;
+      margin-bottom: 16px;
+    }
+    .theme-arcade-bento .hint-box {
+      background: #FFFBEB;
+      border: 1.5px dashed #0F172A;
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #78350F;
+      margin-bottom: 18px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* 输入区域 */
+    .theme-arcade-bento textarea {
+      width: 100%;
+      min-height: 130px;
+      background: #FFFFFF;
+      border: 2px solid #0F172A;
+      border-radius: 12px;
+      box-shadow: inset 2px 2px 0px rgba(0,0,0,0.06);
+      padding: 14px;
+      font-size: 15px;
+      font-weight: 500;
+      color: #0F172A;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      outline: none;
+      transition: all .15s;
+      resize: vertical;
+    }
+    .theme-arcade-bento textarea:focus {
+      background: #FFFDF0;
+      border-color: #0F172A;
+      box-shadow: 3px 3px 0px #0F172A;
+    }
+
+    /* 提交操作栏 */
+    .theme-arcade-bento .action-toolbar {
+      display: flex;
+      gap: 12px;
+      margin-top: 14px;
+    }
+    .theme-arcade-bento .btn-arcade-submit {
+      flex: 1;
+      min-height: 48px;
+      background: #FDE047;
+      border: 2px solid #0F172A;
+      box-shadow: 3px 3px 0px #0F172A;
+      border-radius: 12px;
+      font-size: 15px;
+      font-weight: 800;
+      color: #0F172A;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all .1s ease;
+    }
+    .theme-arcade-bento .btn-arcade-submit:hover {
+      background: #FACC15;
+      transform: translate(-1px, -1px);
+      box-shadow: 4px 4px 0px #0F172A;
+    }
+    .theme-arcade-bento .btn-arcade-submit:active {
+      transform: translate(2px, 2px);
+      box-shadow: 1px 1px 0px #0F172A;
+    }
+    .theme-arcade-bento .btn-arcade-skip {
+      padding: 0 18px;
+      min-height: 48px;
+      background: #F8FAFC;
+      border: 2px solid #0F172A;
+      box-shadow: 3px 3px 0px #0F172A;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 700;
+      color: #475569;
+      cursor: pointer;
+      transition: all .1s ease;
+    }
+    .theme-arcade-bento .btn-arcade-skip:hover {
+      background: #E2E8F0;
+      color: #0F172A;
+      transform: translate(-1px, -1px);
+    }
+    .theme-arcade-bento .btn-arcade-skip:active {
+      transform: translate(2px, 2px);
+      box-shadow: 1px 1px 0px #0F172A;
+    }
+
+    /* 街机实体 4 级评分按键栏 */
+    .theme-arcade-bento .grade-keyboard-box {
+      margin-top: 22px;
+      padding-top: 18px;
+      border-top: 2px dashed #E2E8F0;
+    }
+    .theme-arcade-bento .grade-title-tip {
+      font-size: 12px;
+      font-weight: 700;
+      color: #64748B;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .theme-arcade-bento .arcade-grade-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+    .theme-arcade-bento .arcade-grade-btn {
+      padding: 12px 10px;
+      border-radius: 12px;
+      border: 2px solid #0F172A;
+      box-shadow: 3px 3px 0px #0F172A;
+      cursor: pointer;
+      text-align: center;
+      transition: all .1s ease;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+    }
+    .theme-arcade-bento .arcade-grade-btn:hover {
+      transform: translate(-1.5px, -1.5px);
+      box-shadow: 4.5px 4.5px 0px #0F172A;
+    }
+    .theme-arcade-bento .arcade-grade-btn:active {
+      transform: translate(2px, 2px);
+      box-shadow: 1px 1px 0px #0F172A;
+    }
+    .theme-arcade-bento .arcade-grade-btn .hotkey-chip {
+      font-family: 'Fira Code', monospace;
+      font-size: 11px;
+      font-weight: 800;
+      background: rgba(15, 23, 42, 0.1);
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+    .theme-arcade-bento .arcade-grade-btn .grade-name {
+      font-size: 15px;
+      font-weight: 900;
+      letter-spacing: -0.01em;
+    }
+    .theme-arcade-bento .arcade-grade-btn .grade-due {
+      font-size: 11px;
+      font-weight: 700;
+      opacity: 0.85;
+    }
+
+    /* 4 个等级马卡龙高对比色 */
+    .theme-arcade-bento .arcade-grade-btn.again { background: #FDA4AF; color: #881337; }
+    .theme-arcade-bento .arcade-grade-btn.hard  { background: #FDE047; color: #713F12; }
+    .theme-arcade-bento .arcade-grade-btn.good  { background: #93C5FD; color: #1E3A8A; }
+    .theme-arcade-bento .arcade-grade-btn.easy  { background: #86EFAC; color: #14532D; }
+
+    /* AI 评卷流式盒（高对比度） */
+    .theme-arcade-bento .ai-stream-panel {
+      background: #F8FAFC;
+      border: 2px solid #0F172A;
+      border-radius: 12px;
+      padding: 16px;
+      margin-top: 16px;
+      box-shadow: 3px 3px 0px #0F172A;
+    }
+    .theme-arcade-bento .ai-stream-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .theme-arcade-bento .ai-stream-content {
+      font-size: 14px;
+      line-height: 1.65;
+      color: #0F172A;
+      font-weight: 600;
+    }
+
+    /* =========================================================================
+       其他对比主题保留供比对
+       ========================================================================= */
+    .theme-linear-dark { background: #0B0D13; color: #EDEDEF; width: 100%; }
+    .theme-bento-minimal { background: #F8FAFC; color: #0F172A; width: 100%; }
+    .theme-neo-brutalism { background: #FEF9C3; color: #000000; width: 100%; }
+    .theme-purple-glass { background: #FAF5FF; color: #0F172A; width: 100%; }
+
+    /* 4-Up Grid View 模式 */
+    .quad-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      width: 100%;
+      max-width: 1600px;
+    }
+    .quad-cell {
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+    }
+    .quad-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-weight: 800;
+      font-size: 13px;
+      margin-bottom: 12px;
+      align-self: flex-start;
+      border: 2px solid #000;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 顶部控制台 -->
+  <header class="top-control-bar">
+    <div class="control-title">
+      <svg class="icon" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+      <span>八股抽问 · UI 重构风格展示台</span>
+      <span class="badge-tag">Arcade Bento Ready</span>
+    </div>
+
+    <!-- 风格快速切换 -->
+    <div class="style-switcher" id="styleSwitcher">
+      <button class="style-btn highlight active" onclick="switchTheme('arcade-bento')">
+        <svg class="icon" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        ⭐ 新方案：Arcade Bento (新野兽便签)
+      </button>
+      <button class="style-btn" onclick="switchTheme('bento-minimal')">
+        <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+        Apple 便签原版 (低对比灰)
+      </button>
+      <button class="style-btn" onclick="switchTheme('linear-dark')">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        Linear Dark (暗黑极客)
+      </button>
+      <button class="style-btn" onclick="switchTheme('neo-brutalism')">
+        <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="0"/></svg>
+        Neo-Brutalism (纯街机风)
+      </button>
+    </div>
+
+    <div class="view-mode-group">
+      <button class="action-pill-btn" onclick="toggleQuadView()" id="btnQuadView">
+        <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 12h18M12 3v18"/></svg>
+        <span id="txtQuadView">全风格同屏对比</span>
+      </button>
+      <button class="action-pill-btn" onclick="triggerMockStream()">
+        <svg class="icon" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        模拟 AI 实时评卷
+      </button>
+    </div>
+  </header>
+
+  <!-- 预览主舞台 -->
+  <main class="preview-stage" id="previewStage">
+    
+    <!-- 单风格沉浸体验容器 -->
+    <div id="singleView" class="theme-arcade-bento" style="padding: 24px; border-radius: 20px;">
+      <div class="bagu-container" id="themeContentArea">
+        <!-- 动态注入风格内容 -->
+      </div>
+    </div>
+
+    <!-- 多风格同屏并列容器 -->
+    <div id="quadView" class="quad-grid" style="display: none;">
+      <!-- 卡片 1: 融合新版 -->
+      <div class="quad-cell theme-arcade-bento" style="border:3px solid #000;">
+        <div class="quad-badge" style="background:#FDE047; color:#000;">⭐ 推荐：Arcade Bento (Apple布局 + 街机高对比)</div>
+        <div class="arcade-card">
+          <div class="q-meta-bar">
+            <span class="badge-pill" style="background:#DDD6FE;">MySQL · 索引机制</span>
+            <span style="font-family:'Fira Code', monospace; font-size:12px; font-weight:700;">Level 2 · 到期复习</span>
+          </div>
+          <h2 style="font-size:20px; font-weight:800; line-height:1.3; margin-bottom:12px;">为什么 MySQL InnoDB 选用 B+ 树做索引？</h2>
+          <div class="arcade-grade-grid">
+            <button class="arcade-grade-btn again"><span class="hotkey-chip">[1]</span><span class="grade-name">Again</span><span class="grade-due">1天</span></button>
+            <button class="arcade-grade-btn hard"><span class="hotkey-chip">[2]</span><span class="grade-name">Hard</span><span class="grade-due">2天</span></button>
+            <button class="arcade-grade-btn good"><span class="hotkey-chip">[3]</span><span class="grade-name">Good</span><span class="grade-due">4天</span></button>
+            <button class="arcade-grade-btn easy"><span class="hotkey-chip">[4]</span><span class="grade-name">Easy</span><span class="grade-due">7天</span></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 卡片 2: 原版 Apple -->
+      <div class="quad-cell theme-bento-minimal" style="background:#F8FAFC; border:1px solid #E2E8F0;">
+        <div class="quad-badge" style="background:#059669; color:#fff; border:0;">对比项：Apple 便签原版 (柔和低对比)</div>
+        <div style="background:#fff; border:1px solid #E2E8F0; border-radius:16px; padding:20px;">
+          <span style="display:inline-block; font-size:12px; color:#64748B; background:#F1F5F9; padding:3px 8px; border-radius:6px; margin-bottom:10px;">TCP 协议 · 四次挥手</span>
+          <h2 style="font-size:20px; font-weight:700; color:#0F172A; margin-bottom:12px;">为什么 TIME_WAIT 需要持续 2MSL？</h2>
+          <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:8px;">
+            <button style="padding:10px; border:1px solid #E2E8F0; border-radius:8px; background:#fff; color:#DC2626; font-weight:600;">Again</button>
+            <button style="padding:10px; border:1px solid #E2E8F0; border-radius:8px; background:#fff; color:#D97706; font-weight:600;">Hard</button>
+            <button style="padding:10px; border:1px solid #E2E8F0; border-radius:8px; background:#EFF6FF; color:#2563EB; font-weight:600;">Good</button>
+            <button style="padding:10px; border:1px solid #E2E8F0; border-radius:8px; background:#ECFDF5; color:#059669; font-weight:600;">Easy</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    let currentTheme = 'arcade-bento';
+    let isQuadView = false;
+
+    // 渲染风格对应的完整单页 DOM
+    function renderSingleTheme(theme) {
+      const container = document.getElementById('singleView');
+      const content = document.getElementById('themeContentArea');
+      container.className = 'theme-' + theme;
+
+      if (theme === 'arcade-bento') {
+        content.innerHTML = `
+          <div class="bento-layout">
+            <!-- 左侧 Bento 边栏 -->
+            <aside class="bento-sidebar">
+              
+              <!-- 品牌卡 -->
+              <div class="arcade-card brand-box">
+                <div class="brand-icon">
+                  <svg class="icon" viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+                </div>
+                <div class="brand-info">
+                  <h2>八股抽问</h2>
+                  <p>SPACED REPETITION</p>
+                </div>
+              </div>
+
+              <!-- 导航模块 -->
+              <div class="arcade-card">
+                <div style="font-size:12px; font-weight:800; color:#64748B; text-transform:uppercase; margin-bottom:10px;">控制台</div>
+                <div class="nav-group">
+                  <button class="nav-btn active">
+                    <svg class="icon" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                    <span>抽问复习</span>
+                    <span style="margin-left:auto; font-family:'Fira Code'; font-size:11px; background:#0F172A; color:#FDE047; padding:2px 6px; border-radius:4px;">18题</span>
+                  </button>
+                  <button class="nav-btn">
+                    <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                    <span>题库管理</span>
+                  </button>
+                  <button class="nav-btn">
+                    <svg class="icon" viewBox="0 0 24 24"><path d="M12 20V10M18 20V4M6 20v-4"/></svg>
+                    <span>学习曲线</span>
+                  </button>
+                  <button class="nav-btn">
+                    <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                    <span>模型配置</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- 连胜卡 -->
+              <div class="arcade-card streak-card">
+                <div class="streak-head">
+                  <span style="font-size:12px; font-weight:800; color:#991B1B;">🔥 每日连胜</span>
+                  <span class="streak-badge">连续 12 天</span>
+                </div>
+                <div class="streak-val">LEVEL 3 达成</div>
+                <p style="font-size:12px; font-weight:600; color:#B91C1C; margin-top:4px;">今日已巩固 18 题，艾宾浩斯复习曲线保持平稳！</p>
+              </div>
+
+              <!-- 分类掌握度 -->
+              <div class="arcade-card">
+                <div style="font-size:12px; font-weight:800; color:#64748B; text-transform:uppercase;">题库掌握度</div>
+                <div class="category-stat-row">
+                  <div class="stat-row-head"><span>MySQL 数据库</span><span>85%</span></div>
+                  <div class="stat-track"><div class="stat-fill" style="width:85%; background:#86EFAC;"></div></div>
+                </div>
+                <div class="category-stat-row">
+                  <div class="stat-row-head"><span>计算机网络</span><span>72%</span></div>
+                  <div class="stat-track"><div class="stat-fill" style="width:72%; background:#93C5FD;"></div></div>
+                </div>
+                <div class="category-stat-row">
+                  <div class="stat-row-head"><span>操作系统 & 并发</span><span>60%</span></div>
+                  <div class="stat-track"><div class="stat-fill" style="width:60%; background:#FDE047;"></div></div>
+                </div>
+              </div>
+
+              <!-- 激活模型 -->
+              <div class="arcade-card model-card">
+                <div>
+                  <div style="font-size:11px; font-weight:700; color:#64748B;">评卷模型</div>
+                  <div class="model-tag">GPT-4o Mini (Online)</div>
+                </div>
+                <span style="font-size:11px; font-weight:800; background:#86EFAC; border:1.5px solid #0F172A; padding:2px 6px; border-radius:4px;">ACTIVE</span>
+              </div>
+
+            </aside>
+
+            <!-- 右侧主作答卡片 -->
+            <main class="main-panel">
+              <div class="arcade-card question-card">
+                
+                <!-- 顶部元信息 -->
+                <div class="q-meta-bar">
+                  <div style="display:flex; gap:8px; align-items:center;">
+                    <span class="badge-pill" style="background:#DDD6FE; color:#4C1D95;">MySQL · 索引与底层原理</span>
+                    <span class="badge-pill" style="background:#FEF08A; color:#854D0E;">Q-104</span>
+                  </div>
+                  <div style="font-family:'Fira Code'; font-size:13px; font-weight:700; color:#64748B;">
+                    本轮进度: <strong>3 / 10</strong>
+                  </div>
+                </div>
+
+                <!-- 题目干 -->
+                <h2 class="q-heading">为什么 MySQL InnoDB 引擎选用 B+ 树而不是 B 树或哈希作为索引结构？</h2>
+
+                <!-- 考点提示框 -->
+                <div class="hint-box">
+                  <svg class="icon" style="width:16px;height:16px;" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+                  <span>重点考查：磁盘 I/O 扇出比、叶子节点双向链表范围查询能力、哈希索引的排序局限性</span>
+                </div>
+
+                <!-- 回答框 -->
+                <div style="margin-bottom:8px; font-size:13px; font-weight:800; color:#0F172A; display:flex; justify-content:space-between;">
+                  <span>你的理解 (支持 Markdown)</span>
+                  <span style="font-family:'Fira Code'; font-size:12px; color:#64748B;">按 Ctrl + Enter 提交</span>
+                </div>
+                <textarea id="mockInput" placeholder="在此输入你的回答要点，例如：\n1. 非叶子节点只存键和指针，单页能容纳更多索引项，树高度更矮，极大减少磁盘寻道次数；\n2. 叶子节点双向链表相连，对 BETWEEN、ORDER BY 等范围扫描性能极高..."></textarea>
+
+                <!-- 操作按钮 -->
+                <div class="action-toolbar">
+                  <button class="btn-arcade-submit" onclick="triggerMockStream()">
+                    <svg class="icon" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                    <span>提交作答并让 AI 评卷</span>
+                  </button>
+                  <button class="btn-arcade-skip">跳过此题</button>
+                </div>
+
+                <!-- AI 流式评卷卡片 -->
+                <div class="ai-stream-panel" id="aiStreamBox">
+                  <div class="ai-stream-head">
+                    <div style="display:flex; align-items:center; gap:8px; font-weight:800; font-size:14px; color:#0F172A;">
+                      <svg class="icon" style="color:#2563EB;" viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                      <span>AI 智能评卷判定</span>
+                    </div>
+                    <span class="badge-pill" style="background:#86EFAC; color:#14532D;" id="aiGradeBadge">GRADE: EASY (熟练)</span>
+                  </div>
+                  <div class="ai-stream-content" id="aiContent">
+                    【评卷反馈】回答非常准确！精准命中 3 大核心考点：① 磁盘 I/O 扇出与千万级数据仅需 3~4 次 I/O；② 双向链表对范围查找（Range Query）提供极佳支持；③ 对比 Hash 索引解释了天然排序优势。艾宾浩斯复习间隔推荐自动更新为 7 天后。
+                  </div>
+                </div>
+
+                <!-- 4 级实体按键栏 -->
+                <div class="grade-keyboard-box">
+                  <div class="grade-title-tip">
+                    <span>评分判定 (支持键盘 1~4 快捷打分)</span>
+                    <span>艾宾浩斯复习调度</span>
+                  </div>
+                  <div class="arcade-grade-grid">
+                    <button class="arcade-grade-btn again" onclick="flashBtn(this)">
+                      <span class="hotkey-chip">[1]</span>
+                      <span class="grade-name">Again</span>
+                      <span class="grade-due">重新背诵 (1天)</span>
+                    </button>
+                    <button class="arcade-grade-btn hard" onclick="flashBtn(this)">
+                      <span class="hotkey-chip">[2]</span>
+                      <span class="grade-name">Hard</span>
+                      <span class="grade-due">稍显生疏 (2天)</span>
+                    </button>
+                    <button class="arcade-grade-btn good" onclick="flashBtn(this)">
+                      <span class="hotkey-chip">[3]</span>
+                      <span class="grade-name">Good</span>
+                      <span class="grade-due">基本掌握 (4天)</span>
+                    </button>
+                    <button class="arcade-grade-btn easy" onclick="flashBtn(this)">
+                      <span class="hotkey-chip">[4]</span>
+                      <span class="grade-name">Easy</span>
+                      <span class="grade-due">完全掌握 (7天)</span>
+                    </button>
+                  </div>
+                </div>
+
+              </div>
+            </main>
+          </div>
+        `;
+      } else if (theme === 'bento-minimal') {
+        content.innerHTML = `
+          <div style="max-width:800px; margin:0 auto; background:#fff; border:1px solid #E2E8F0; border-radius:16px; padding:28px;">
+            <span style="font-size:12px; color:#64748B;">Apple Bento 原版 (低对比灰底白卡)</span>
+            <h2 style="font-size:24px; font-weight:700; color:#0F172A; margin:12px 0;">为什么 MySQL InnoDB 选用 B+ 树？</h2>
+            <textarea style="width:100%; min-height:120px; border:1px solid #CBD5E1; border-radius:10px; padding:12px;" placeholder="输入回答..."></textarea>
+            <button style="width:100%; min-height:46px; background:#059669; color:#fff; border:0; border-radius:10px; font-weight:600; margin-top:12px;">提交作答</button>
+          </div>
+        `;
+      } else if (theme === 'linear-dark') {
+        content.innerHTML = `
+          <div style="max-width:800px; margin:0 auto; background:#12151E; border:1px solid rgba(255,255,255,0.08); border-radius:16px; padding:28px; color:#EDEDEF;">
+            <span style="font-size:12px; color:#818CF8;">Linear Dark 极客终端风</span>
+            <h2 style="font-size:24px; font-weight:700; margin:12px 0;">为什么 MySQL InnoDB 选用 B+ 树？</h2>
+            <textarea style="width:100%; min-height:120px; background:#080A0F; border:1px solid rgba(255,255,255,0.1); border-radius:10px; padding:12px; color:#fff;" placeholder="输入回答..."></textarea>
+            <button style="width:100%; min-height:46px; background:#6366F1; color:#fff; border:0; border-radius:10px; font-weight:600; margin-top:12px;">提交作答</button>
+          </div>
+        `;
+      } else if (theme === 'neo-brutalism') {
+        content.innerHTML = `
+          <div style="max-width:800px; margin:0 auto; background:#fff; border:3px solid #000; box-shadow:6px 6px 0px #000; padding:28px; color:#000;">
+            <span style="background:#DDD6FE; border:2px solid #000; padding:4px 8px; font-weight:800; font-size:12px;">纯街机野兽派</span>
+            <h2 style="font-size:24px; font-weight:900; margin:14px 0;">为什么 MYSQL 选用 B+ 树？</h2>
+            <textarea style="width:100%; min-height:120px; background:#FFFBEB; border:3px solid #000; padding:12px; font-weight:700;" placeholder="输入回答..."></textarea>
+            <button style="width:100%; min-height:48px; background:#FDE047; border:3px solid #000; box-shadow:4px 4px 0px #000; font-weight:900; margin-top:12px;">⚡ 立即评卷</button>
+          </div>
+        `;
+      }
+    }
+
+    function switchTheme(theme) {
+      if (isQuadView) toggleQuadView();
+      currentTheme = theme;
+      document.querySelectorAll('.style-btn').forEach(btn => {
+        btn.classList.remove('active');
+        if (btn.getAttribute('onclick').includes(theme)) {
+          btn.classList.add('active');
+        }
+      });
+      renderSingleTheme(theme);
+    }
+
+    function toggleQuadView() {
+      isQuadView = !isQuadView;
+      const single = document.getElementById('singleView');
+      const quad = document.getElementById('quadView');
+      const txt = document.getElementById('txtQuadView');
+      if (isQuadView) {
+        single.style.display = 'none';
+        quad.style.display = 'grid';
+        txt.innerText = '返回单风格模式';
+        document.querySelectorAll('.style-btn').forEach(b => b.classList.remove('active'));
+      } else {
+        quad.style.display = 'none';
+        single.style.display = 'block';
+        txt.innerText = '全风格同屏对比';
+        switchTheme(currentTheme);
+      }
+    }
+
+    function flashBtn(el) {
+      el.style.transform = 'translate(2px, 2px)';
+      el.style.boxShadow = '1px 1px 0px #0F172A';
+      setTimeout(() => {
+        el.style.transform = '';
+        el.style.boxShadow = '';
+      }, 150);
+    }
+
+    function triggerMockStream() {
+      const box = document.getElementById('aiStreamBox');
+      const content = document.getElementById('aiContent');
+      if (!box || !content) {
+        alert('请在主视图下查看流式打字动效');
+        return;
+      }
+      box.style.display = 'block';
+      content.innerHTML = '';
+      const text = '【AI 实时评卷】回答非常准确！命中 3 大核心考点：\n1. 非叶子节点不存数据，使得单页可容纳索引项大幅增加，降低树高（通常3层即可存千万级数据）；\n2. 叶子节点双向链表对范围查询（Range Query）提供极佳支持；\n3. 相比 Hash 索引具备天然排序特性与高局部性。判定为 Easy / 熟练掌握！';
+      let idx = 0;
+      const timer = setInterval(() => {
+        content.innerText += text[idx];
+        idx++;
+        if (idx >= text.length) clearInterval(timer);
+      }, 20);
+    }
+
+    // 默认展示融合后的新方案
+    renderSingleTheme('arcade-bento');
+  </script>
+</body>
+</html>
