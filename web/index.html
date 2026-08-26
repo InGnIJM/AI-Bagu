@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>八股抽问</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@500;600&family=Fira+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --color-primary: #7C3AED;
+      --color-primary-hover: #6D28D9;
+      --color-on-primary: #FFFFFF;
+      --color-accent: #059669;
+      --color-background: #FAF5FF;
+      --color-foreground: #0F172A;
+      --color-muted: #F7F3FD;
+      --color-muted-fg: #64748B;
+      --color-border: #EFE7FC;
+      --color-card: #FFFFFF;
+      --color-ring: #7C3AED;
+      --color-danger: #DC2626;
+      --radius-btn: 20px;
+      --radius-card: 12px;
+      --font-sans: "Fira Sans", system-ui, sans-serif;
+      --font-mono: "Fira Code", ui-monospace, monospace;
+      --shadow: 0 1px 2px rgba(15,23,42,.06), 0 8px 24px rgba(124,58,237,.08);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      background: radial-gradient(1200px 480px at 10% -10%, #EDE9FE 0%, transparent 55%), var(--color-background);
+      color: var(--color-foreground);
+      font-size: 16px;
+      line-height: 1.5;
+    }
+    button, input, select, textarea { font-family: inherit; font-size: 16px; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+      outline: 3px solid var(--color-ring); outline-offset: 2px;
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .app { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .mark { width: 40px; height: 40px; border-radius: 12px; background: var(--color-primary); color: #fff; display: grid; place-items: center; }
+    .brand h1 { font-size: 18px; font-weight: 600; }
+    .brand p { font-size: 13px; color: var(--color-muted-fg); }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 20px; }
+    .stat { background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: 16px; }
+    .stat .k { font-size: 12px; color: var(--color-muted-fg); font-weight: 500; }
+    .stat .v { font-family: var(--font-mono); font-size: 22px; font-weight: 600; letter-spacing: -.04em; margin-top: 4px; }
+    .card { background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow); padding: 24px; }
+    .eyebrow { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: var(--color-primary); margin-bottom: 12px; }
+    .pill { font-family: var(--font-mono); font-size: 12px; background: var(--color-muted); padding: 4px 8px; border-radius: 8px; }
+    h2.q { font-size: 26px; letter-spacing: -.03em; font-weight: 600; line-height: 1.3; }
+    .meta { margin: 8px 0 16px; color: var(--color-muted-fg); font-size: 14px; }
+    label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+    textarea, input, select {
+      width: 100%; border: 1px solid var(--color-border); border-radius: 12px; padding: 12px 14px;
+    }
+    textarea { min-height: 140px; resize: vertical; }
+    .cta {
+      margin-top: 12px; width: 100%; min-height: 48px; border: 0; border-radius: var(--radius-btn);
+      background: var(--color-primary); color: #fff; font-weight: 600;
+    }
+    .cta:hover:not(:disabled) { background: var(--color-primary-hover); }
+    .ghost { width: 100%; min-height: 44px; margin-top: 8px; border: 0; background: transparent; color: var(--color-muted-fg); border-radius: var(--radius-btn); }
+    .hidden { display: none !important; }
+    .verdict { margin-top: 16px; padding: 16px; border-radius: 12px; background: var(--color-muted); }
+    .verdict.easy { background: #ECFDF5; }
+    .verdict.hard, .verdict.again, .verdict.good { background: #FFFBEB; }
+    .badge { display: inline-block; font-family: var(--font-mono); font-size: 12px; font-weight: 600; padding: 4px 8px; border-radius: 8px; background: #FDE68A; color: #92400E; }
+    .verdict.easy .badge { background: #A7F3D0; color: #065F46; }
+    .error { margin-top: 12px; color: var(--color-danger); font-size: 14px; }
+    .field { margin-bottom: 16px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .help { font-size: 13px; color: var(--color-muted-fg); margin-top: 6px; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+    .secondary { min-height: 48px; border-radius: var(--radius-btn); border: 1px solid var(--color-border); background: #fff; font-weight: 600; }
+    .cats { margin-top: 24px; }
+    .cats h3 { font-size: 13px; font-weight: 600; color: var(--color-muted-fg); margin-bottom: 12px; }
+    .cat { display: grid; grid-template-columns: 120px 1fr 56px; gap: 12px; align-items: center; border-bottom: 1px solid var(--color-border); }
+    .cat button { text-align: left; border: 0; background: transparent; min-height: 44px; font-weight: 500; }
+    .bar { height: 8px; background: var(--color-muted); border-radius: 99px; overflow: hidden; }
+    .bar > span { display: block; height: 100%; background: #8B5CF6; }
+    .cat .n { font-family: var(--font-mono); font-size: 13px; color: var(--color-muted-fg); text-align: right; }
+    .idle-hero { text-align: center; }
+    .idle-hero h2 { font-size: 26px; margin: 8px 0; letter-spacing: -.03em; }
+    .idle-hero p { color: var(--color-muted-fg); margin-bottom: 20px; }
+    .model-bar {
+      width: 100%; text-align: left; margin-bottom: 16px; min-height: 56px;
+      border: 1px solid var(--color-border); background: var(--color-card);
+      border-radius: var(--radius-card); padding: 12px 16px; box-shadow: var(--shadow);
+    }
+    .model-bar .k { font-size: 12px; font-weight: 600; color: var(--color-primary); }
+    .model-bar .n { font-weight: 600; margin-top: 2px; }
+    .model-bar .u { font-family: var(--font-mono); font-size: 12px; color: var(--color-muted-fg); }
+    .lib-card {
+      border: 1px solid var(--color-border); border-radius: var(--radius-card);
+      padding: 16px; margin-bottom: 8px; background: #fff; cursor: pointer; width: 100%; text-align: left;
+    }
+    .lib-card.active { border: 2px solid var(--color-primary); background: var(--color-muted); }
+    .lib-ops { margin-top: 8px; display: flex; gap: 12px; }
+    .lib-ops button { border: 0; background: transparent; color: var(--color-primary); min-height: 44px; font-weight: 600; }
+    .back { border: 0; background: transparent; color: var(--color-primary); min-height: 44px; font-weight: 600; margin-bottom: 8px; }
+    @media (max-width: 640px) {
+      .stats, .row, .actions { grid-template-columns: 1fr 1fr; }
+      .stats { grid-template-columns: 1fr 1fr; }
+      h2.q, .idle-hero h2 { font-size: 22px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5a2 2 0 0 1 2-2h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/><path d="M13 3v5h5"/></svg>
+        </div>
+        <div>
+          <h1>八股抽问</h1>
+          <p>你描述 · 模型判 · 每题只记一次</p>
+        </div>
+      </div>
+    </header>
+
+    <section class="stats" aria-label="进度">
+      <div class="stat"><div class="k">总题</div><div class="v" id="st-total">—</div></div>
+      <div class="stat"><div class="k">今日到期</div><div class="v" id="st-due">—</div></div>
+      <div class="stat"><div class="k">已掌握</div><div class="v" id="st-mastered">—</div></div>
+      <div class="stat"><div class="k">本轮</div><div class="v" id="st-round">无</div></div>
+    </section>
+
+    <button type="button" class="model-bar" id="model-bar" aria-label="当前评卷模型">
+      <div class="k">正在评卷</div>
+      <div class="n" id="model-bar-name">未配置评卷模型</div>
+      <div class="u" id="model-bar-meta"></div>
+    </button>
+
+    <section id="view-quiz">
+      <div id="idle" class="card hidden">
+        <div class="idle-hero">
+          <div class="eyebrow" style="justify-content:center">没有进行中的会话</div>
+          <h2>抽一轮，逐题作答</h2>
+          <p>到期复习优先。Hermes 和这个页面共用同一把会话锁。</p>
+          <button class="cta" type="button" id="btn-draw">抽 5 题</button>
+        </div>
+      </div>
+      <div id="quiz" class="card hidden">
+        <div class="eyebrow"><span id="q-cat"></span><span class="pill" id="q-sid"></span></div>
+        <h2 class="q" id="q-title"></h2>
+        <p class="meta" id="q-meta"></p>
+        <label for="ans">用自己的话描述</label>
+        <textarea id="ans" placeholder="按你的理解写，不要自己点 again/hard"></textarea>
+        <button class="cta" type="button" id="btn-submit">发给模型评判</button>
+        <button class="ghost" type="button" id="btn-skip">结束本轮 skip</button>
+        <p class="error hidden" id="q-err" role="alert"></p>
+        <div id="verdict" class="verdict hidden"></div>
+      </div>
+    </section>
+
+    <section id="view-lib" class="card hidden">
+      <button type="button" class="back" id="btn-back-quiz">返回作答</button>
+      <h2 class="q" style="font-size:22px;margin-bottom:12px">评卷模型</h2>
+      <div id="lib-list"></div>
+      <button class="cta" type="button" id="btn-new-model">新建配置</button>
+      <p class="error hidden" id="lib-err" role="alert"></p>
+    </section>
+
+    <section id="view-edit" class="card hidden">
+      <button type="button" class="back" id="btn-back-lib">返回列表</button>
+      <h2 class="q" style="font-size:22px;margin-bottom:12px" id="edit-title">新建配置</h2>
+      <div class="field">
+        <label for="m-name">显示名</label>
+        <input id="m-name">
+      </div>
+      <div class="field">
+        <label for="prov">供应商</label>
+        <select id="prov"></select>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="model">模型 ID</label>
+          <input id="model">
+        </div>
+        <div class="field">
+          <label for="base">Base URL</label>
+          <input id="base">
+        </div>
+      </div>
+      <div class="field">
+        <label for="key">API Key</label>
+        <input id="key" type="password" autocomplete="off" placeholder="留空则不改已保存的 Key">
+        <p class="help" id="key-hint">未配置</p>
+      </div>
+      <p class="error hidden" id="cfg-err" role="alert"></p>
+      <div class="actions">
+        <button class="secondary" type="button" id="btn-test">测试连接</button>
+        <button class="cta" type="button" id="btn-save" style="margin-top:0" disabled>保存</button>
+      </div>
+    </section>
+
+    <section class="cats" id="cats"></section>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const presets = {
+      deepseek: { base: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+      openrouter: { base: "https://openrouter.ai/api/v1", model: "openrouter/auto" },
+      openai: { base: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+      glm: { base: "https://api.z.ai/api/paas/v4", model: "glm-4-flash" },
+      kimi: { base: "https://api.moonshot.cn/v1", model: "kimi-k2-turbo-preview" },
+      siliconflow: { base: "https://api.siliconflow.cn/v1", model: "deepseek-ai/DeepSeek-V3" },
+      gemini: { base: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-2.0-flash" },
+      ollama: { base: "http://127.0.0.1:11434/v1", model: "llama3.1" },
+      custom: { base: "", model: "" }
+    };
+    let session = { session_id: null, pending: [], items: [] };
+    let lastVerdict = null;
+    let modelsState = { active_id: "", models: [], presets: [] };
+    let editingId = null;
+    let testedOk = false;
+    let testGen = 0;
+
+    async function api(method, path, body) {
+      const opt = { method, headers: { "Content-Type": "application/json" } };
+      if (body !== undefined) opt.body = JSON.stringify(body);
+      const res = await fetch(path, opt);
+      const ct = res.headers.get("content-type") || "";
+      const data = ct.includes("json") ? await res.json() : await res.text();
+      if (!res.ok) {
+        const msg = (data && data.error) || res.statusText;
+        throw new Error(msg);
+      }
+      return data;
+    }
+
+    function draftKey(sid, qid) { return "bagu-draft:" + sid + ":" + qid; }
+    function saveDraft() {
+      const q = currentQuestion();
+      if (!session.session_id || !q) return;
+      sessionStorage.setItem(draftKey(session.session_id, q.id), $("ans").value);
+    }
+    function loadDraft() {
+      const q = currentQuestion();
+      if (!session.session_id || !q) return "";
+      return sessionStorage.getItem(draftKey(session.session_id, q.id)) || "";
+    }
+    function clearDraft(sid, qid) {
+      sessionStorage.removeItem(draftKey(sid, qid));
+    }
+    function showView(name) {
+      ["view-quiz", "view-lib", "view-edit"].forEach((id) => {
+        $(id).classList.toggle("hidden", id !== "view-" + name);
+      });
+      $("cats").classList.toggle("hidden", name !== "quiz");
+    }
+
+    function renderStats(s) {
+      $("st-total").textContent = s.total;
+      $("st-due").textContent = s.due;
+      $("st-mastered").textContent = s.mastered;
+      const n = session.pending.length;
+      const t = (session.items || []).length;
+      $("st-round").textContent = session.session_id ? `${t - n}/${t}` : "无";
+    }
+
+    function renderCats(s) {
+      const box = $("cats");
+      if (!s.by_cat || !s.by_cat.length) { box.innerHTML = ""; return; }
+      box.innerHTML = "<h3>分类 · 已刷 / 总数</h3>" + s.by_cat.map((c) => {
+        const pct = c.total ? Math.round(100 * (c.seen || 0) / c.total) : 0;
+        const name = c.category;
+        return `<div class="cat"><button type="button" data-cat="${name}">${name}</button><div class="bar"><span style="width:${pct}%"></span></div><div class="n">${c.seen || 0}/${c.total}</div></div>`;
+      }).join("");
+      box.querySelectorAll("button[data-cat]").forEach((b) => {
+        b.addEventListener("click", () => draw(5, b.dataset.cat));
+      });
+    }
+
+    function currentQuestion() {
+      return (session.pending && session.pending[0]) || null;
+    }
+
+    function renderQuiz() {
+      lastVerdict = null;
+      $("verdict").classList.add("hidden");
+      $("q-err").classList.add("hidden");
+      $("btn-submit").dataset.mode = "";
+      $("btn-submit").textContent = "发给模型评判";
+      $("btn-submit").disabled = false;
+      $("ans").value = loadDraft();
+      const q = currentQuestion();
+      if (!session.session_id || !q) {
+        $("idle").classList.remove("hidden");
+        $("quiz").classList.add("hidden");
+        return;
+      }
+      $("idle").classList.add("hidden");
+      $("quiz").classList.remove("hidden");
+      $("q-cat").textContent = q.category;
+      $("q-sid").textContent = session.session_id;
+      $("q-title").textContent = (q.question.split("｜").pop() || q.question).trim();
+      const done = session.items.length - session.pending.length;
+      $("q-meta").textContent = `${q.question.includes("｜") ? q.question.split("｜")[0] + " · " : ""}#${q.id} · 第 ${done + 1} / ${session.items.length} 题`;
+    }
+
+    async function refresh() {
+      const s = await api("GET", "/api/stats");
+      session = await api("GET", "/api/session");
+      renderStats(s);
+      renderCats(s);
+      renderQuiz();
+    }
+
+    async function draw(n, cat) {
+      try {
+        await api("POST", "/api/draw", { n, cat: cat || null });
+        await refresh();
+      } catch (e) {
+        alert(e.message);
+        await refresh();
+      }
+    }
+
+    function applyPresetList(list) {
+      if (!list || !list.length) return;
+      const sel = $("prov");
+      const current = sel.value;
+      sel.innerHTML = list.map((p) => `<option value="${p.id}">${p.label}</option>`).join("");
+      list.forEach((p) => {
+        presets[p.id] = { base: p.base_url || "", model: p.model || "" };
+      });
+      if (current && presets[current]) sel.value = current;
+    }
+
+    function renderModelBar(data) {
+      const active = (data.models || []).find((m) => m.id === data.active_id);
+      if (!active) {
+        $("model-bar-name").textContent = "未配置评卷模型";
+        $("model-bar-meta").textContent = "";
+        return;
+      }
+      $("model-bar-name").textContent = active.name || "未配置评卷模型";
+      $("model-bar-meta").textContent = [active.model, active.base_url].filter(Boolean).join(" · ");
+    }
+
+    async function fetchModels() {
+      modelsState = await api("GET", "/api/models");
+      applyPresetList(modelsState.presets);
+      renderModelBar(modelsState);
+      return modelsState;
+    }
+
+    function fillProviderDefaults() {
+      const p = presets[$("prov").value] || { base: "", model: "" };
+      $("base").value = p.base;
+      $("model").value = p.model;
+    }
+
+    function markUntested() {
+      testGen += 1;
+      testedOk = false;
+      $("btn-save").disabled = true;
+    }
+
+    function openNew() {
+      editingId = null;
+      markUntested();
+      $("edit-title").textContent = "新建配置";
+      $("m-name").value = "";
+      if ($("prov").options.length) $("prov").selectedIndex = 0;
+      fillProviderDefaults();
+      $("key").value = "";
+      $("key-hint").textContent = "未配置";
+      $("cfg-err").classList.add("hidden");
+      showView("edit");
+    }
+
+    function openEdit(id) {
+      const data = (modelsState.models || []).find((m) => m.id === id);
+      if (!data) return;
+      editingId = id;
+      markUntested();
+      $("edit-title").textContent = "修改配置";
+      $("m-name").value = data.name || "";
+      if (data.provider && presets[data.provider]) $("prov").value = data.provider;
+      $("model").value = data.model || "";
+      $("base").value = data.base_url || "";
+      $("key").value = "";
+      $("key-hint").textContent = data.configured ? ("已保存 " + (data.api_key_masked || "")) : "未配置";
+      $("cfg-err").classList.add("hidden");
+      showView("edit");
+    }
+
+    async function renderLibrary() {
+      $("lib-err").classList.add("hidden");
+      try {
+        const data = await fetchModels();
+        const box = $("lib-list");
+        if (!data.models.length) {
+          box.innerHTML = `<p class="help">还没有模型配置</p>`;
+          return;
+        }
+        box.innerHTML = data.models.map((m) => {
+          const active = m.id === data.active_id;
+          const meta = [m.model, m.base_url].filter(Boolean).join(" · ");
+          const name = String(m.name || "").replace(/[&<>"']/g, (c) => ({
+            "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+          }[c]));
+          const metaEsc = String(meta).replace(/[&<>"']/g, (c) => ({
+            "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+          }[c]));
+          return `<div class="lib-card${active ? " active" : ""}" data-id="${m.id}">
+            <div class="n">${name}${active ? " · 使用中" : ""}</div>
+            <div class="u">${metaEsc}</div>
+            <div class="lib-ops">
+              <button type="button" data-act="edit">修改</button>
+              <button type="button" data-act="copy">复制</button>
+              <button type="button" data-act="del">删除</button>
+            </div>
+          </div>`;
+        }).join("");
+        box.querySelectorAll(".lib-card").forEach((card) => {
+          card.addEventListener("click", async () => {
+            try {
+              await api("POST", "/api/models/" + card.dataset.id + "/activate");
+              await renderLibrary();
+            } catch (e) {
+              $("lib-err").textContent = e.message;
+              $("lib-err").classList.remove("hidden");
+            }
+          });
+        });
+        box.querySelectorAll(".lib-ops button").forEach((btn) => {
+          btn.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            const id = btn.closest("[data-id]").dataset.id;
+            try {
+              if (btn.dataset.act === "edit") {
+                openEdit(id);
+              } else if (btn.dataset.act === "copy") {
+                await api("POST", "/api/models/" + id + "/copy");
+                await renderLibrary();
+              } else if (btn.dataset.act === "del") {
+                if (!confirm("删除这条模型配置？")) return;
+                await api("DELETE", "/api/models/" + id);
+                await renderLibrary();
+              }
+            } catch (err) {
+              $("lib-err").textContent = err.message;
+              $("lib-err").classList.remove("hidden");
+            }
+          });
+        });
+      } catch (e) {
+        $("lib-err").textContent = e.message;
+        $("lib-err").classList.remove("hidden");
+      }
+    }
+
+    $("btn-draw").addEventListener("click", () => draw(5));
+    $("btn-skip").addEventListener("click", async () => {
+      try {
+        const q = currentQuestion();
+        const sid = session.session_id;
+        await api("POST", "/api/skip", { session_id: session.session_id });
+        if (sid && q) clearDraft(sid, q.id);
+        await refresh();
+      } catch (e) {
+        $("q-err").textContent = e.message;
+        $("q-err").classList.remove("hidden");
+      }
+    });
+    $("btn-submit").addEventListener("click", async () => {
+      if ($("btn-submit").dataset.mode === "next") {
+        $("btn-submit").dataset.mode = "";
+        $("btn-submit").textContent = "发给模型评判";
+        await refresh();
+        return;
+      }
+      const q = currentQuestion();
+      const text = $("ans").value.trim();
+      if (!q || !text) return;
+      $("btn-submit").disabled = true;
+      $("q-err").classList.add("hidden");
+      try {
+        const out = await api("POST", "/api/answer", {
+          session_id: session.session_id,
+          question_id: q.id,
+          text
+        });
+        clearDraft(session.session_id, q.id);
+        const box = $("verdict");
+        box.className = "verdict " + out.grade;
+        let html = `<span class="badge">模型判定 · ${out.grade}</span><p style="margin-top:10px">${out.comment || ""}</p>`;
+        if (out.grade !== "easy" && out.full_answer) {
+          html += `<p style="margin-top:10px;white-space:pre-wrap">${out.full_answer}</p>`;
+        }
+        box.innerHTML = html;
+        box.classList.remove("hidden");
+        $("btn-submit").dataset.mode = "next";
+        $("btn-submit").textContent = "下一题";
+      } catch (e) {
+        $("q-err").textContent = e.message;
+        $("q-err").classList.remove("hidden");
+        saveDraft();
+      } finally {
+        $("btn-submit").disabled = false;
+      }
+    });
+    $("ans").addEventListener("input", saveDraft);
+
+    $("model-bar").addEventListener("click", async () => {
+      showView("lib");
+      await renderLibrary();
+    });
+    $("btn-back-quiz").addEventListener("click", () => showView("quiz"));
+    $("btn-back-lib").addEventListener("click", async () => {
+      showView("lib");
+      await renderLibrary();
+    });
+    $("btn-new-model").addEventListener("click", openNew);
+
+    $("prov").addEventListener("change", () => {
+      if (!editingId) fillProviderDefaults();
+      markUntested();
+    });
+    ["m-name", "model", "base", "key"].forEach((id) => {
+      $(id).addEventListener("input", markUntested);
+      $(id).addEventListener("change", markUntested);
+    });
+
+    $("btn-test").addEventListener("click", async () => {
+      $("cfg-err").classList.add("hidden");
+      $("btn-test").disabled = true;
+      const gen = testGen;
+      try {
+        const body = {
+          provider: $("prov").value,
+          model: $("model").value,
+          base_url: $("base").value
+        };
+        if ($("key").value.trim()) body.api_key = $("key").value.trim();
+        if (editingId) body.id = editingId;
+        await api("POST", "/api/models/test", body);
+        if (gen !== testGen) return;
+        testedOk = true;
+        $("btn-save").disabled = false;
+        $("key-hint").textContent = "测试通过";
+      } catch (e) {
+        testedOk = false;
+        $("btn-save").disabled = true;
+        $("cfg-err").textContent = e.message;
+        $("cfg-err").classList.remove("hidden");
+      } finally {
+        $("btn-test").disabled = false;
+      }
+    });
+
+    $("btn-save").addEventListener("click", async () => {
+      if (!testedOk) return;
+      $("cfg-err").classList.add("hidden");
+      $("btn-save").disabled = true;
+      try {
+        const payload = {
+          name: $("m-name").value,
+          provider: $("prov").value,
+          model: $("model").value,
+          base_url: $("base").value
+        };
+        if ($("key").value.trim()) payload.api_key = $("key").value.trim();
+        if (editingId) await api("PUT", "/api/models/" + editingId, payload);
+        else await api("POST", "/api/models", payload);
+        $("key").value = "";
+        showView("lib");
+        await renderLibrary();
+      } catch (e) {
+        $("cfg-err").textContent = e.message;
+        $("cfg-err").classList.remove("hidden");
+        $("btn-save").disabled = false;
+      }
+    });
+
+    showView("quiz");
+    fetchModels().catch(() => {});
+    refresh().catch((e) => { $("q-err").textContent = e.message; $("q-err").classList.remove("hidden"); });
+  </script>
+</body>
+</html>
