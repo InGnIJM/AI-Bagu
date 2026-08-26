@@ -62,11 +62,41 @@ def test_fetch_questions_h2_with_h3():
         (
             "MySQL",
             "索引｜什么是B+树",
-            "本节导语\n\nB+ 树答案重点\n\n- 索引项一\n- 索引项二",
+            "本节导语\n\nB+ 树答案**重点**\n\n- 索引项一\n- 索引项二",
             "http://x#b",
         ),
-        ("MySQL", "索引｜为什么不用红黑树", "SELECT 1;", "http://x#c"),
+        (
+            "MySQL",
+            "索引｜为什么不用红黑树",
+            "```\nSELECT 1;\n```",
+            "http://x#c",
+        ),
         ("MySQL", "事务", "事务答案", "http://x#d"),
+    ]
+
+
+def test_parse_question_page_preserves_markdown_tables_and_nested_lists():
+    html = (
+        "<h2>消息队列</h2><h3 id='choose'>怎么选型？</h3>"
+        "<p><strong>重点</strong>参考<a href='/guide'>选型文档</a></p>"
+        "<ol><li>吞吐量<ul><li>十万级</li></ul></li><li>可用性</li></ol>"
+        "<table><thead><tr><th>特性</th><th>Kafka</th></tr></thead>"
+        "<tbody><tr><td>吞吐量</td><td>十万级</td></tr></tbody></table>"
+    )
+
+    questions = bagu.parse_question_page("消息队列", "https://example.com/mq.html", html)
+
+    assert questions == [
+        (
+            "消息队列",
+            "消息队列｜怎么选型？",
+            (
+                "**重点**参考[选型文档](https://example.com/guide)\n\n"
+                "1. 吞吐量\n  - 十万级\n2. 可用性\n\n"
+                "| 特性 | Kafka |\n| --- | --- |\n| 吞吐量 | 十万级 |"
+            ),
+            "https://example.com/mq.html#choose",
+        )
     ]
 
 
@@ -544,6 +574,64 @@ def test_api_answer_requires_settings(conn, tmp_path):
     assert code == 400 and conn.execute("SELECT times_seen FROM questions").fetchone()[0] == 0
 
 
+def test_api_reveal_returns_answer_without_grading(conn, tmp_path):
+    conn.execute(
+        "INSERT INTO questions(category, question, answer, url) VALUES(?,?,?,?)",
+        ("MySQL", "事务是什么？", "题库中的标准答案", "http://reference"),
+    )
+    conn.commit()
+    _, drawn, _ = bagu.handle_http("POST", "/api/draw", {"n": 1}, conn, tmp_path)
+    qid = drawn["questions"][0]["id"]
+
+    code, out, _ = bagu.handle_http(
+        "POST",
+        "/api/reveal",
+        {"session_id": drawn["session_id"], "question_id": qid},
+        conn,
+        tmp_path,
+    )
+
+    assert code == 200
+    assert out["answer"] == "题库中的标准答案"
+    assert "题库中的标准答案" in out["answer_html"]
+    item = conn.execute(
+        "SELECT grade FROM session_items WHERE session_id=? AND question_id=?",
+        (drawn["session_id"], qid),
+    ).fetchone()
+    assert item["grade"] is None
+    assert conn.execute("SELECT times_seen FROM questions WHERE id=?", (qid,)).fetchone()[0] == 0
+
+
+def test_api_review_again_reveals_answer_and_grades_once(conn, tmp_path):
+    conn.execute(
+        "INSERT INTO questions(category, question, answer, url) VALUES(?,?,?,?)",
+        ("MySQL", "事务是什么？", "题库中的标准答案", "http://reference"),
+    )
+    conn.commit()
+    _, drawn, _ = bagu.handle_http("POST", "/api/draw", {"n": 1}, conn, tmp_path)
+    qid = drawn["questions"][0]["id"]
+    body = {
+        "session_id": drawn["session_id"],
+        "question_id": qid,
+        "result": "again",
+    }
+
+    code, out, _ = bagu.handle_http("POST", "/api/review", body, conn, tmp_path)
+
+    assert code == 200
+    assert out["grade"] == "again"
+    assert out["answer"] == "题库中的标准答案"
+    row = conn.execute(
+        "SELECT level, times_seen, next_due FROM questions WHERE id=?", (qid,)
+    ).fetchone()
+    assert row["level"] == 0 and row["times_seen"] == 1
+    assert row["next_due"] == (bagu.dt.date.today() + bagu.dt.timedelta(days=1)).isoformat()
+
+    code, err, _ = bagu.handle_http("POST", "/api/review", body, conn, tmp_path)
+    assert code == 400 and "已评判" in err["error"]
+    assert conn.execute("SELECT times_seen FROM questions WHERE id=?", (qid,)).fetchone()[0] == 1
+
+
 def test_mask_long_key():
     assert "abcd" not in bagu.mask_api_key("sk-abcdefghij")
     assert bagu.mask_api_key("sk-abcdefghij").startswith("sk-")
@@ -891,6 +979,22 @@ def test_http_more_routes(conn, tmp_path, monkeypatch):
         tmp_path,
     )
     assert code == 400
+
+
+def test_web_has_memorize_mode_and_dont_know_action(conn, tmp_path):
+    code, html, _ = bagu.handle_http("GET", "/", None, conn, tmp_path)
+
+    assert code == 200
+    assert 'id="mode-answer"' in html
+    assert 'id="mode-memorize"' in html
+    assert 'id="btn-dont-know"' in html
+    assert 'id="memorize-answer"' in html
+    assert 'id="review-actions"' in html
+    assert {"again", "hard", "good", "easy"} <= set(
+        re.findall(r'data-review="([^"]+)"', html)
+    )
+    assert 'api("POST", "/api/reveal"' in html
+    assert 'api("POST", "/api/review"' in html
 
 
 def test_api_models_crud(conn, tmp_path, monkeypatch):
@@ -1414,29 +1518,56 @@ def test_question_crud_and_search_include_answer(conn):
     assert updated["answer"] == "更新后的标准答案"
 
 
-def test_question_public_renders_only_safe_answer_images(conn):
+def test_question_public_renders_safe_markdown_blocks(conn):
     created = bagu.create_question(
         conn,
         {
             "category": "MySQL",
             "question": "安全渲染",
             "answer": (
+                "## 结论\n\n"
+                "**重点**、`offset` 和 [参考文档](https://example.com/guide)\n\n"
+                "- 一级\n  - 二级\n\n"
+                "1. 第一步\n2. 第二步\n\n"
+                "> 注意事项\n\n"
+                "```sql\nSELECT * FROM messages;\n```\n\n"
+                "| 特性 | Kafka |\n| --- | ---: |\n| 吞吐量 | 十万级 |\n\n"
                 "<script>alert(1)</script>\n"
                 "[图片：架构图](https://cdn.example.com/a.png)\n"
-                "[图片：危险](javascript:alert(2))"
+                "![流程图](https://cdn.example.com/b.png)\n"
+                "![危险](javascript:alert(2))\n"
+                "[危险链接](javascript:alert(3))"
             ),
             "url": "",
         },
     )
 
     rendered = created["answer_html"]
+    assert '<h2 id="结论">结论</h2>' in rendered
+    assert "<strong>重点</strong>" in rendered
+    assert "<code>offset</code>" in rendered
+    assert '<a href="https://example.com/guide"' in rendered
+    assert rendered.count("<ul>") == 2 and rendered.count("<ol>") == 1
+    assert "<blockquote><p>注意事项</p></blockquote>" in rendered
+    assert '<pre><code class="language-sql">SELECT * FROM messages;</code></pre>' in rendered
+    assert '<div class="answer-table-wrap"><table>' in rendered
+    assert "<th>特性</th>" in rendered and "<td>十万级</td>" in rendered
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
     assert '<img data-answer-image src="https://cdn.example.com/a.png"' in rendered
     assert 'alt="架构图"' in rendered
+    assert '<img data-answer-image src="https://cdn.example.com/b.png"' in rendered
+    assert 'alt="流程图"' in rendered
     assert 'loading="lazy"' in rendered and 'referrerpolicy="no-referrer"' in rendered
     assert 'target="_blank"' in rendered and 'rel="noreferrer"' in rendered
     assert '<span class="image-fallback hidden" data-image-fallback>' in rendered
     assert 'src="javascript:' not in rendered
+    assert 'href="javascript:' not in rendered
+
+
+def test_render_answer_html_keeps_plain_text_paragraphs_and_line_breaks():
+    rendered = bagu.render_answer_html("第一段\n仍是第一段\n\n第二段")
+
+    assert rendered == "<p>第一段<br>仍是第一段</p>\n<p>第二段</p>"
 
 
 def test_question_crud_preserves_progress_and_protects_history(conn):

@@ -41,6 +41,15 @@ MAX_IMPORT_ROWS = 5000
 ANSWER_IMAGE_RE = re.compile(
     r"\[图片[：:](?P<alt>[^\]\r\n]*)\]\((?P<url>https?://[^\s)]+)\)", re.I
 )
+MARKDOWN_IMAGE_RE = re.compile(
+    r"!\[(?P<alt>[^\]\r\n]*)\]\((?P<url>[^\s)]+)\)"
+)
+MARKDOWN_LINK_RE = re.compile(
+    r"\[(?P<label>[^\]\r\n]+)\]\((?P<url>[^\s)]+)\)"
+)
+MARKDOWN_LIST_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+\.)[ \t]+(?P<body>.*)$"
+)
 
 
 def get_conn(db_path=None):
@@ -100,58 +109,202 @@ def get_open_session(conn):
     return conn.execute("SELECT * FROM sessions WHERE status='open' LIMIT 1").fetchone()
 
 
+def _safe_http_url(value, base_url=None):
+    candidate = urllib.parse.urljoin(base_url, value) if base_url else str(value or "")
+    parsed = urllib.parse.urlsplit(candidate)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return candidate
+
+
 class _AnswerTextParser(HTMLParser):
-    """把题目章节 HTML 转成可读纯文本，并保留列表、代码和图片来源。"""
+    """把题目章节 HTML 转成安全 Markdown，保留常见结构。"""
 
     def __init__(self, base_url):
         super().__init__(convert_charrefs=True)
         self.base_url = base_url
         self.parts = []
         self.in_pre = False
+        self.pre_language = ""
+        self.list_stack = []
+        self.list_counts = []
+        self.in_list_item = 0
+        self.link_stack = []
+        self.skip_depth = 0
+        self.table_rows = None
+        self.table_row = None
+        self.table_cell = None
+        self.table_cell_is_header = False
 
     def _break(self, count=1):
-        self.parts.append("\n" * count)
+        self._append("\n" * count)
+
+    def _append(self, value):
+        if self.table_cell is not None:
+            self.table_cell.append(value)
+        else:
+            self.parts.append(value)
+
+    @staticmethod
+    def _attrs(attrs):
+        return {str(key).lower(): value or "" for key, value in attrs}
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
-        attr_map = dict(attrs)
-        if tag in {"p", "div", "blockquote", "table", "tr", "h4", "h5", "h6"}:
+        attr_map = self._attrs(attrs)
+        if tag in {"script", "style", "noscript", "svg"}:
+            self.skip_depth += 1
+            return
+        if self.skip_depth:
+            return
+        if tag == "table":
+            self.table_rows = []
+            self.table_row = None
+            self.table_cell = None
+        elif tag == "tr" and self.table_rows is not None:
+            self.table_row = []
+        elif tag in {"th", "td"} and self.table_row is not None:
+            self.table_cell = []
+            self.table_cell_is_header = tag == "th"
+        elif tag in {"strong", "b"}:
+            self._append("**")
+        elif tag in {"em", "i"}:
+            self._append("*")
+        elif tag == "code" and not self.in_pre:
+            self._append("`")
+        elif tag == "a":
+            url = _safe_http_url(attr_map.get("href", ""), self.base_url)
+            self.link_stack.append(url)
+            if url:
+                self._append("[")
+        elif tag in {"p", "div"}:
+            if not self.in_list_item:
+                self._break(2)
+        elif tag == "blockquote":
             self._break(2)
+            self._append("> ")
+        elif tag in {"h4", "h5", "h6"}:
+            self._break(2)
+            self._append("#" * int(tag[1]) + " ")
         elif tag == "br":
             self._break()
+        elif tag in {"ul", "ol"}:
+            self.list_stack.append(tag)
+            self.list_counts.append(0)
         elif tag == "li":
             self._break()
-            self.parts.append("- ")
+            self.in_list_item += 1
+            depth = max(0, len(self.list_stack) - 1)
+            if self.list_stack and self.list_stack[-1] == "ol":
+                self.list_counts[-1] += 1
+                marker = f"{self.list_counts[-1]}. "
+            else:
+                marker = "- "
+            self._append("  " * depth + marker)
         elif tag == "pre":
             self._break(2)
             self.in_pre = True
+            language = ""
+            for class_name in attr_map.get("class", "").split():
+                if class_name.startswith("language-"):
+                    language = class_name.removeprefix("language-")
+                    break
+            self.pre_language = re.sub(r"[^A-Za-z0-9_+-]", "", language)
+            self._append(f"```{self.pre_language}\n")
         elif tag == "img":
-            src = urllib.parse.urljoin(self.base_url, attr_map.get("src", ""))
-            alt = (attr_map.get("alt") or "图片").strip()
+            src = _safe_http_url(attr_map.get("src", ""), self.base_url)
+            alt = (attr_map.get("alt") or "参考图片").strip().replace("]", "\\]")
             if src:
-                self.parts.append(f"[图片：{alt}]({src})")
+                self._append(f"![{alt}]({src})")
 
     def handle_endtag(self, tag):
         tag = tag.lower()
-        if tag == "pre":
+        if tag in {"script", "style", "noscript", "svg"}:
+            if self.skip_depth:
+                self.skip_depth -= 1
+            return
+        if self.skip_depth:
+            return
+        if tag in {"th", "td"} and self.table_cell is not None:
+            value = re.sub(r"\s+", " ", "".join(self.table_cell)).strip()
+            value = value.replace("|", "\\|")
+            self.table_row.append((value, self.table_cell_is_header))
+            self.table_cell = None
+        elif tag == "tr" and self.table_row is not None:
+            if self.table_row:
+                self.table_rows.append(self.table_row)
+            self.table_row = None
+        elif tag == "table" and self.table_rows is not None:
+            rows = self.table_rows
+            self.table_rows = None
+            if rows:
+                width = max(len(row) for row in rows)
+                normalized = [row + [("", False)] * (width - len(row)) for row in rows]
+                header = normalized[0]
+                table_lines = [
+                    "| " + " | ".join(cell for cell, _ in header) + " |",
+                    "| " + " | ".join("---" for _ in range(width)) + " |",
+                ]
+                table_lines.extend(
+                    "| " + " | ".join(cell for cell, _ in row) + " |"
+                    for row in normalized[1:]
+                )
+                self.parts.append("\n\n" + "\n".join(table_lines) + "\n\n")
+        elif tag in {"strong", "b"}:
+            self._append("**")
+        elif tag in {"em", "i"}:
+            self._append("*")
+        elif tag == "code" and not self.in_pre:
+            self._append("`")
+        elif tag == "a":
+            url = self.link_stack.pop() if self.link_stack else ""
+            if url:
+                self._append(f"]({url})")
+        elif tag == "pre":
+            if self.parts and not self.parts[-1].endswith("\n"):
+                self._append("\n")
+            self._append("```")
             self.in_pre = False
+            self.pre_language = ""
             self._break(2)
-        elif tag in {"p", "div", "blockquote", "table", "tr", "h4", "h5", "h6"}:
+        elif tag in {"p", "div"}:
+            if not self.in_list_item:
+                self._break(2)
+        elif tag == "blockquote":
             self._break(2)
+        elif tag in {"h4", "h5", "h6"}:
+            self._break(2)
+        elif tag == "li":
+            self.in_list_item = max(0, self.in_list_item - 1)
+        elif tag in {"ul", "ol"} and self.list_stack:
+            self.list_stack.pop()
+            self.list_counts.pop()
 
     def handle_data(self, data):
+        if self.skip_depth:
+            return
         if self.in_pre:
-            self.parts.append(data)
+            self._append(data)
         else:
-            self.parts.append(re.sub(r"\s+", " ", data))
+            self._append(re.sub(r"\s+", " ", data))
 
     def text(self):
         raw = html_lib.unescape("".join(self.parts)).replace("\xa0", " ")
-        lines = [line.strip() for line in raw.splitlines()]
+        lines = raw.replace("\r\n", "\n").replace("\r", "\n").splitlines()
         cleaned = []
+        in_fence = False
         for line in lines:
-            if line:
-                cleaned.append(line)
+            if line.strip().startswith("```"):
+                normalized = line.strip()
+                in_fence = not in_fence
+            elif in_fence:
+                normalized = line.rstrip()
+            elif MARKDOWN_LIST_RE.match(line):
+                normalized = line.rstrip()
+            else:
+                normalized = line.strip()
+            if normalized or in_fence:
+                cleaned.append(normalized)
             elif cleaned and cleaned[-1] != "":
                 cleaned.append("")
         return "\n".join(cleaned).strip()
@@ -165,7 +318,9 @@ def _html_text(fragment, base_url):
 
 
 def _heading_text(fragment, base_url):
-    return _html_text(fragment, base_url).replace("\\#", "").strip().lstrip("#").strip()
+    del base_url
+    plain = html_lib.unescape(re.sub(r"<[^>]+>", "", fragment)).replace("\xa0", " ")
+    return re.sub(r"\s+", " ", plain).replace("\\#", "").strip().lstrip("#").strip()
 
 
 def _anchored_url(url, attrs):
@@ -375,32 +530,292 @@ def import_question_csv(conn, text):
     return {"total": len(rows), "inserted": inserted, "skipped": len(rows) - inserted}
 
 
-def render_answer_html(answer):
-    """只渲染抓取器生成的 HTTP(S) 图片标记，其余内容全部转义。"""
-    source = str(answer or "")
+def _render_answer_image(alt_text, raw_url):
+    safe_url = _safe_http_url(raw_url)
+    if not safe_url:
+        return ""
+    url = html_lib.escape(safe_url, quote=True)
+    alt = html_lib.escape((alt_text or "参考图片").strip() or "参考图片", quote=True)
+    return (
+        '<figure class="answer-media">'
+        f'<a class="answer-image-link" href="{url}" target="_blank" '
+        f'rel="noreferrer" aria-label="打开原图：{alt}">'
+        f'<img data-answer-image src="{url}" alt="{alt}" loading="lazy" '
+        'decoding="async" referrerpolicy="no-referrer">'
+        '<span class="image-fallback hidden" data-image-fallback>'
+        '图片加载失败，点击打开原图</span></a>'
+        f'<figcaption>{alt}</figcaption></figure>'
+    )
+
+
+def _render_inline_markdown(value):
+    source = str(value or "")
     parts = []
-    cursor = 0
-    for match in ANSWER_IMAGE_RE.finditer(source):
-        parsed = urllib.parse.urlsplit(match.group("url"))
-        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+    index = 0
+    while index < len(source):
+        legacy_image = ANSWER_IMAGE_RE.match(source, index)
+        if legacy_image:
+            parts.append(
+                _render_answer_image(legacy_image.group("alt"), legacy_image.group("url"))
+            )
+            index = legacy_image.end()
             continue
-        parts.append(html_lib.escape(source[cursor : match.start()]))
-        url = html_lib.escape(match.group("url"), quote=True)
-        alt_text = match.group("alt").strip() or "参考图片"
-        alt = html_lib.escape(alt_text, quote=True)
-        parts.append(
-            '<figure class="answer-media">'
-            f'<a class="answer-image-link" href="{url}" target="_blank" '
-            f'rel="noreferrer" aria-label="打开原图：{alt}">'
-            f'<img data-answer-image src="{url}" alt="{alt}" loading="lazy" '
-            'decoding="async" referrerpolicy="no-referrer">'
-            '<span class="image-fallback hidden" data-image-fallback>'
-            '图片加载失败，点击打开原图</span></a>'
-            f'<figcaption>{alt}</figcaption></figure>'
-        )
-        cursor = match.end()
-    parts.append(html_lib.escape(source[cursor:]))
+        markdown_image = MARKDOWN_IMAGE_RE.match(source, index)
+        if markdown_image:
+            image_html = _render_answer_image(
+                markdown_image.group("alt"), markdown_image.group("url")
+            )
+            if image_html:
+                parts.append(image_html)
+            else:
+                parts.append(html_lib.escape(markdown_image.group(0)))
+            index = markdown_image.end()
+            continue
+        link = MARKDOWN_LINK_RE.match(source, index)
+        if link:
+            safe_url = _safe_http_url(link.group("url"))
+            if safe_url:
+                label = _render_inline_markdown(link.group("label"))
+                url = html_lib.escape(safe_url, quote=True)
+                parts.append(
+                    f'<a href="{url}" target="_blank" rel="noreferrer">{label}</a>'
+                )
+            else:
+                parts.append(html_lib.escape(link.group(0)))
+            index = link.end()
+            continue
+        if source[index] == "`":
+            end = source.find("`", index + 1)
+            if end != -1:
+                parts.append(
+                    "<code>" + html_lib.escape(source[index + 1 : end]) + "</code>"
+                )
+                index = end + 1
+                continue
+        matched = False
+        for marker, tag in (("**", "strong"), ("~~", "del"), ("*", "em"), ("_", "em")):
+            if not source.startswith(marker, index):
+                continue
+            end = source.find(marker, index + len(marker))
+            if end <= index + len(marker):
+                continue
+            inner = _render_inline_markdown(source[index + len(marker) : end])
+            parts.append(f"<{tag}>{inner}</{tag}>")
+            index = end + len(marker)
+            matched = True
+            break
+        if matched:
+            continue
+        if source[index] == "\\" and index + 1 < len(source):
+            parts.append(html_lib.escape(source[index + 1]))
+            index += 2
+            continue
+        parts.append(html_lib.escape(source[index]))
+        index += 1
     return "".join(parts)
+
+
+def _split_markdown_table_row(line):
+    value = line.strip()
+    if value.startswith("|"):
+        value = value[1:]
+    if value.endswith("|") and not value.endswith("\\|"):
+        value = value[:-1]
+    cells = []
+    current = []
+    escaped = False
+    for char in value:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "|":
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if escaped:
+        current.append("\\")
+    cells.append("".join(current).strip())
+    return cells
+
+
+def _is_markdown_table_separator(line):
+    cells = _split_markdown_table_row(line)
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+
+
+def _render_markdown_table(lines):
+    rows = [_split_markdown_table_row(line) for line in lines]
+    header = rows[0]
+    body = rows[2:]
+    width = len(header)
+    head_html = "".join(f"<th>{_render_inline_markdown(cell)}</th>" for cell in header)
+    body_html = []
+    for row in body:
+        normalized = row[:width] + [""] * max(0, width - len(row))
+        body_html.append(
+            "<tr>"
+            + "".join(f"<td>{_render_inline_markdown(cell)}</td>" for cell in normalized)
+            + "</tr>"
+        )
+    return (
+        '<div class="answer-table-wrap"><table><thead><tr>'
+        + head_html
+        + "</tr></thead><tbody>"
+        + "".join(body_html)
+        + "</tbody></table></div>"
+    )
+
+
+def _render_markdown_lists(tokens):
+    def render_level(index, indent):
+        marker = tokens[index][1]
+        ordered = marker.endswith(".") and marker[:-1].isdigit()
+        tag = "ol" if ordered else "ul"
+        start = int(marker[:-1]) if ordered else 1
+        opening = f'<ol start="{start}">' if ordered and start != 1 else f"<{tag}>"
+        parts = [opening]
+        while index < len(tokens):
+            item_indent, item_marker, body = tokens[index]
+            item_ordered = item_marker.endswith(".") and item_marker[:-1].isdigit()
+            if item_indent != indent or item_ordered != ordered:
+                break
+            parts.append("<li>" + _render_inline_markdown(body))
+            index += 1
+            while index < len(tokens) and tokens[index][0] > indent:
+                nested, index = render_level(index, tokens[index][0])
+                parts.append(nested)
+            parts.append("</li>")
+        parts.append(f"</{tag}>")
+        return "".join(parts), index
+
+    rendered = []
+    cursor = 0
+    while cursor < len(tokens):
+        block, cursor = render_level(cursor, tokens[cursor][0])
+        rendered.append(block)
+    return "".join(rendered)
+
+
+def _heading_id(value):
+    plain = re.sub(r"[\*_~`]", "", value)
+    plain = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", plain)
+    plain = re.sub(r"\s+", "-", plain.strip())
+    plain = re.sub(r"[^\w\-\u4e00-\u9fff]", "", plain)
+    return plain or "section"
+
+
+def _is_standalone_safe_image(line):
+    match = ANSWER_IMAGE_RE.fullmatch(line.strip()) or MARKDOWN_IMAGE_RE.fullmatch(line.strip())
+    return match if match and _safe_http_url(match.group("url")) else None
+
+
+def _is_markdown_block_start(lines, index):
+    line = lines[index]
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if stripped.startswith("```") or re.match(r"^#{1,6}\s+", stripped):
+        return True
+    if stripped.startswith(">") or MARKDOWN_LIST_RE.match(line):
+        return True
+    if re.fullmatch(r"(?:-{3,}|\*{3,}|_{3,})", stripped):
+        return True
+    if _is_standalone_safe_image(line):
+        return True
+    return (
+        "|" in line
+        and index + 1 < len(lines)
+        and _is_markdown_table_separator(lines[index + 1])
+    )
+
+
+def _render_markdown_blocks(source):
+    lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    blocks = []
+    index = 0
+    while index < len(lines):
+        if not lines[index].strip():
+            index += 1
+            continue
+        stripped = lines[index].strip()
+        if stripped.startswith("```"):
+            language = re.sub(r"[^A-Za-z0-9_+-]", "", stripped[3:].strip())
+            index += 1
+            code_lines = []
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                code_lines.append(lines[index])
+                index += 1
+            if index < len(lines):
+                index += 1
+            class_attr = f' class="language-{language}"' if language else ""
+            code = html_lib.escape("\n".join(code_lines), quote=False)
+            blocks.append(f"<pre><code{class_attr}>{code}</code></pre>")
+            continue
+        heading = re.match(r"^(#{1,6})\s+(.+?)\s*#*$", stripped)
+        if heading:
+            level = len(heading.group(1))
+            label = heading.group(2)
+            anchor = html_lib.escape(_heading_id(label), quote=True)
+            blocks.append(
+                f'<h{level} id="{anchor}">{_render_inline_markdown(label)}</h{level}>'
+            )
+            index += 1
+            continue
+        if (
+            "|" in lines[index]
+            and index + 1 < len(lines)
+            and _is_markdown_table_separator(lines[index + 1])
+        ):
+            table_lines = [lines[index], lines[index + 1]]
+            index += 2
+            while index < len(lines) and lines[index].strip() and "|" in lines[index]:
+                table_lines.append(lines[index])
+                index += 1
+            blocks.append(_render_markdown_table(table_lines))
+            continue
+        list_match = MARKDOWN_LIST_RE.match(lines[index])
+        if list_match:
+            tokens = []
+            while index < len(lines):
+                item = MARKDOWN_LIST_RE.match(lines[index])
+                if not item:
+                    break
+                indent = len(item.group("indent").expandtabs(4))
+                tokens.append((indent, item.group("marker"), item.group("body")))
+                index += 1
+            blocks.append(_render_markdown_lists(tokens))
+            continue
+        if stripped.startswith(">"):
+            quote_lines = []
+            while index < len(lines) and lines[index].strip().startswith(">"):
+                quote_lines.append(re.sub(r"^\s*>\s?", "", lines[index]))
+                index += 1
+            blocks.append("<blockquote>" + _render_markdown_blocks("\n".join(quote_lines)) + "</blockquote>")
+            continue
+        image = _is_standalone_safe_image(lines[index])
+        if image:
+            blocks.append(_render_answer_image(image.group("alt"), image.group("url")))
+            index += 1
+            continue
+        if re.fullmatch(r"(?:-{3,}|\*{3,}|_{3,})", stripped):
+            blocks.append("<hr>")
+            index += 1
+            continue
+        paragraph = [lines[index].strip()]
+        index += 1
+        while index < len(lines) and lines[index].strip() and not _is_markdown_block_start(lines, index):
+            paragraph.append(lines[index].strip())
+            index += 1
+        blocks.append("<p>" + "<br>".join(_render_inline_markdown(line) for line in paragraph) + "</p>")
+    return "\n".join(blocks)
+
+
+def render_answer_html(answer):
+    """把答案 Markdown 渲染为安全 HTML；原始 HTML 永远作为文本转义。"""
+    return _render_markdown_blocks(str(answer or ""))
 
 
 def _question_public(row):
@@ -611,6 +1026,41 @@ def grade(conn, session_id, qid, result):
         conn.execute("UPDATE sessions SET status='closed' WHERE id=?", (session_id,))
     conn.commit()
     return next_due
+
+
+def reveal_answer(conn, session_id, qid):
+    """返回当前会话未判题的题库答案，不改变复习进度。"""
+    sess = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+    item = conn.execute(
+        "SELECT * FROM session_items WHERE session_id=? AND question_id=?",
+        (session_id, qid),
+    ).fetchone()
+    if not sess:
+        raise GradeRejected(f"会话不可用: {session_id}")
+    if not item:
+        raise GradeRejected(f"题目不属于本轮: id={qid}")
+    if item["grade"] is not None:
+        raise GradeRejected(f"本题已评判: id={qid}")
+    if sess["status"] != "open":
+        raise GradeRejected(f"会话不可用: {session_id}")
+    row = conn.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
+    if not row:
+        raise LookupError(f"题目不存在: id={qid}")
+    answer = row["answer"] or ""
+    return {
+        "question_id": qid,
+        "answer": answer,
+        "answer_html": render_answer_html(answer),
+        "url": row["url"] or "",
+    }
+
+
+def review_question(conn, session_id, qid, result):
+    """无需模型直接自评，并返回题库答案。"""
+    payload = reveal_answer(conn, session_id, qid)
+    payload["next_due"] = grade(conn, session_id, qid, result)
+    payload["grade"] = result
+    return payload
 
 
 class SkipRejected(Exception):
@@ -1315,6 +1765,20 @@ def handle_http(method, path, body, conn, root=None):
             msg = str(e)
             code = 400 if "未配置" in msg else 502
             return code, {"error": msg}, json_ct
+        except (GradeRejected, ValueError, LookupError) as e:
+            return 400, {"error": str(e)}, json_ct
+        return 200, out, json_ct
+    if method == "POST" and path in {"/api/reveal", "/api/review"}:
+        sid = body.get("session_id")
+        qid = body.get("question_id")
+        if not sid or qid is None:
+            return 400, {"error": "缺少 session_id / question_id"}, json_ct
+        try:
+            qid = int(qid)
+            if path == "/api/reveal":
+                out = reveal_answer(conn, sid, qid)
+            else:
+                out = review_question(conn, sid, qid, body.get("result"))
         except (GradeRejected, ValueError, LookupError) as e:
             return 400, {"error": str(e)}, json_ct
         return 200, out, json_ct
