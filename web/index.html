@@ -676,6 +676,12 @@
       margin-top: 14px;
     }
     .quiz-actions .cta { margin-top: 0; }
+    .speech-tools { margin-top: 12px; }
+    .speech-buttons { display: flex; flex-wrap: wrap; align-items: center; }
+    .speech-buttons button { min-height: 44px; padding: 8px 14px; margin: 0 8px 6px 0; }
+    .speech-buttons [aria-pressed="true"] { background: var(--color-accent); }
+    .speech-preview { margin-top: 8px; padding: 10px 12px; border-left: 3px solid currentColor; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .speech-tools .error { margin-top: 8px; }
     
     .dont-know {
       background: #FEF9C3;
@@ -1479,6 +1485,18 @@
                 <span class="answer-shortcut" style="font-family:var(--font-mono); font-size:12px; color:var(--color-muted-fg); font-weight:700;">支持 Ctrl + Enter 快捷提交</span>
               </div>
               <textarea id="ans" placeholder="按你的理解组织回答；如果完全不会，可以点击下方直接揭晓答案"></textarea>
+              <div class="speech-tools">
+                <div class="speech-buttons">
+                  <button class="secondary" type="button" id="btn-speech" aria-pressed="false" aria-describedby="speech-help speech-status">
+                    <span class="material-symbols-rounded" aria-hidden="true">mic</span><span id="speech-button-label">语音输入</span>
+                  </button>
+                  <button class="secondary hidden" type="button" id="btn-speech-cancel">取消转写</button>
+                </div>
+                <p class="help" id="speech-help">使用浏览器或系统语音服务，可能联网处理音频。转写后请核对，再手动提交；也可使用输入法的麦克风。</p>
+                <p class="help" id="speech-status" role="status" aria-live="polite" aria-atomic="true">点击语音输入开始，默认识别普通话。</p>
+                <p class="speech-preview hidden" id="speech-preview" aria-label="尚未确认的转写"></p>
+                <p class="error hidden" id="speech-error" role="alert"></p>
+              </div>
               <div class="quiz-actions">
                 <button class="cta" type="button" id="btn-submit">
                   <span class="material-symbols-rounded filled">send</span>
@@ -1774,6 +1792,197 @@
     let judgeStartedAt = 0;
     let currentView = "quiz";
     let nativeBusy = "";
+
+    // Speech stays outside submission/scoring. Each capture belongs to one question.
+    let speechInput = null;
+    function showSpeechError(message) {
+      $("speech-error").textContent = message;
+      $("speech-error").classList.remove("hidden");
+    }
+    function updateSpeechControls() {
+      const active = Boolean(speechInput);
+      const stopping = active && speechInput.stopping;
+      $("btn-speech").setAttribute("aria-pressed", String(active));
+      $("btn-speech").disabled = stopping || (!active &&
+        ($("ans").disabled || $("btn-submit").disabled || $("btn-submit").dataset.mode === "next"));
+      $("speech-button-label").textContent = stopping ? "正在识别…" : active ? "结束转写" : "语音输入";
+      $("btn-speech-cancel").classList.toggle("hidden", !active);
+    }
+    function speechMatches(run) {
+      const q = currentQuestion();
+      return speechInput === run && session.session_id === run.sid && q && q.id === run.qid && currentView === "quiz";
+    }
+    function finishSpeechInput(run, message, error, abort) {
+      if (speechInput !== run) return;
+      // Invalidate before cancel: some recognizers synchronously emit error/end on abort.
+      speechInput = null;
+      clearTimeout(run.timer);
+      if (run.recognizer) {
+        run.recognizer.onstart = run.recognizer.onresult = run.recognizer.onerror = run.recognizer.onend = null;
+      }
+      if (abort) {
+        try {
+          if (run.native) nativeStore.cancelSpeech(run.id);
+          else if (run.recognizer) run.recognizer.abort();
+        } catch (_) { /* Still release the local UI if a provider has disconnected. */ }
+      }
+      $("ans").readOnly = run.readOnly;
+      $("btn-submit").disabled = run.submitDisabled;
+      $("btn-dont-know").disabled = run.revealDisabled;
+      $("speech-preview").textContent = "";
+      $("speech-preview").classList.add("hidden");
+      $("speech-status").textContent = message;
+      if (error) showSpeechError(error);
+      updateSpeechControls();
+    }
+    function cancelSpeechInput() {
+      if (speechInput) finishSpeechInput(speechInput, "已取消转写，已确认的文字会保留。", "", true);
+    }
+    function speechTimeout(run, milliseconds) {
+      clearTimeout(run.timer);
+      run.timer = setTimeout(() => {
+        finishSpeechInput(run, "转写已停止。", "语音识别超时，请重试或使用输入法语音输入。", true);
+      }, milliseconds);
+    }
+    function writeSpeechText(run, text) {
+      if (!speechMatches(run)) return false;
+      if (typeof text !== "string" || text.length > 20000) {
+        finishSpeechInput(run, "转写已停止。", "语音结果无效或过长，请分段输入。", true);
+        return false;
+      }
+      if (!text.trim()) return true;
+      run.finalText = text;
+      const separator = run.original && !/\s$/.test(run.original) ? "\n" : "";
+      $("ans").value = run.original + separator + text;
+      if (!saveDraft()) {
+        finishSpeechInput(run, "转写已停止，文字仍保留在答案框。", "转写草稿保存失败，请保留当前页面并复制答案。", true);
+        return false;
+      }
+      return true;
+    }
+    function previewSpeechText(text) {
+      $("speech-preview").textContent = typeof text === "string" ? text.slice(0, 20000) : "";
+      $("speech-preview").classList.toggle("hidden", !$("speech-preview").textContent);
+    }
+    function speechErrorMessage(code) {
+      const messages = {
+        "not-allowed": "麦克风权限被拒绝，请允许此页面使用麦克风后重试。",
+        "service-not-allowed": "语音识别服务不可用或被禁用，请使用输入法语音输入。",
+        "audio-capture": "无法使用麦克风，请检查设备连接及麦克风是否被占用。",
+        "network": "语音识别服务连接失败，请检查网络或使用输入法语音输入。",
+        "no-speech": "未识别到语音，请靠近麦克风后重试。",
+        "language-not-supported": "当前语音服务不支持普通话，请使用输入法语音输入。",
+        "aborted": "语音识别被中断，请重试。"
+      };
+      return messages[code] || "语音识别失败，请重试或使用输入法语音输入。";
+    }
+    function startSpeechInput() {
+      const q = currentQuestion();
+      if (speechInput || !q || !session.session_id || currentView !== "quiz" || currentSessionMode() !== "answer" ||
+          $("ans").disabled || $("btn-submit").disabled || $("btn-submit").dataset.mode === "next") return;
+      $("speech-error").textContent = "";
+      $("speech-error").classList.add("hidden");
+      previewSpeechText("");
+      const run = {
+        id: "speech_" + newSubmissionId().slice(4), sid: session.session_id, qid: q.id,
+        native: isAndroidApp, original: $("ans").value, finalText: "", stopping: false,
+        readOnly: $("ans").readOnly, submitDisabled: $("btn-submit").disabled,
+        revealDisabled: $("btn-dont-know").disabled, recognizer: null, timer: null
+      };
+      speechInput = run;
+      $("ans").readOnly = true;
+      $("btn-submit").disabled = true;
+      $("btn-dont-know").disabled = true;
+      $("speech-status").textContent = "正在启动语音服务，请按提示允许麦克风权限…";
+      updateSpeechControls();
+      speechTimeout(run, run.native ? 60000 : 20000);
+      try {
+        if (run.native) {
+          if (!["startSpeech", "stopSpeech", "cancelSpeech"].every((name) => typeof nativeStore[name] === "function")) {
+            throw new Error("系统语音接口不可用，请更新应用或使用输入法语音输入。");
+          }
+          nativeStore.startSpeech(run.id);
+        } else {
+          const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+          if (!Recognition) throw new Error("此浏览器不支持语音识别，请更换支持的浏览器或使用系统语音输入。");
+          const recognizer = new Recognition();
+          run.recognizer = recognizer;
+          recognizer.lang = "zh-CN";
+          recognizer.continuous = true;
+          recognizer.interimResults = true;
+          recognizer.maxAlternatives = 1;
+          recognizer.onstart = () => {
+            if (!speechMatches(run) || run.stopping) return;
+            $("speech-status").textContent = "正在听，请说话；说完点击结束转写。单次最多 60 秒。";
+            speechTimeout(run, 60000);
+          };
+          recognizer.onresult = (event) => {
+            if (!speechMatches(run)) return;
+            let finalText = "", interim = "";
+            // result lists are cumulative; rebuild to avoid appending repeated final segments.
+            for (let i = 0; i < event.results.length; i += 1) {
+              const result = event.results[i];
+              const text = result[0] && result[0].transcript;
+              if (typeof text !== "string") continue;
+              if (result.isFinal) finalText += text;
+              else interim += text;
+            }
+            if (writeSpeechText(run, finalText)) previewSpeechText(interim);
+          };
+          recognizer.onerror = (event) => {
+            if (speechMatches(run)) finishSpeechInput(run, "转写已停止。", speechErrorMessage(event.error), true);
+          };
+          recognizer.onend = () => {
+            if (!speechMatches(run)) return;
+            finishSpeechInput(run, run.finalText ? "转写已填入答案，请核对后提交。" : "转写已结束。",
+              run.finalText ? "" : "未识别到有效文字，请重试或使用输入法语音输入。", false);
+          };
+          recognizer.start();
+        }
+      } catch (error) {
+        const unavailable = !run.native && !(window.SpeechRecognition || window.webkitSpeechRecognition);
+        const missingBridge = run.native && typeof nativeStore.startSpeech !== "function";
+        const message = unavailable || missingBridge ? error.message
+          : error.name === "NotAllowedError" || error.name === "SecurityError" ? speechErrorMessage("not-allowed")
+          : "语音识别服务不可用或启动失败，请重试或使用输入法语音输入。";
+        finishSpeechInput(run, "未能开始转写。", message, true);
+      }
+    }
+    function stopSpeechInput() {
+      const run = speechInput;
+      if (!run || run.stopping) return;
+      run.stopping = true;
+      $("speech-status").textContent = "正在等待最终识别结果…";
+      updateSpeechControls();
+      speechTimeout(run, 15000);
+      try {
+        if (run.native) nativeStore.stopSpeech(run.id);
+        else run.recognizer.stop();
+      } catch (_) {
+        finishSpeechInput(run, "转写已停止。", "无法获取语音识别结果，请重试。", true);
+      }
+    }
+    function handleSpeechResult(event) {
+      const data = event.detail, run = speechInput;
+      if (!run || !run.native || !data || data.requestId !== run.id || !speechMatches(run)) return;
+      if (data.type === "ready" && !run.stopping) {
+        $("speech-status").textContent = "正在听，请说话；说完点击结束转写。单次最多 60 秒。";
+        speechTimeout(run, 65000);
+      } else if (data.type === "partial") {
+        previewSpeechText(data.text);
+      } else if (data.type === "result") {
+        if (typeof data.text !== "string" || !data.text.trim()) {
+          finishSpeechInput(run, "转写已结束。", "未识别到有效文字，请重试。", true);
+        } else if (writeSpeechText(run, data.text)) {
+          finishSpeechInput(run, "转写已填入答案，请核对后提交。", "", false);
+        }
+      } else if (data.type === "error") {
+        finishSpeechInput(run, "转写已停止。", typeof data.message === "string" && data.message.trim()
+          ? data.message.slice(0, 300) : "系统语音识别失败，请重试或使用输入法语音输入。", true);
+      } else if (data.type === "cancelled") {
+        finishSpeechInput(run, "已取消转写；如刚授予麦克风权限，请再次点击语音输入。", "", false);
+      }
+    }
 
     function setNativeMessage(message, error) {
       $("native-message").textContent = message;
@@ -2103,6 +2312,7 @@
     }
 
     function renderRecoveredSubmission(payload, active) {
+      cancelSpeechInput();
       const q = payload.question;
       const out = payload.result;
       lastVerdict = out;
@@ -2162,6 +2372,7 @@
       }
       bindAnswerImageFallbacks(box);
       box.classList.remove("hidden");
+      updateSpeechControls();
     }
 
     async function revealCurrentQuestion(q) {
@@ -2188,6 +2399,7 @@
     }
 
     async function reviewCurrentQuestion(result) {
+      if (speechInput) return;
       const q = currentQuestion();
       if (!q) return;
       const memorize = currentSessionMode() === "memorize";
@@ -2198,6 +2410,7 @@
       $("btn-skip").disabled = true;
       $("btn-dont-know").disabled = true;
       $("btn-submit").disabled = true;
+      updateSpeechControls();
       setReviewButtonsDisabled(true);
       try {
         const out = await api("POST", "/api/review", {
@@ -2235,10 +2448,12 @@
         } else if (!memorize) {
           $("btn-submit").disabled = false;
         }
+        updateSpeechControls();
       }
     }
 
     function showView(name) {
+      if (name !== "quiz") cancelSpeechInput();
       currentView = name;
       ["view-quiz", "view-lib", "view-edit", "view-questions", "view-question-edit", "view-overview", "view-settings"].forEach((id) => {
         $(id).classList.toggle("hidden", id !== "view-" + name);
@@ -2258,6 +2473,7 @@
     }
 
     window.baguHandleBack = function () {
+      if (speechInput) { cancelSpeechInput(); return true; }
       const focused = document.activeElement;
       if (focused && ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName)) {
         focused.blur();
@@ -2328,6 +2544,9 @@
     }
 
     function renderQuiz() {
+      cancelSpeechInput();
+      $("speech-error").classList.add("hidden");
+      $("speech-status").textContent = "点击语音输入开始，默认识别普通话。";
       lastVerdict = null;
       revealGeneration += 1;
       stopJudgeProgress();
@@ -2346,6 +2565,7 @@
       $("btn-skip").disabled = false;
       $("ans").disabled = false;
       $("ans").value = loadDraft();
+      updateSpeechControls();
       const q = currentQuestion();
       if (!session.session_id || !q) {
         $("idle").classList.remove("hidden");
@@ -2393,6 +2613,7 @@
     }
 
     async function advanceQuestion() {
+      cancelSpeechInput();
       const sid = session.session_id;
       const active = readActiveSubmission();
       if (active) clearDraft(active.session_id, active.question_id);
@@ -2692,6 +2913,7 @@
     $("btn-draw").addEventListener("click", () => draw(5));
     
     $("btn-skip").addEventListener("click", async () => {
+      cancelSpeechInput();
       try {
         const sid = session.session_id;
         await api("POST", "/api/skip", { session_id: session.session_id });
@@ -2715,6 +2937,7 @@
     $("btn-review-next").addEventListener("click", advanceQuestion);
     
     $("btn-submit").addEventListener("click", async () => {
+      if (speechInput) return;
       if ($("btn-submit").dataset.mode === "next") {
         $("btn-submit").dataset.mode = "";
         $("btn-submit").textContent = "发给模型评判";
@@ -2732,6 +2955,7 @@
       $("btn-dont-know").disabled = true;
       $("btn-skip").disabled = true;
       $("ans").disabled = true;
+      updateSpeechControls();
       $("q-err").classList.add("hidden");
       startJudgeProgress();
       try {
@@ -2768,10 +2992,20 @@
         $("btn-dont-know").disabled = false;
         $("btn-skip").disabled = false;
         $("ans").disabled = $("btn-submit").dataset.mode === "next";
+        updateSpeechControls();
       }
     });
 
     $("ans").addEventListener("input", saveDraft);
+    $("btn-speech").addEventListener("click", () => speechInput ? stopSpeechInput() : startSpeechInput());
+    $("btn-speech-cancel").addEventListener("click", cancelSpeechInput);
+    window.addEventListener("bagu-speech", handleSpeechResult);
+    window.addEventListener("pagehide", cancelSpeechInput);
+    // Android owns pause/permission handling: hiding for its permission dialog must not erase a denial.
+    document.addEventListener("visibilitychange", () => { if (document.hidden && !isAndroidApp) cancelSpeechInput(); });
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && speechInput) { event.preventDefault(); cancelSpeechInput(); }
+    });
     $("ans").addEventListener("keydown", (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         e.preventDefault();

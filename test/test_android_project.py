@@ -468,7 +468,8 @@ const window={};
 
 
 def test_web_android_navigation_back_unwinds_without_resetting_quiz():
-    nav = web_section("function showView", "function renderStats")
+    nav = (web_section("let speechInput = null", "function setNativeMessage")
+           + web_section("function showView", "function renderStats"))
     result = run_web_js(WEB_DOM + f"""
 const isAndroidApp=true; let currentView='quiz';
 {nav}
@@ -484,7 +485,8 @@ process.stdout.write(JSON.stringify(result));
 
 
 def test_web_android_back_closes_keyboard_and_details_before_navigation():
-    nav = web_section("function showView", "function renderStats")
+    nav = (web_section("let speechInput = null", "function setNativeMessage")
+           + web_section("function showView", "function renderStats"))
     result = run_web_js(WEB_DOM + f"""
 const isAndroidApp=true; let currentView='questions'; let blurred=false;
 const details={{open:true}};
@@ -612,7 +614,10 @@ def test_android_manifest_limits_permissions_and_launch_surface():
     path = ANDROID / "app/src/main/AndroidManifest.xml"
     assert path.is_file(), "Android manifest not implemented"
     manifest = ET.parse(path).getroot()
-    assert [p.get(NS + "name") for p in manifest.findall("uses-permission")] == ["android.permission.INTERNET"]
+    assert {p.get(NS + "name") for p in manifest.findall("uses-permission")} == {
+        "android.permission.INTERNET", "android.permission.RECORD_AUDIO"}
+    assert [action.get(NS + "name") for action in manifest.findall("queries/intent/action")] == [
+        "android.speech.RecognitionService"]
     app = manifest.find("application")
     assert app.get(NS + "allowBackup") == "false"
     assert app.get(NS + "networkSecurityConfig") == "@xml/network_security_config"
@@ -646,7 +651,7 @@ def test_android_cleartext_exception_is_only_loopback():
     assert domains[0].get("includeSubdomains") == "false"
 
 
-def test_native_bridge_exposes_only_the_agreed_storage_and_file_contract():
+def test_native_bridge_exposes_only_the_agreed_storage_file_and_speech_contract():
     source = (ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/NativeBridge.java").read_text(encoding="utf-8")
     methods = re.findall(r"@JavascriptInterface public (?:synchronized )?(\w+) (\w+)\(([^)]*)\)", source)
     assert {(result, name, args) for result, name, args in methods} == {
@@ -655,6 +660,9 @@ def test_native_bridge_exposes_only_the_agreed_storage_and_file_contract():
         ("void", "exportBackup", ""), ("void", "importBackup", ""),
         ("void", "saveCsvTemplate", "String csv"),
         ("String", "getAppInfo", ""),
+        ("void", "startSpeech", "String requestId"),
+        ("void", "stopSpeech", "String requestId"),
+        ("void", "cancelSpeech", "String requestId"),
     }
 
 

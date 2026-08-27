@@ -1,13 +1,16 @@
 package io.github.ingnijm.baguhelper;
 
 import android.annotation.SuppressLint;
+import android.Manifest;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Insets;
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -44,10 +47,12 @@ import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /** Thin Android shell; quiz/session/model rules remain in the shared Python + HTML. */
 public final class MainActivity extends Activity {
     private static final int DOCUMENT_REQUEST = 41;
+    private static final int MICROPHONE_REQUEST = 42;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private WebView web;
     private FrameLayout root;
@@ -61,6 +66,9 @@ public final class MainActivity extends Activity {
     private boolean backPending;
     private boolean imeVisible;
     private OnBackInvokedCallback backCallback;
+    private SpeechInput speechInput;
+    private Consumer<Boolean> microphoneReply;
+    private boolean resumed;
 
     /** Retained across configuration recreation; never retains an Activity strongly. */
     private static final class HostState {
@@ -90,6 +98,9 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
+        speechInput = new SpeechInput(new AndroidSpeechBackend(this, this::requestMicrophone),
+            (delay, job) -> { MAIN.postDelayed(job, delay); return () -> MAIN.removeCallbacks(job); },
+            this::publishSpeech);
         Object retained = getLastNonConfigurationInstance();
         state = retained instanceof HostState ? (HostState) retained : new HostState();
         state.owner = new WeakReference<>(this);
@@ -152,6 +163,10 @@ public final class MainActivity extends Activity {
         settings.setSupportMultipleWindows(true); // onCreateWindow never creates an untrusted WebView.
         web.addJavascriptInterface(new NativeBridge(getSharedPreferences("bagu-ui-state", MODE_PRIVATE), this), "BaguNative");
         web.setWebViewClient(new WebViewClient() {
+            @Override public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                speechInput.cancelActive();
+                pageReady = false;
+            }
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
                 int port = state.runtime == null ? -1 : state.runtime.optInt("port", -1);
@@ -268,6 +283,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showStartupError() {
+        speechInput.cancelActive();
         pageReady = false;
         pageLoadFailed = true;
         progressPanel.setVisibility(View.VISIBLE);
@@ -401,6 +417,51 @@ public final class MainActivity extends Activity {
             + "{detail:{visible:" + imeVisible + "}}));", null);
     }
 
+    void speech(String operation, String requestId) {
+        if ("cancel".equals(operation)) { speechInput.cancel(requestId); return; }
+        if ("stop".equals(operation)) { speechInput.stop(requestId); return; }
+        if (!resumed || !pageReady || isFinishing() || isDestroyed()) {
+            publishSpeech(new SpeechInput.Event(requestId, "error", null, "当前页面无法使用语音输入，请返回练习页重试。"));
+            return;
+        }
+        speechInput.start(requestId);
+    }
+
+    private void requestMicrophone(Consumer<Boolean> reply) {
+        if (microphoneReply != null) throw new IllegalStateException("Permission request pending");
+        microphoneReply = reply;
+        try { requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, MICROPHONE_REQUEST); }
+        catch (RuntimeException failure) { microphoneReply = null; throw failure; }
+    }
+
+    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] grants) {
+        super.onRequestPermissionsResult(request, permissions, grants);
+        if (request != MICROPHONE_REQUEST) return;
+        Consumer<Boolean> reply = microphoneReply;
+        microphoneReply = null;
+        if (reply != null) reply.accept(grants.length == 1
+            && grants[0] == PackageManager.PERMISSION_GRANTED);
+    }
+
+    private void publishSpeech(SpeechInput.Event event) {
+        if (!pageReady || web == null || isDestroyed()) return;
+        try {
+            JSONObject detail = new JSONObject().put("requestId", event.requestId).put("type", event.type);
+            if (event.text != null) detail.put("text", event.text);
+            if (event.message != null) detail.put("message", event.message);
+            String json = JSONObject.quote(detail.toString()).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
+            web.evaluateJavascript("window.dispatchEvent(new CustomEvent('bagu-speech',{detail:JSON.parse(" + json + ")}));", null);
+        } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
+    }
+
+    @Override protected void onResume() { super.onResume(); resumed = true; }
+
+    @Override protected void onPause() {
+        resumed = false;
+        speechInput.pause();
+        super.onPause();
+    }
+
     private void updateImeVisibility(WindowInsets insets) {
         boolean visible = Build.VERSION.SDK_INT >= 30
             ? insets.isVisible(WindowInsets.Type.ime())
@@ -442,6 +503,8 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        speechInput.cancelActive();
+        microphoneReply = null;
         finishCsv(null, null);
         if (state.owner.get() == this) state.owner.clear();
         if (Build.VERSION.SDK_INT >= 33 && backCallback != null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);

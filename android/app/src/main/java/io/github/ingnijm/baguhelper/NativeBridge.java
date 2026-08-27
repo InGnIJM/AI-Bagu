@@ -57,6 +57,15 @@ public final class NativeBridge {
     @JavascriptInterface public void exportBackup() { open("export", null); }
     @JavascriptInterface public void importBackup() { open("import", null); }
     @JavascriptInterface public void saveCsvTemplate(String csv) { open("template", csv); }
+    @JavascriptInterface public void startSpeech(String requestId) { speech("start", requestId); }
+    @JavascriptInterface public void stopSpeech(String requestId) { speech("stop", requestId); }
+    @JavascriptInterface public void cancelSpeech(String requestId) { speech("cancel", requestId); }
+
+    private void speech(String operation, String requestId) {
+        SpeechInput.validateRequestId(requestId);
+        MainActivity owner = activity.get();
+        if (owner != null) owner.runOnUiThread(() -> owner.speech(operation, requestId));
+    }
 
     private void open(String operation, String content) {
         MainActivity owner = activity.get();

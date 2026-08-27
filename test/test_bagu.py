@@ -4107,6 +4107,16 @@ def test_build_android_seed_empty_creates_initialized_empty_database(tmp_path):
     assert completed.returncode == 0, completed.stderr
     with bagu.get_conn(output) as conn:
         assert conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 0
+
+
+def test_web_speech_input_behaviors():
+    completed = subprocess.run(
+        ["node", "--test", "test/speech_input.test.cjs"],
+        cwd=Path(__file__).parents[1], text=True, encoding="utf-8",
+        capture_output=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
 @pytest.mark.parametrize("operation", ["import", "create", "update", "delete"])
 def test_question_mutations_refresh_stats_without_resetting_active_practice(operation):
     import subprocess

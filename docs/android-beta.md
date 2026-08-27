@@ -8,6 +8,7 @@
 - 该源码基线已通过 328 项 Python/项目回归测试，以及另行编译执行的 6 项 `HostPolicyTest`。这些是源码检查，不代表 APK 已重建。
 - 现有命名 APK 仍是 2026-08-27 的 `0.1.0-beta.1` 构建，**不包含上述后续修复**。更新源码或文档不会自动替换安装包；`Verify` 也只校验已有产物，不会构建或证明它与当前源码一致。
 - 下方模拟器、签名、lint 与 APK 哈希记录是历史验收记录。需要包含最新修复的手机安装包时，应重新构建、校验，并记录新的产物哈希和设备验收结果。
+- 当前工作树已加入双端语音输入，并完成下文的语音专项验收；新 ARM64 测试包独立存放于 `dist/android/qa/speech-20260828/`，不覆盖上述旧命名安装包，也不代表已提交源码或发布新版本。
 
 ## 在手机上使用
 
@@ -16,6 +17,28 @@
 内部 Beta 首次安装自带 408 道题；题库和练习进度保存在应用本机私有目录。背题、查看已保存答案和自评复习可以离线进行；AI 评卷需要网络和自行配置的 HTTPS 模型服务，答案中的远程 HTTPS 图片也需要网络。模型请求会把题目和你的回答发送给所选服务；请自行确认服务商的数据政策，勿输入敏感内容。
 
 题库页支持新增、修改和 CSV 导入，UTF-8 表头为 `category,question,answer,url`；可先保存模板。单文件上限 2 MiB、5000 题，错误整批拒绝，重复分类+题干跳过。Android 文件操作使用系统文件选择器，可取消后重试。
+
+## 语音输入接入说明
+
+语音输入位于答题模式的答案框下，采用 Android 系统 `SpeechRecognizer`，不使用 WebView 的浏览器识别，也不配置独立转写 API Key。开始前检查系统服务并按需申请 `RECORD_AUDIO`；Manifest 仅增加麦克风权限与 `android.speech.RecognitionService` 查询声明，不改变本机 HTTP、令牌、文件选择或 WebView 导航边界。
+
+原生桥接提供 `startSpeech(requestId)`、`stopSpeech(requestId)`、`cancelSpeech(requestId)`，通过 `bagu-speech` 事件传递 `ready / partial / result / error / cancelled`。请求 ID 将回调绑定到单次录音；Activity 暂停、销毁或页面切换会取消录音，迟到权限和识别回调不得重新启动或写到另一题。结束后等待最终结果有超时，服务缺失、权限拒绝、网络/麦克风故障和无结果均显示错误，不自动切换外部云端服务。
+
+转写只追加到答案草稿，不提交模型、不评分；已确认文字保留，临时片段不落草稿。系统服务可能联网处理音频，不能承诺所有手机品牌都有可用服务或离线能力。权限弹窗引起暂停时保留待决请求：拒绝仍显示权限错误，授权成功则取消本次请求，需要用户再次点击，不能自动开始录音。已有命名 `0.1.0-beta.1` APK 不会因源码更新而获得此功能，需另行构建和验收。
+
+### 本次语音功能验收记录（2026-08-28）
+
+- `python -m pytest test/test_bagu.py test/test_android_project.py -q`：329 项通过，退出码 0；使用临时数据库与模拟网络。
+- `node --test --test-reporter=spec test/speech_input.test.cjs`：26 项通过，退出码 0；执行实际页面脚本，模拟浏览器和原生识别边界，覆盖成功回填、不可用、权限拒绝、超时、取消、串题防护与不自动评分。
+- Gradle publicDebug/x86_64 与 publicRelease/arm64-v8a 均构建成功，各自 Java 报告 22 项通过（语音 16 项、宿主策略 6 项），lint 0 错误、3 条既有警告。ARM64 首次构建被沙箱拒绝访问现有依赖缓存，获准在沙箱外重跑同一构建后通过，未修改业务代码规避错误。
+- 浏览器界面曾通过临时题库和模拟识别服务检查桌面/窄屏布局、草稿回填与刷新保留、不可用提示；未采集实际音频，不代表真实服务连通性。
+- 用户授权后，新建 `bagu_speech_20260828`（API29 / Android10 / WebView74）和 `bagu_speech_api36_20260828`（API36 / Android16 / WebView133）隔离模拟器；未安装到已有设备、未清除已有应用数据、宿主机音频输入关闭。两台分别运行 `AndroidSpeechAcceptanceTest`，最终均 **6/6 通过**，无跳过。API29 使用 x86_64 debug，API36 使用与下方交付副本完全相同的 ARM64 release APK，经模拟器原生桥转译运行，不等同于物理 ARM 手机。
+- API36 首次冷启动有系统界面无响应弹窗，第一轮 6 项中 2 项因页面加载/生命周期等待超时而失败。保留此失败事实；等待系统恢复并关闭弹窗后，未改源码、未放宽测试期限，重跑完整 6 项用例，22.05 秒全部通过。API29 首轮 19.36 秒全部通过。
+- API29 另做实际页面操作：在新建模拟器中临时禁用识别服务，点击语音输入显示“系统语音识别服务不可用”；恢复服务后在真实权限弹窗选择拒绝，显示麦克风权限错误。两种情况下原答案 `Existing_answer` 均保留、提交按钮恢复可用。截图为 `dist/android/qa/speech-20260828/api29-unavailable.png` 和 `api29-permission-denied.png`。识别服务已恢复。
+
+测试包为 `dist/android/qa/speech-20260828/bagu-speech-public-arm64-test.apk`，29,811,157 字节，SHA-256：`6a1acf35d1dcfcba1f8a9440bcefcd09d68671ce73d201e8e339c5130aad4cc1`。证书 SHA-256：`ac92a24f30a5e6c10c4ced0d0db89124f39f36e00778fef6ca3ba4973bdf0ee3`，与旧安装包身份一致。已核对安装后的 APK 哈希、当前网页源码字节、清单（仅 INTERNET / RECORD_AUDIO）、空种子及原生库允许列表；`verify_android_apk.py --flavor public --expected-questions 0 --readelf ...`、`apksigner verify` 和 `zipalign -c -P 16 4` 均通过。
+
+**此为独立测试构建，不是新版正式发布。** 仍使用 versionCode `1` / versionName `0.1.0-beta.1`，首次安装为空题库，不含工作站数据、配置、Key 或签名材料；不应为安装测试包而卸载已有应用或强制降级。旧命名 APK 的哈希仍为历史记录中的值，未覆盖。真实语音识别质量、联网服务可达性与各厂商中文支持仍需在目标手机验证，不作普遍可用承诺。
 
 ## 前置条件
 
