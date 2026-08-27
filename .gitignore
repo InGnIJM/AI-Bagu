@@ -51,3 +51,16 @@ desktop.ini
 
 # Agent scratch (brainstorm HTML, not source)
 .superpowers/
+
+# Android local toolchains, signing material and generated output
+.android-sdk/
+.android-avd/
+.android-user-home/
+.toolchains/
+.gradle-user-home/
+.gradle/
+.signing/
+*.jks
+*.keystore
+local.properties
+keystore.properties
