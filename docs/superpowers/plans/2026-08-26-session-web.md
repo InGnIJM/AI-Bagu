@@ -1,5 +1,7 @@
 # 会话协议 + 本地网页 Implementation Plan
 
+> 历史实施记录：保留原步骤与勾选状态，不是当前待执行清单。会话协议仍有参考价值；“没有 .git”、单模型写接口、Hermes 导入、easy 无答案及紫色 UI 均属历史，不应照搬。现行约束见[架构与数据约束](../../architecture.md)和 [HTTP API](../../api.md)，开发入口见[开发指南](../../development.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > **状态说明（2026-08-26）：** 本计划对应功能已实现。文中的单模型配置、`BAGU_API_KEY` 和 `/api/settings` 写接口是当时的实现记录，后来已由 `2026-08-26-model-profiles.md` 取代；不要据此恢复旧接口。

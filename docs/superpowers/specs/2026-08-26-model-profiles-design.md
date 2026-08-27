@@ -1,5 +1,7 @@
 # 八股抽问：按模型条目配置
 
+> 文档定位：多模型配置设计，核心存储与 CRUD 约束仍有效；下文 `sessionStorage` 和紫色 UI 是历史方案，现行为桌面 `localStorage` / Android 原生私有存储及 Arcade Bento。现行行为见[架构与数据约束](../../architecture.md)及 [HTTP API](../../api.md)，使用说明见[用户指南](../../user-guide.md)。保留原文用于追溯，不把早期实现细节当作当前规范。
+
 日期：2026-08-26  
 状态：已实现（2026-08-26）
 

@@ -1,309 +1,135 @@
 # 八股助手（八股抽问）
 
-本地面试复习工具：题库管理、间隔复习、背题自评与 AI 评卷。桌面 CLI、网页和 Android Beta 复用 `bagu.py` 核心及 SQLite 存储。
+一个在电脑和 Android 手机上使用的面试复习工具。抽一轮题，用自己的话回答，查看反馈，再按掌握程度安排下一次复习。
 
-桌面的 Hermes/CLI 与网页共用同一份题库和**会话锁**；Android 使用应用私有目录中的独立题库、配置和进度，不自动同步电脑。HTTP 只监听 `127.0.0.1`，不做账号或公网部署。
+[快速开始](#快速开始) · [使用指南](docs/user-guide.md) · [Android 安装与更新](docs/android-beta.md) · [全部文档](docs/README.md)
 
-> 截至 2026-08-28，源码基线 `997fe91` 已合入 `main`，包含“答案渲染异常不计分、错误链接按安全文本显示”的修复。现有 `0.1.0-beta.1` APK 尚未重新构建，不包含该修复。构建与验收边界见 [Android Beta 文档](docs/android-beta.md)。
+![桌面版作答与评分反馈：输入回答后查看模型点评](docs/images/desktop-practice.png)
 
-## 功能
+*使用界面由用户提供。截图中的题量、进度、模型和评卷结果仅展示当时状态，不是默认配置或效果保证；不同版本的界面可能略有差异。*
 
-- 从 [小林 coding 面试专题](https://xiaolincoding.com/) 抓题入库（MySQL / Redis / 网络 / OS / MQ / 并发 / 系统设计 / CAP）
-- 到期复习优先，不足再补新题
-- 每份数据库最多 1 条进行中会话；同一会话同一题只认第一次评分
-- CLI：`draw` / `grade` / `skip` / `stats`
-- 本机网页：答题/背题两种模式、流式模型评卷、多模型配置库
-- 双端语音输入：网页使用浏览器识别，Android 使用系统识别；结果填入答案草稿，服务不可用时明确提示
-- 草稿持久保存，评分响应丢失后可按 submission ID 恢复，不重复计分
-- 题库管理：搜索、分类筛选、新增、修改、删除未使用题目、CSV 批量导入
-- Hermes 聊天：由 Hermes 自己的 AI 评卷，再调用本仓库 CLI 落库
-- Android Beta：内嵌 Python 与 WebView，无需电脑常驻；支持原生文件选择及 `.bagu-backup` 备份恢复
-- 本地打包字体与图标；查看已保存的答案和自评复习无需模型服务
+## 能用它做什么
 
-## 环境
+- **模拟面试**：一次一道题，先回答，再让配置的模型给出评级和学习反馈。
+- **背题复习**：先看题库答案，再按自己的掌握程度打分，不需要模型服务。
+- **安排复习**：优先抽取到期题，再补新题；不用每次自己挑题。
+- **维护题库**：搜索、分类筛选、新增或修改题目，也可以批量导入 CSV。
+- **少打字**：支持浏览器或 Android 系统语音输入，转写后核对并手动提交。
+- **在手机上练习**：Android 应用可独立运行，不需要电脑一直开着。
 
-| 使用方式 | 所需环境 |
-| --- | --- |
-| 桌面 CLI / 网页 | Python；当前验证使用 Python 3.11.7，核心仅依赖标准库 |
-| 核心及网页回归测试 | Python、pytest、Node.js（测试会执行网页 JavaScript） |
-| Android 应用使用 | Android 10+、arm64-v8a；手机无需自行安装 Python |
-| Android 本地构建/完整项目测试 | 另需 JDK 17、Android SDK、Gradle 与 Chaquopy 相关缓存，详见 [构建前置条件](docs/android-beta.md#前置条件) |
-
-抓取公开题库、AI 评卷和远程图片加载需要网络；模型预设不是内置服务，需要自行配置可用地址和 Key。Android 的原生宿主和构建插件并非 Python 标准库的一部分。
+题库和进度保存在本机，无需注册账号。AI 评卷会将题目、回答及参考资料发送给你选择的模型服务；电脑和手机的数据不会自动同步。
 
 ## 快速开始
 
-在本目录执行：
+### 在电脑上使用
+
+准备好 Python（已验证 Python 3.11），将项目下载或克隆到本地，在项目目录打开终端：
 
 ```bash
 python bagu.py init
-python bagu.py import          # 抓取题目和对应正文，无损补全已有库
-python bagu.py stats
-python bagu.py serve           # 启动后在浏览器打开 http://127.0.0.1:8765
+python bagu.py serve
 ```
 
-网页评卷前，点击侧栏「模型配置库」或作答页当前模型条，新建或选用一条可用配置。背题、自评和「不会，直接看答案」无需配置模型。
+保持终端运行，在浏览器打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。日常使用不需要安装 pytest、Node.js 或 Android 开发工具。
 
-不想抓取公开题库时，可以只执行 `init` 和 `serve`，再从「题库管理」新增题目或导入 CSV。
-
-## Android Beta（本地构建）
-
-内部 Beta 首次安装自带 408 道清洁种子题；已有应用数据不会被种子覆盖。`public` 构建使用空种子，仅用于验证，不代表已公开发布。
-
-应用底部有「练习 / 题库 / 概览 / 设置」。草稿存入原生私有存储，备份和 CSV 操作使用系统文件选择器；AI 评卷仅允许 HTTPS 模型地址。
-
-完整的构建、校验、安装、更新和迁移说明见 [docs/android-beta.md](docs/android-beta.md)。构建产物位于被 Git 忽略的 `dist/android/`，不会随源码提交，也不会自动发布到 GitHub 或应用商店。
-
-## 命令
-
-| 命令 | 作用 |
-| --- | --- |
-| `python bagu.py init` | 初始化 SQLite（`bagu.db`） |
-| `python bagu.py import` | 按章节抓取题目与答案；已有题更新正文/锚点且保留复习进度 |
-| `python bagu.py import --code-only` | 自动备份后，仅恢复旧答案中与来源匹配的代码块和缩进；不新增题目、不替换正文、不改复习记录 |
-| `python bagu.py stats` | 总题 / 今日到期 / 已掌握 / 分类进度 |
-| `python bagu.py list` | 列出全部题目 |
-| `python bagu.py draw -n 5 [--cat MySQL]` | 开一轮会话并打印题目 |
-| `python bagu.py grade <session_id> <题id> <again\|hard\|good\|easy>` | 对本轮一题打分 |
-| `python bagu.py skip [session_id]` | 结束本轮，未判题不改调度 |
-| `python bagu.py serve [--port 8765]` | 本机网页，默认 `http://127.0.0.1:8765` |
-
-CLI 接受四档评级；自评按钮仍使用原有的“不会 / 勉强 / 会了 / 秒答”文案。AI 评卷按下方的内容标准判断，**不按答题速度评分**。
-
-## 会话规则（必须遵守）
-
-1. 每次 `draw` 开一轮，打印 `session: s_YYYYMMDD_xxxxxxxx`。
-2. 有未关闭会话时**禁止再 draw**。先把题判完，或 `skip` 结束本轮。
-3. `grade` 必须带本轮 `session_id`。同一题只认**第一次**，重复调用失败且不改库。
-4. `skip` 只关会话，未判的题仍留在池里（不改 `next_due` / `level`）。
-5. 全部题判完后会话自动 `closed`。
-6. 旧写法 `grade <id> <result>`（不带 session）已废除。
-7. 网页和 Hermes 抢同一把锁：任一方持有 open 会话，另一方 `draw` 失败。
-8. 会话锁和评分使用 SQLite 原子事务；并发请求也只允许一条 open、同题只计分一次。
-9. 网页评分及答案 HTML 构造成功后才提交事务；渲染异常会回滚评分、调度和 submission，可以重试。
-10. 同一 submission ID 的重试返回原判定，不再次计分；不同 ID 重复评分、跨题复用 ID 都会失败。
-
-`session_id` 格式：`s_` + 日期 `YYYYMMDD` + `_` + 8 位小写十六进制，例如 `s_20260826_a3f2c91b`。
-
-## 调度（简化 SM-2）
-
-| 评级 | 基础间隔（天） |
-| --- | --- |
-| again | 重置 level=0，间隔 1 天 |
-| hard | 1 × 等级倍率 |
-| good | 3 × 倍率 |
-| easy | 7 × 倍率 |
-
-`again` 将 `level` 重置为 0；`hard`、`good`、`easy` 均将等级升一级（最多 3），按**升级后的等级**取倍率：level 1/2/3 对应 1/2/4。只有 `good`/`easy` 增加 `times_right`，因此等级并不等同于连续答对次数。`level >= 3` 视为已掌握。
-
-抽题：`next_due IS NULL`（新题）或 `next_due <= 今天`；到期复习优先。
-
-## 本地网页
+初次打开没有题目时，进入「题库管理」，新增一道题，或下载模板后导入 CSV。想从项目已配置的公开来源抓题，也可以另开终端执行：
 
 ```bash
-python bagu.py serve --port 8765
+python bagu.py import
 ```
 
-打开 [本机网页](http://127.0.0.1:8765)（只监听本机）。桌面采用 Arcade Bento 布局，通过侧栏进入练习、题库管理和模型配置。
+抓题需要网络；已有同名题会补全答案及来源，不重置复习进度。已有数据库升级前，请先阅读[备份与升级提醒](docs/user-guide.md#备份与恢复)。
 
-- 空闲：可选「答题模式」或「背题模式」后抽 5 题；点分类名会沿用当前模式
-- 作答：用自己的话描述 → 显示分析动画与耗时 → 流式展示评判内容 → 自动 `grade`
-- 不会：点「不会，直接看答案」，立即展示题库答案并按 `again` 记分，不调用模型
-- 背题：每题直接展示题库答案，看完后自行选择 `again / hard / good / easy`
-- AI 评卷依次展示评级、学习反馈和标准答案；`easy` 默认折叠答案，可点击展开，其余评级默认展开
-- 模型失败、断流或结果解析失败都不落库，可保留草稿重试
-- 草稿保存在本机浏览器 `localStorage`；关闭标签页或重启浏览器后仍可恢复
-- 网页提交带 submission ID；若评分已成功但响应丢失，刷新后会恢复原判定、点评、完整答案及来源；题库后续修改不会替换这些历史结果
-- 清除浏览器站点数据会丢失本地草稿；更换主机名或端口也不会自动迁移浏览器存储
-- 「结束本轮 skip」关闭会话
+### 在 Android 上使用
 
-### AI 评分与学习反馈（桌面网页 / Android 共享源码）
+准备 Android 10 及以上的 64 位 ARM 手机，以及可信来源提供的兼容 APK。在手机文件管理器中打开安装包，按系统提示安装，之后直接打开「八股助手」即可，不需要另装 Python。
 
-| 评级 | 判定标准 |
+底部的「练习 / 题库 / 概览 / 设置」分别用于答题、管理题目、查看进度和管理配置。
+
+<p align="center">
+  <img src="docs/images/android-practice.jpg" alt="Android 版练习页面，底部提供练习、题库、概览和设置导航" width="300">
+</p>
+
+*Android 实际使用截图，由用户提供；未据此认定安装包版本或设备验收范围。*
+
+仓库源码不附带本地 APK。内部 Beta 的历史构建带有种子题，public 构建为空题库；不要把截图中的 408 题理解为所有安装包都自带。安装、覆盖更新和构建方式见 [Android 指南](docs/android-beta.md)，已记录的版本与测试范围见[验收记录](docs/validation.md)。
+
+## 完成第一次练习
+
+1. **选模式**：没有进行中的练习时，选择「答题模式」或「背题模式」，点击「抽 5 题开始」。也可以点击分类，只练某一类题。
+2. **回答或背题**：答题模式下输入自己的理解，点击「发给模型评判」；背题模式下先阅读答案，再点击自评按钮。
+3. **看反馈**：AI 评卷会展示评级、学习反馈和答案。题库已有答案时优先使用题库；没有时显示「模型参考答案」。`easy` 的答案默认折叠，可点击展开。
+4. **继续或结束**：点击「下一题」继续。想中途停止，点击「结束本轮 skip」，未评分的题不会被记作答错。
+
+AI 评卷前需先[配置模型](#配置评卷模型)。暂时不想配置时，可以直接背题自评；在答题模式点击「不会，直接看答案」也不调用模型，但会将本题记为需要重学。
+
+| AI 评级 | 怎么理解 |
 | --- | --- |
-| `again` · 需要重学 | 没有有效回答，或核心概念、主要结论根本错误 |
-| `hard` · 掌握不全 | 有部分正确理解，但缺少必要内容，或关键机制存在明显错误 |
-| `good` · 基本掌握 | 核心内容和主要机制正确，仅有次要遗漏或不够准确的限定 |
-| `easy` · 掌握充分 | 完整、准确回答当前题目，必要解释清楚，无实质性错漏 |
+| again · 需要重学 | 没有有效回答，或核心内容错误 |
+| hard · 掌握不全 | 理解了一部分，但有必要内容遗漏或关键错误 |
+| good · 基本掌握 | 主干正确，只有次要遗漏 |
+| easy · 掌握充分 | 回答完整准确，没有实质性错漏 |
 
-模型按语义接受口语和同义表达，不以篇幅、术语数量或速度评分，也不把参考资料中的所有扩展知识当作必答点。固定提示词包含“事务的特性与实现”和“线程与进程的区别”两题、每题四档作答及反馈示例，不写入用户题库。当前题目、作答和参考资料通过独立的 JSON 消息提供，不能改变评分规则。
+评分看内容，不看回答速度或字数。背题自评按钮为「不会 / 勉强 / 会了 / 秒答」，对应同样四档。
 
-学习反馈通常为 2～4 句，说明已掌握内容、影响评级的主要错漏，以及正确说法或复习建议；完整作答不强行挑错。标准答案优先使用题库原文，标注“标准答案 · 题库”；题库没有答案时才由模型补充，标注“模型参考答案”。所有等级（包括 `easy`）均保存最终答案及来源。有题库答案时模型输出不能覆盖它；参考资料存在明显矛盾时要求模型在反馈中指出疑点，不自动改题库。
+## 配置评卷模型
 
-缺失点评、协议畸形，或无题库答案且模型未提供答案时，整次评卷失败、不计分，不自动再次调用模型。旧记录来源显示“参考答案 · 历史记录”；旧 `easy` 没有保存答案时明确提示，不追溯生成。自评仍直接使用题库答案，不调用模型；CLI/Hermes 协议及复习间隔不变。
+打开「模型配置库」或点击当前模型卡片，选择「新建配置」，填写服务地址、模型名和 API Key。连接测试通过后保存，再选用这条配置。
 
-**数据库升级提醒：**当前 SQLite `user_version` 为 **2**，启动时会事务迁移旧库，为评分结果增加可空的答案来源，保留题目、进度和历史评分。正式升级真实数据库前，先关闭使用该库的程序并单独备份完整 SQLite（例如通过 SQLite 备份接口）；升级后的库不能直接交给旧版程序使用。`.bagu-backup` 文件格式仍为 v1，不含会话或评分分析，不能替代完整库备份。
+可以保留多条配置，随时切换、修改或复制。截图中的服务只是使用示例，不是内置免费服务或推荐名单；模型服务及其费用由你自行选择。Android 仅接受 HTTPS 地址。
 
-### 语音输入（桌面网页 / Android）
+<details>
+<summary>查看模型配置库截图</summary>
 
-答题模式中，点击答案框下的「语音输入」，允许麦克风权限后说话，再点击「结束转写」。默认识别普通话；已确认的文字追加到原答案，未确认片段单独预览。转写期间答案框只读、评卷按钮禁用，结束后可修改文字并手动提交，**不会自动调用模型或记分**。
+![桌面版模型配置库：多条配置、当前使用项与新建入口](docs/images/desktop-models.png)
 
-- 桌面依赖浏览器的 `SpeechRecognition` / `webkitSpeechRecognition`。API 不存在、服务无法连接、权限被拒、麦克风不可用、无结果或超时，都会在语音按钮下显示中文错误；支持 API 不代表识别服务一定可用。
-- Android 通过原生桥接调用系统 `SpeechRecognizer`，只在主动开始时申请麦克风权限。没有可调用的系统服务会明确报错；厂商键盘能语音输入不代表它向第三方 App 开放了系统识别接口。旧 APK 不包含原生桥接，需要使用包含本功能的新构建。
-- 每次识别最多 60 秒；长回答可分段继续输入。点击「取消转写」、按 Esc、离开练习页、切题或进入后台会终止识别；已确认文字保留，迟到结果不会填到别的题。
-- 正式结果沿用现有草稿存储：桌面为浏览器本地存储，Android 为应用私有存储。草稿保存失败会停止识别并提示，请保留页面并复制答案。
-- 本项目不接入收费转写 API，也不打包离线模型；系统/浏览器服务可能将音频发送到其服务商，是否联网、离线及可用语言由设备决定。请阅读服务方隐私说明，不输入敏感信息。
-- 服务不可用时仍可手动打字，或点击系统输入法上的麦克风。Android 权限弹窗使应用暂停时，仍会等待并显示拒绝结果；若授权成功，本次请求取消，需再次点击「语音输入」，不会在恢复页面时自动录音。
+</details>
 
-本地回归包括 `node --test test/speech_input.test.cjs`（也由核心 pytest 调用）。需要检查真实浏览器界面而不采集音频时，可运行 `python test/manual_speech_server.py --scenario success`，打开打印的本机地址；它使用临时题库和模拟识别服务，另支持 `unavailable / denied / network / timeout` 场景，不代表真实语音服务连通性测试。
+字段说明、保存失败排查和本地模型限制见[模型配置指南](docs/user-guide.md#模型配置)。
 
-## 题库管理与 CSV 导入
+## 管理自己的题库
 
-旧版本抓取的答案可能没有代码围栏，导致 SQL、Java 等代码显示为普通正文。
-可执行 `python bagu.py import --code-only`：先在数据库旁创建
-`*.before-code-format-*.sqlite3` 备份，再从公开来源恢复能逐行匹配的代码块格式。
-已有围栏、内容有改动或匹配数量不一致的答案/片段会保持原样；不会更新历史评卷文本。
-修复后刷新网页并重新打开答案即可；此命令不需要模型 Key，也不调用模型。
+打开「题库管理」（Android 为「题库」），可以搜索题目或答案、筛选分类、展开答案、新增和修改题目。
 
-桌面从侧栏「题库管理」进入管理页，Android 从底部「题库」进入。支持按题目、答案、分类或 URL 搜索，可直接展开答案正文；答案支持标题、粗体、链接、图片、列表、引用、代码块和表格等常用 Markdown，并会经过安全转义。无法解析的链接显示为普通文本，不执行题库 HTML。为保留复习历史，已经进入过会话的题目不能删除；修改题目不会重置复习进度。
+批量导入时，先点击「下载模板」，按 `category,question,answer,url` 填写并保存为 UTF-8 CSV。分类和题目必填，答案与来源链接可以留空。
 
-批量导入文件必须是 UTF-8 CSV，固定表头如下：
+<details>
+<summary>查看题库管理截图</summary>
 
-```csv
-category,question,answer,url
-MySQL,什么是事务？,事务是一组不可分割的数据库操作,https://example.com/mysql#transaction
-Redis,什么是缓存穿透？,,
-```
+![桌面版题库管理：搜索、分类筛选、CSV 导入和题目编辑](docs/images/desktop-questions.png)
 
-- `category`：分类，必填，最多 100 个字符
-- `question`：题目，必填，最多 2000 个字符
-- `answer`：参考答案正文，可空，最多 100000 个字符
-- `url`：来源链接，可空，最多 2048 个字符
-- 仍兼容旧表头 `category,question,url`，导入后答案留空
-- 支持带 BOM、双引号和字段内逗号
-- 单文件不超过 2 MiB，一次最多 5000 道题
-- 先校验整份文件；任一行错误则整批不写入
-- 相同 `category + question` 视为重复并跳过，不覆盖已有题目
+</details>
 
-管理页可直接下载 CSV 模板。
+修改题目不会重置进度；已经用于练习的题目不能直接删除。导入限制、重复处理和答案格式见[题库管理指南](docs/user-guide.md#题库管理与导入)。
 
-## 备份与恢复
+## 常见问题
 
-`.bagu-backup` 是包含 `manifest.json` 和 `questions.json` 的 ZIP 档案：
+**不联网还能用吗？**
 
-- 包含题目、答案、来源 URL 和复习进度；**不包含评分分析、模型配置、API Key、草稿或会话历史**。
-- 恢复按 `category + question` 合并：已有题的答案、URL 和进度会被备份覆盖，新题新增，不删除备份外的题目。
-- 有进行中的会话时禁止恢复；导出不受此限制，但不会导出该会话。
-- 最多 10000 题、压缩文件 20 MiB、两个 JSON 解压后合计 50 MiB。损坏、超限或校验失败时整批拒绝，不部分写入。
-- Android 在「设置」中导出/恢复；桌面已提供对应 HTTP API，当前桌面界面没有备份按钮。CSV 导入仅导入题目，不迁移进度。
+已有题库的背题、自评和已保存答案可用。抓题、远程图片和远程 AI 评卷需要网络；语音是否联网取决于系统或浏览器服务。
 
-恢复会覆盖同名题的相关数据，操作前先备份。跨卸载迁移无法找回被排除的配置、草稿或评分分析，详情见 [安装、更新与备份](docs/android-beta.md#安装更新与备份)。
+**没有完成这一轮，能重新抽题吗？**
 
-## 模型配置（桌面网页 / Android 评卷）
+先继续当前练习，或点击「结束本轮 skip」。电脑网页与命令行共用当前练习，手机则独立保存。
 
-作答页顶部展示当前评卷模型（显示名、模型 ID、Base URL）。点进去进入配置库：点卡片切换当前模型；可新建、修改、复制、删除。同一厂商可存多条，每条自己的 Base URL 和 Key。
+**模型报错会扣进度吗？**
 
-桌面 Key 写入项目 `.env` 的 `BAGU_KEY_<模型id>`，模型列表在 `settings.json`；Android 使用应用私有 `config/` 下同名文件，不读取电脑配置。新建和修改会先完整读取一次流式测试响应，通过后才写盘；激活或复制已有条目不重新测试。作答失败时输入框草稿会保留。
+模型失败或结果不完整时不会计分，草稿会保留供你重试。更多恢复方式见[常见问题与恢复](docs/user-guide.md#常见问题与恢复)。
 
-旧版单模型配置会在首次读取时自动迁移：`settings.json` 的 `{provider, model, base_url}` 会变成一条模型记录，`.env` 中的 `BAGU_API_KEY` 会改写为对应的 `BAGU_KEY_<模型id>`。迁移完成后不再使用旧键。
+**换手机或重装前要做什么？**
 
-下拉预设（以下仅描述代码中的预填值，可修改，不保证供应商当前仍提供对应模型）：
+先导出备份，并确认已保存到应用外。题库备份不包含模型配置、API Key、草稿、会话或评分分析；卸载会删除应用私有数据。详见[备份与恢复](docs/user-guide.md#备份与恢复)。
 
-| 供应商 | 默认 Base URL | 默认模型 |
-| --- | --- | --- |
-| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
-| OpenRouter | `https://openrouter.ai/api/v1` | `openrouter/auto` |
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
-| 智谱 GLM / z.ai | `https://api.z.ai/api/paas/v4` | `glm-4-flash` |
-| Kimi | `https://api.moonshot.cn/v1` | `kimi-k2-turbo-preview` |
-| 硅基流动 | `https://api.siliconflow.cn/v1` | `deepseek-ai/DeepSeek-V3` |
-| Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.0-flash` |
-| Ollama（本地） | `http://127.0.0.1:11434/v1` | `llama3.1` |
-| 自定义 | 自填 | 自填 |
+**语音输入不可用怎么办？**
 
-Android 拒绝 HTTP 模型地址，因此不能直接使用表中的默认 Ollama 地址。桌面保留本机 HTTP 模型支持。同步与流式请求默认均不指定 `temperature`；截断、拒答、空内容或不完整流式响应不会作为成功评分落库。
+可以继续打字或使用输入法自带的麦克风。浏览器和手机厂商的识别支持不同，详见[语音输入](docs/user-guide.md#语音输入)。
 
-## Hermes 聊天
+## 更多文档
 
-你用自己的话作答 → **Hermes 自己的 AI** 分析并给出 `again|hard|good|easy` → 再 `grade` 一次。不是 easy 时对照题目 URL 讲完整答案。一次只发一题。
+- [使用指南](docs/user-guide.md)：日常操作、模型配置、题库导入、备份与排错。
+- [Android 指南](docs/android-beta.md)：安装、更新、构建和交付限制。
+- [CLI 与 Hermes](docs/cli.md)、[HTTP API](docs/api.md)：命令行或程序接入。
+- [架构与数据约定](docs/architecture.md)、[开发与测试](docs/development.md)：了解实现和参与开发。
+- [文档导航](docs/README.md)：现行说明、验收记录与历史设计的统一入口。
 
-Hermes 路径**不**调用本仓库配置的 LLM。禁止：不带 session 的 grade、同一题再 grade、用户未作答就自选评级、本轮未结束再 draw、把 Nous token 写入本项目。
-
-## HTTP API（仅本机）
-
-| 方法 | 路径 | 作用 |
-| --- | --- | --- |
-| GET | `/`、`/index.html` | 单页 `web/index.html` |
-| GET | `/assets/...` | 仅提供允许列表内的本地字体与品牌图标，不是任意文件服务 |
-| GET | `/api/stats` | 看板；含 `open_session_id` |
-| GET | `/api/session` | 当前 open 会话及题目 |
-| GET | `/api/questions` | 分页查询；支持 `q`、`cat`、`page`、`page_size` |
-| POST | `/api/questions` | 新增题目 |
-| PUT | `/api/questions/:id` | 修改题目，不重置复习进度 |
-| DELETE | `/api/questions/:id` | 删除未进入过会话的题目 |
-| POST | `/api/questions/import` | `{content}`；解析并导入 UTF-8 CSV 文本 |
-| POST | `/api/draw` | `{n, cat?}`；已有会话返回 409 |
-| POST | `/api/answer` | `{session_id, question_id, text, submission_id?}` → 调模型 → grade |
-| POST | `/api/answer/stream` | 同上；SSE 推送 `start` / `delta` / `done` / `error`，完整生成、解析和渲染成功后才提交评分 |
-| POST | `/api/reveal` | `{session_id, question_id}`；只查看题库答案，不评分 |
-| POST | `/api/review` | `{session_id, question_id, result, submission_id?}` → 自评并持久化题库答案 |
-| GET | `/api/submissions/:id` | 查询已完成 submission；会话关闭后仍可恢复结果 |
-| GET | `/api/backup/export` | 返回 ZIP 字节，保存为 `.bagu-backup` |
-| POST | `/api/backup/restore` | `{archive_base64}`；返回 `{added, updated, total}`，有 open 会话时 409 |
-| POST | `/api/skip` | 关闭本轮 |
-| GET | `/api/models` | 模型列表 + `active_id` + 掩码 Key + 预设 |
-| POST | `/api/models` | 新建（服务端先测再写） |
-| POST | `/api/models/test` | 测试草稿配置的完整流式响应，不写盘 |
-| PUT | `/api/models/:id` | 修改（先测再写；Key 空则沿用） |
-| POST | `/api/models/:id/activate` | 设为当前评卷模型 |
-| POST | `/api/models/:id/copy` | 复制，不改当前项 |
-| DELETE | `/api/models/:id` | 删除 |
-| GET | `/api/settings` | 兼容：当前 active 的字段 + 掩码 Key |
-
-旧写接口 `POST /api/settings`、`POST /api/settings/test`、`POST /api/settings/import-hermes` 已停用，统一返回 404；模型连接测试改用 `POST /api/models/test`。
-
-评分响应、SSE `done.result` 及 submission 查询结果增加 `answer_source`：`stored`、`model` 或 `null`。它与首次评分一起持久化，由后端决定，旧记录不推断来源；自评有题库答案时为 `stored`，无答案时为 `null`。
-
-除 HTML、字体/图标、ZIP 和 SSE 外，接口使用 JSON；POST/PUT 请求体必须是 JSON 对象，最多 32 MiB（CSV 和备份还有各自更严格的上限）。Android 的本机 HTTP 服务使用每进程生成的访问令牌，API 请求携带 `X-Bagu-Token`；令牌不应复制到文档或日志。
-
-## 仓库结构
-
-```
-bagu.py                      # CLI、HTTP、抽题/评分/评卷、备份及配置
-web/index.html               # 桌面与 Android 共用的唯一页面
-android/                     # Android 宿主、原生桥接与仪器测试
-assets/fonts/                # 离线字体及许可证
-assets/branding/             # 应用品牌图标
-scripts/android.ps1          # 本地签名准备、构建与交付物校验
-scripts/build_android_seed.py # 从只读题库生成清洁种子，或生成空种子
-scripts/verify_android_apk.py # APK 内容与原生库校验
-test/test_bagu.py             # 核心、HTTP、网页行为回归
-test/test_android_project.py  # Android 项目、桥接和打包契约回归
-docs/android-beta.md          # Android 构建、迁移与验收边界
-docs/superpowers/             # 历史设计、实现计划及协议补充
-AGENTS.md                    # 当前项目协作规则；AGENT.md 仅作指向
-```
-
-本地生成、不要提交：`.env`、`settings.json`、`bagu.db`、`.signing/`、Android SDK/Gradle 缓存和 `dist/`。桌面服务日志默认写入 `.superpowers/bagu-server.log`，Android 写入私有 `logs/`；日志也不属于源码。
-
-## 测试
-
-安装 pytest，并确保 `node` 可从命令行调用：
-
-```bash
-python -m pip install pytest
-python -m pytest test/test_bagu.py -q
-```
-
-Android 工具链及缓存就绪后，运行完整回归：
-
-```bash
-python -m pytest test/test_bagu.py test/test_android_project.py -q
-```
-
-完整项目测试包含 Windows PowerShell、JDK 和离线 Gradle 检查，不是只安装 pytest 就能在任意环境运行。测试使用临时数据库、隔离的临时签名材料及模拟网络；不会写真实 `bagu.db`，也不调用真实模型。Android 的 Java 单元测试、lint、APK 校验与模拟器验收是另外的检查，不由上述 pytest 命令全部覆盖。
-
-2026-08-28，源码基线 `997fe91` 的完整回归为 **328 项通过**；另行编译执行的 `HostPolicyTest` **6 项通过**。这是源码测试记录，不代表现有 APK 已更新或真机验收完成。
-
-协议与设计入口：[会话恢复与并发保护](docs/superpowers/specs/2026-08-27-session-fault-recovery-design.md)、[多模型配置库](docs/superpowers/specs/2026-08-26-model-profiles-design.md)、[Android Beta 设计](docs/superpowers/specs/2026-08-27-android-beta-design.md)。早期设计中的已替代接口，以当前代码和后续补充为准。
-
-## 安全
-
-- API Key 只放桌面或 Android 私有配置目录中的 `.env`，不得提交
-- 接口不回明文 Key，只回掩码
-- 服务只监听 `127.0.0.1`
-- Android 仅加载受控本机页面；模型地址必须是 HTTPS，原生桥接限制存储键与文件大小
-- 畸形链接按转义文本显示；无法完成的答案渲染不会提交新评分
-- `.bagu-backup` 含题目正文与学习进度，请自行妥善保管
-- 不要把 `.env`、`bagu.db`、`settings.json` 拷进聊天、截图或公开仓库
-- 若 Key 曾离开本机，去对应供应商控制台轮换
+公开抓题来源为[小林 coding](https://xiaolincoding.com/)。题目与答案的使用、分享和再分发应遵守来源许可；本地字体的许可证保留在 [assets/fonts](assets/fonts/)。

@@ -19,7 +19,10 @@
 | `scripts/` | Android 构建/校验与清洁题库种子生成 |
 | `test/test_bagu.py` | 单元测试，必须用临时目录，禁止写真实 `bagu.db` |
 | `test/test_android_project.py` | Android 项目、运行时、原生桥接和发布契约测试 |
-| `docs/android-beta.md` | 构建、备份迁移、源码与 APK 验收范围 |
+| `docs/README.md`、`docs/user-guide.md` | 文档导航与详细使用说明；根 README 面向首次使用 |
+| `docs/cli.md`、`docs/api.md`、`docs/architecture.md` | 命令、接口与当前架构/数据约束 |
+| `docs/development.md`、`docs/android-beta.md` | 开发测试、Android 构建与安装更新 |
+| `docs/validation.md`、`docs/images/` | 历史验收证据与文档截图；截图不加入应用打包列表 |
 | `docs/superpowers/specs/` | 已定设计。会话网页、多模型条目均已实现 |
 | `docs/superpowers/plans/` | 实现计划 |
 | `.env` | 密钥，禁止提交、禁止写入文档/聊天 |
@@ -62,7 +65,7 @@
 
 会话网页 spec：`docs/superpowers/specs/2026-08-26-session-web-design.md`（已实现）。改会话协议前先读它。
 
-后续补充：`docs/superpowers/specs/2026-08-27-session-fault-recovery-design.md`（数据库并发、submission 与中断恢复）和 `docs/superpowers/specs/2026-08-27-android-beta-design.md`（移动端边界）。早期计划是历史记录；当前操作说明以 README、Android Beta 文档和代码为准。
+后续补充：`docs/superpowers/specs/2026-08-27-session-fault-recovery-design.md`（数据库并发、submission 与中断恢复）和 `docs/superpowers/specs/2026-08-27-android-beta-design.md`（移动端边界）。早期计划是历史记录，部分旧设计已被替代；阅读入口为 `docs/README.md`。当前使用方法见 README / `docs/user-guide.md`，技术说明见 CLI / API / architecture 文档，均需结合各文档注明的源码基线和实际代码核对。测试数字、APK 哈希与未验证范围集中在 `docs/validation.md`，不作为后续版本的自动验收结论。
 
 ## 数据表
 
