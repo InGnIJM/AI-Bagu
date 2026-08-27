@@ -22,6 +22,7 @@
 | `docs/README.md`、`docs/user-guide.md` | 文档导航与详细使用说明；根 README 面向首次使用 |
 | `docs/cli.md`、`docs/api.md`、`docs/architecture.md` | 命令、接口与当前架构/数据约束 |
 | `docs/development.md`、`docs/android-beta.md` | 开发测试、Android 构建与安装更新 |
+| `docs/data-transfer-and-updates.md` | 双端迁移、Android 更新、版本化构建与明确授权的 GitHub 发布／恢复 |
 | `docs/validation.md`、`docs/images/` | 历史验收证据与文档截图；截图不加入应用打包列表 |
 | `docs/superpowers/specs/` | 已定设计。会话网页、多模型条目均已实现 |
 | `docs/superpowers/plans/` | 实现计划 |
@@ -97,7 +98,8 @@
 | `POST /api/reveal` | 仅返回本轮未判题的题库答案，不计分 |
 | `POST /api/review` | 自评并保存结果，支持 submission 重放，不调用模型 |
 | `GET /api/submissions/:id` | 查询已完成结果，会话关闭后也可恢复 |
-| `GET /api/backup/export` | 导出题目和进度的 ZIP 字节，允许有 open 会话 |
+| `GET /api/backup/export` | `mode=questions` 或 `mode=progress`，默认 progress；空／非法／重复 mode → 400，允许有 open 会话 |
+| `POST /api/backup/inspect` | `{archive_base64}`；完整校验，只读返回类型、题数、时间、版本与 schema |
 | `POST /api/backup/restore` | `{archive_base64}`；整批校验后合并，有 open 会话时 409 |
 | `POST /api/models` | 服务端先测再写；测挂 502 且不写盘 |
 | `POST /api/models/:id/activate` | 只改 `active_id` |
@@ -145,13 +147,25 @@
 
 ## 备份与 Android 交付
 
-- `.bagu-backup` 仅含 `manifest.json` / `questions.json`，保存题目、答案、URL 和调度；不含配置、Key、草稿、会话或评分分析
+- `.bagu-backup` v2 仅含 `manifest.json` / `questions.json`；`questions` 仅含分类、题干、答案、URL，不含任何调度字段；`progress` 额外保存调度，且为默认导出模式。v1 按 progress 读取；备份 schema 与 SQLite user_version 无关。不含配置、Key、草稿、会话或评分分析
 - 上限为 10000 题、压缩 20 MiB、解压 JSON 合计 50 MiB；检查成员名、重复项、字段及 SHA-256，失败整批不写库
-- 恢复按分类+题干合并，已有题的答案、URL 和调度会被备份覆盖；不删除其他题，不修改已有会话/分析历史，有 open 会话时禁止恢复
+- 恢复按分类+题干合并，两种模式都覆盖答案与 URL（包括空内容）；questions 保留已有进度，新题默认零／null，progress 覆盖调度。不删除其他题，不修改会话／分析历史；BEGIN IMMEDIATE 事务内检查 open 会话，异常回滚
+- 桌面与 Android 均先完整校验、预览，再明确确认同一份字节。Android 文件正文不进 JS，Activity 重建不得隐式确认，进程死亡不重放；恢复完成未知时要求先核对数据，不自动重试。真实 `*.bagu-backup` 禁止提交
 - Android 通过 `AppPaths` 分离 data/config/static/logs；首次安装复制清洁种子，已有数据不被种子覆盖
 - `internal` 使用经授权的只读源题库生成清洁种子；`public` 为空种子。不得把工作站数据库、进度、配置或密钥直接打包
 - 发布脚本使用项目本地工具链和稳定签名，不自动上传；不要重新生成已有签名身份或更改机器级环境变量
 - 源码合入不代表 APK 更新。重新构建/发布时重新校验精确 APK、签名、清单、原生库和哈希，更新对应验收记录
+
+## Android 更新与发布约束
+
+- `version.json` 是 versionName/versionCode/channel 来源；默认 public 空题库构建，internal 必须显式指定且不可公开。自有源码 MIT 不重新授权题库、第三方字体、素材或运行时
+- 更新默认仅自动检查，前台／页面就绪且通常距上次尝试 24 小时；手动可绕过间隔。stable 读 stable，beta 读两通道取最高兼容整数 code；部分失败不得报告已最新
+- 下载须用户操作，可取消，进入后台取消；不承诺断点续传。固定 feed／仓库、有限 HTTPS 重定向、64 KiB 清单／128 MiB APK、完整 hash/size/版本/包名/ABI/证书检查不得放宽
+- 安装前再次验证缓存与本机状态；open 会话、评卷、语音、文件操作和待确认导入都阻止安装。不自动结束会话；来源权限须明确打开设置，返回后再次点击安装。只用专用只读临时 URI；安装器返回不等于成功，后续启动核对实际版本才确认
+- 「稍后」只关闭当前通知，不永久忽略版本或关闭自动检查。缓存损坏恢复不得绕过校验，也不能替换仍交给安装器使用的文件；必须纳入隔离设备验收
+- `scripts/release_github.py` 的 preflight/prepare/publish/feed 默认 dry-run；所有 `--execute` 会先使用维护者已登录的 gh 做远端预检，prepare 也不是离线模式。脚本不自动登录、提交／推送源码、修改仓库可见性或重建稳定签名
+- 公开发布仍须单独明确确认仓库、版本和精确附件。只发布六个允许附件，verification.json 必须匹配精确 commit 与附件哈希；拒绝冲突 tag／附件，不强推或删除 Release
+- 有归属的中断 public 输出保留为 `public.interrupted-<UUID>` 后重建，preparation.json 不可冒充验证回执；feed 重试只接受已公开匹配版本并保留另一通道。Release／匿名附件／Pages 状态分别核验，详见 `docs/data-transfer-and-updates.md`
 
 ## 测试
 

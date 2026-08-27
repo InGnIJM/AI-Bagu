@@ -147,6 +147,21 @@ CSV 请求为 `{"content":"category,question,answer,url\n..."}`，不是 multipa
 
 恢复按 `category + question` 合并：新题新增，已有题的答案、URL 和进度被备份覆盖，不删除其他题，也不修改已有会话/分析历史。恢复是覆盖性操作，先备份再执行；`.bagu-backup` 不能替代数据库升级前的完整 SQLite 备份。用户操作说明见 [用户指南](user-guide.md) 和 [Android Beta](android-beta.md)。
 
+## 诊断接口（当前工作区新增）
+
+以下接口仅用于桌面页面，Android 对 `/api/diagnostics/*` 返回 404，改走受限原生桥接。接口在数据库连接之前分流，不读取题库、配置或密钥，不执行数据库初始化/迁移。
+
+请求必须携带 `X-Bagu-Diagnostics: 1`；Host 必须为实际监听的 `127.0.0.1:端口`，存在 Origin 时必须精确匹配该 HTTP origin。不开放 CORS。普通 HTTP 和 SSE 响应提供 `X-Bagu-Request-Id`，可用于关联错误与日志。
+
+| 接口 | 请求与结果 |
+| --- | --- |
+| `GET /api/diagnostics/export` | 返回 `application/zip`，带 `Content-Disposition` 下载文件名及 `Cache-Control: no-store`；每来源最多 2 MiB，ZIP 最多 8 MiB |
+| `POST /api/diagnostics/events` | `application/json` 对象 `{"events":[{"event":"web.error","error_type":"TypeError","line":42}]}`；返回 `{accepted,dropped}` |
+
+事件请求最多 32 KiB、每批最多 20 条、单事件最多 2 KiB；每分钟最多接收 120 条，超限或非法单条计入 dropped。请求体超限返回 413，批次格式错误返回 400，访问校验失败返回 403。仅接收已定义的 `web.*` 事件及白名单字段，自由文本不会被保存。
+
+ZIP 固定包含 `manifest.json`、`server.jsonl`、`web.jsonl`、`native.jsonl`、`README.txt`；不可用来源为空并在 manifest 标记。历史日志同样重新过滤，不提供原始目录或任意文件下载。格式版本为 1，与 SQLite/题库备份版本无关。
+
 ## 模型配置
 
 新建、测试和修改的配置字段为 `provider`、`model`、`base_url`、`api_key`，新建/修改另可带 `name`。提交完整连接配置，不要把 `PUT` 当作仅修改名称的补丁；空名称会使用默认显示名。供应商预设从 `GET /api/models` 的 `presets` 获取，只是代码预填值，不保证服务商实际可用性。

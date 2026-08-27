@@ -45,6 +45,16 @@ Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面�
 
 本地生成且禁止提交：`.env`、`settings.json`、`bagu.db`、`.signing/`、`.toolchains/`、`.android-sdk/`、Gradle/Android 缓存、`dist/`。桌面服务日志默认位于 `.superpowers/bagu-server.log`，Android 日志位于私有 `logs/`；日志不是源码，不应携带 Key、令牌或作答正文。
 
+## 诊断日志（当前工作区新增）
+
+桌面由 `bagu.py` 的白名单过滤、轮转日志和独立于数据库的诊断接口负责；网页在主脚本之前注册错误监听，通过专用请求头批量写入。Android 由 `BaguApplication` 提前初始化 `AndroidDiagnostics`，`DiagnosticPolicy` / `DiagnosticStore` 校验并重过滤历史记录；导出使用独立执行器和系统文件选择器，不调用 Python 启动或工作队列。
+
+排查隐私问题时只使用临时目录与假 Key/令牌/作答。固定文件名为 `bagu-server.log`、`bagu-web.log`、`bagu-native.log` 及各自 `.1`—`.3`；禁止将旧日志直接压缩发送。服务日志为 5 MiB、网页/原生日志为 1 MiB，每个来源保留 3 份历史；导出各来源最近最多 2 MiB，ZIP 最多 8 MiB。缺失、不完整及不可读来源必须在清单中说明。
+
+回归入口为 `python -m pytest test -q` 和 `node --test test/speech_input.test.cjs`。项目工具链就绪并获准使用已有签名配置后，以 **Windows PowerShell** 执行 `scripts/android.ps1 -Mode Check`，运行 `:app:testPublicDebugUnitTest` 与 `:app:lintPublicRelease`，不会生成正式签名 APK。当前脚本的整数校验不兼容 PowerShell 7 `ConvertFrom-Json` 返回的 Int64；不要因此修改 `version.json`。
+
+`DiagnosticAcceptanceTest` 用于隔离设备上的启动、导出及隐私验证；仅编译它不能证明设备行为。API 29 与较新 Android 上的真实文件选择器、写入失败、旋转、进程终止及 WebView/Python 启动失败需单独验收。设备安装与签名交付遵循原有授权流程，结果记录在 [验收记录](validation.md)，不能用历史 APK 的通过结果代替。
+
 ## 修改前的边界检查
 
 1. 读取根目录 [AGENTS.md](../AGENTS.md) 及目标子目录规则，检查工作树，保留用户和其他任务的未提交改动。

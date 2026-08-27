@@ -16,6 +16,7 @@ bagu.db
 *.db-journal
 *.sqlite
 *.sqlite3
+*.bagu-backup
 
 # Python
 __pycache__/
@@ -51,6 +52,7 @@ desktop.ini
 
 # Agent scratch (brainstorm HTML, not source)
 .superpowers/
+bagu-diagnostics-*.zip
 
 # Android local toolchains, signing material and generated output
 .android-sdk/

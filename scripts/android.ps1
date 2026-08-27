@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('SetupSigning', 'Build', 'Verify')]
+    [ValidateSet('SetupSigning', 'Plan', 'Check', 'Build', 'BuildInternal', 'Verify')]
     [string]$Mode,
     [string]$JavaHome = 'C:\Program Files\Java\jdk-17.0.10',
     [string]$BuildPython = 'E:\Anaconda\python.exe',
@@ -22,10 +22,20 @@ $SigningDir = Join-Path $RepoRoot '.signing'
 $Keystore = Join-Path $SigningDir 'release.jks'
 $SigningProperties = Join-Path $SigningDir 'keystore.properties'
 $SigningFingerprint = Join-Path $SigningDir 'certificate-sha256.txt'
-$DeliveryDir = Join-Path $RepoRoot 'dist\android'
-$DeliveryName = '八股助手-0.1.0-beta.1-arm64-v8a.apk'
-$DeliveryApk = Join-Path $DeliveryDir $DeliveryName
 $StableFingerprint = 'ac92a24f30a5e6c10c4ced0d0db89124f39f36e00778fef6ca3ba4973bdf0ee3'
+$Flavor = if ($Mode -eq 'BuildInternal') { 'internal' } else { 'public' }
+if ($Mode -ne 'SetupSigning') {
+    $Version = Get-Content -LiteralPath (Join-Path $RepoRoot 'version.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($Version.versionName -notmatch '^\d+\.\d+\.\d+(-beta\.\d+)?$' -or
+        $Version.versionCode -isnot [int] -or $Version.versionCode -lt 1 -or $Version.versionCode -gt 2100000000 -or
+        $Version.channel -notin @('beta', 'stable') -or
+        ($Version.versionName.Contains('-beta.') -ne ($Version.channel -eq 'beta'))) {
+        throw 'Invalid version.json'
+    }
+    $DeliveryDir = Join-Path $RepoRoot ("dist\android\{0}\{1}" -f $Version.versionName, $Flavor)
+    $DeliveryName = "bagu-$($Version.versionName)-$Flavor-arm64-v8a.apk"
+    $DeliveryApk = Join-Path $DeliveryDir $DeliveryName
+}
 
 function Require-File([string]$Path, [string]$Label) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -230,7 +240,7 @@ function Get-ApkFingerprint([string]$ApkPath) {
         throw 'apksigner 未输出签名证书 SHA-256 指纹。'
     }
     $fingerprint = ($match.Groups[1].Value -replace ':', '').ToLowerInvariant()
-    if ($fingerprint -ne (Get-ExpectedSigningFingerprint)) {
+    if ($fingerprint -ne $StableFingerprint) {
         throw "签名证书指纹不匹配：$fingerprint"
     }
     return $fingerprint
@@ -242,7 +252,7 @@ function Assert-Badging([string]$ApkPath) {
         throw "aapt badging 验证失败：$ApkPath"
     }
     foreach ($required in @(
-        "package: name='io.github.ingnijm.baguhelper' versionCode='1' versionName='0.1.0-beta.1'",
+        "package: name='io.github.ingnijm.baguhelper' versionCode='$($Version.versionCode)' versionName='$($Version.versionName)'",
         "application-label:'八股助手'",
         "sdkVersion:'29'",
         "targetSdkVersion:'36'",
@@ -254,26 +264,16 @@ function Assert-Badging([string]$ApkPath) {
     }
 }
 
-function Invoke-ContentVerification([string]$ApkPath, [string]$Flavor, [int]$ExpectedQuestions) {
-    Invoke-Tool $BuildPython @($Verifier, $ApkPath, '--flavor', $Flavor, '--expected-questions', "$ExpectedQuestions", '--readelf', $ReadElf)
+function Invoke-ContentVerification([string]$ApkPath, [string]$Flavor) {
+    $arguments = @($Verifier, $ApkPath, '--flavor', $Flavor, '--readelf', $ReadElf)
+    if ($Flavor -eq 'public') { $arguments += @('--expected-questions', '0') }
+    Invoke-Tool $BuildPython $arguments
 }
 
 function Write-DeliveryMetadata([string]$ApkPath, [string]$Fingerprint) {
-    New-Item -ItemType Directory -Path $DeliveryDir -Force | Out-Null
-    $hash = Get-Sha256 $ApkPath
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText((Join-Path $DeliveryDir 'SHA256SUMS'), "$hash *$DeliveryName`n", $utf8NoBom)
-    [System.IO.File]::WriteAllText((Join-Path $DeliveryDir 'certificate-sha256.txt'), "$Fingerprint`n", $utf8NoBom)
-    $notes = @(
-        '八股助手 Android Beta 安装说明',
-        '',
-        '首次安装：adb install "八股助手-0.1.0-beta.1-arm64-v8a.apk"',
-        '更新：先在应用设置中导出 .bagu-backup，再使用同一签名的 adb install -r 更新 APK。',
-        '卸载会清空应用私有数据；跨卸载迁移只能通过 .bagu-backup 导出/导入。',
-        '请离线、受控地备份 release.jks 和 keystore.properties；丢失稳定签名身份将无法发布可信更新。',
-        '此 Beta 不会自动发布到 GitHub 或任何应用商店。'
-    ) -join "`r`n"
-    [System.IO.File]::WriteAllText((Join-Path $DeliveryDir 'install-notes.txt'), "$notes`r`n", $utf8NoBom)
+    if ($Flavor -ne 'public' -or $Fingerprint -ne $StableFingerprint) { throw 'Only trusted public APKs get release metadata' }
+    Invoke-Tool $BuildPython @((Join-Path $PSScriptRoot 'release_metadata.py'), 'prepare', $DeliveryDir,
+        '--notes', (Join-Path $RepoRoot "docs\releases\$($Version.versionName).md"))
 }
 
 function New-AsciiToolCopy([string]$ApkPath) {
@@ -294,19 +294,21 @@ function Invoke-DeliveryVerification {
     Require-File $DeliveryApk '精确交付 APK'
     Require-File (Join-Path $DeliveryDir 'SHA256SUMS') 'SHA256SUMS'
     Require-File (Join-Path $DeliveryDir 'certificate-sha256.txt') 'certificate-sha256.txt'
-    Require-File (Join-Path $DeliveryDir 'install-notes.txt') 'install-notes.txt'
-    $expectedHash = ([regex]::Match((Get-Content -LiteralPath (Join-Path $DeliveryDir 'SHA256SUMS') -Raw -Encoding UTF8), '^([0-9a-f]{64}) \*八股助手-0\.1\.0-beta\.1-arm64-v8a\.apk$', [System.Text.RegularExpressions.RegexOptions]::Multiline)).Groups[1].Value
+    Require-File (Join-Path $DeliveryDir 'INSTALL.md') 'INSTALL.md'
+    Invoke-Tool $BuildPython @((Join-Path $PSScriptRoot 'release_metadata.py'), 'verify', $DeliveryDir)
+    $sumPattern = '^([0-9a-f]{64}) \*' + [regex]::Escape($DeliveryName) + '$'
+    $expectedHash = ([regex]::Match((Get-Content -LiteralPath (Join-Path $DeliveryDir 'SHA256SUMS') -Raw -Encoding UTF8), $sumPattern, [System.Text.RegularExpressions.RegexOptions]::Multiline)).Groups[1].Value
     $actualHash = Get-Sha256 $DeliveryApk
     if ($expectedHash.Length -ne 64 -or $actualHash -ne $expectedHash) {
         throw 'SHA256SUMS 与精确交付 APK 不匹配。'
     }
     $metadataFingerprint = (Get-Content -LiteralPath (Join-Path $DeliveryDir 'certificate-sha256.txt') -Raw -Encoding UTF8).Trim()
-    if ($metadataFingerprint -notmatch '^[0-9a-f]{64}$' -or $metadataFingerprint -ne (Get-ExpectedSigningFingerprint)) {
+    if ($metadataFingerprint -notmatch '^[0-9a-f]{64}$' -or $metadataFingerprint -ne $StableFingerprint) {
         throw 'certificate-sha256.txt does not match the trusted signing certificate fingerprint.'
     }
-    $installNotes = Get-Content -LiteralPath (Join-Path $DeliveryDir 'install-notes.txt') -Raw -Encoding UTF8
+    $installNotes = Get-Content -LiteralPath (Join-Path $DeliveryDir 'INSTALL.md') -Raw -Encoding UTF8
     if ($installNotes -notmatch ('adb install.*' + [regex]::Escape($DeliveryName))) {
-        throw 'install-notes.txt does not name the exact delivery APK in its adb install command.'
+        throw 'INSTALL.md does not name the exact delivery APK in its adb install command.'
     }
     $toolApk = New-AsciiToolCopy $DeliveryApk
     try {
@@ -316,7 +318,7 @@ function Invoke-DeliveryVerification {
         }
         Assert-Badging $toolApk
         Invoke-Tool $ZipAlign @('-c', '-P', '16', '4', $toolApk)
-        Invoke-ContentVerification $DeliveryApk 'internal' 408
+        Invoke-ContentVerification $DeliveryApk 'public'
         Write-Host "发布 APK 验证通过：$DeliveryName，证书 $fingerprint"
     }
     finally {
@@ -325,6 +327,22 @@ function Invoke-DeliveryVerification {
 }
 
 switch ($Mode) {
+    'Check' {
+        Set-ProjectEnvironment
+        Push-Location $AndroidRoot
+        try {
+            Invoke-Tool $GradleHome @('--no-daemon', '--console=plain',
+                ':app:testPublicDebugUnitTest', ':app:lintPublicRelease',
+                "-PbaguBuildPython=$BuildPython", '-PbaguAbi=arm64-v8a')
+        }
+        finally { Pop-Location }
+    }
+    'Plan' {
+        [ordered]@{ versionName = $Version.versionName; versionCode = $Version.versionCode;
+            channel = $Version.channel; flavor = 'public'; deliveryName = $DeliveryName;
+            tasks = @(':app:assemblePublicRelease', ':app:testPublicDebugUnitTest', ':app:lintPublicRelease')
+        } | ConvertTo-Json -Compress
+    }
     'SetupSigning' {
         $hasSigningMarker = (Test-Path -LiteralPath $Keystore -PathType Leaf) -or (Test-Path -LiteralPath $SigningProperties -PathType Leaf) -or (Test-Path -LiteralPath $SigningFingerprint -PathType Leaf)
         if ($hasSigningMarker) {
@@ -336,16 +354,16 @@ switch ($Mode) {
             Write-Host "Created a local signing identity; public fingerprint $fingerprint."
         }
     }
-    'Build' {
+    { $_ -in @('Build', 'BuildInternal') } {
         Set-ProjectEnvironment
-        Assert-ExistingSigningIdentity
+        $identity = Assert-ExistingSigningIdentity
+        if ($identity -ne $StableFingerprint) { throw 'Build requires the existing trusted release identity' }
+        if (Test-Path -LiteralPath $DeliveryApk) { throw 'Version delivery already exists; use Verify or choose a new version, never overwrite' }
+        $variant = (Get-Culture).TextInfo.ToTitleCase($Flavor)
         $gradleArgs = @(
             '--no-daemon', '--console=plain',
-            ':app:assembleInternalRelease', ':app:assemblePublicRelease',
-            ':app:testInternalDebugUnitTest', ':app:testPublicDebugUnitTest',
-            ':app:lintInternalRelease', ':app:lintPublicRelease',
-            "-PbaguBuildPython=$BuildPython", '-PbaguAbi=arm64-v8a',
-            '-PbaguVersionCode=1', '-PbaguVersionName=0.1.0-beta.1'
+            ":app:assemble${variant}Release", ":app:test${variant}DebugUnitTest", ":app:lint${variant}Release",
+            "-PbaguBuildPython=$BuildPython", '-PbaguAbi=arm64-v8a'
         )
         Push-Location $AndroidRoot
         try {
@@ -354,18 +372,20 @@ switch ($Mode) {
         finally {
             Pop-Location
         }
-        $internalApk = Join-Path $AndroidRoot 'app\build\outputs\apk\internal\release\app-internal-release.apk'
-        $publicApk = Join-Path $AndroidRoot 'app\build\outputs\apk\public\release\app-public-release.apk'
-        Require-File $internalApk '内部 release APK'
-        Require-File $publicApk '公开 release APK'
-        Invoke-ContentVerification $internalApk 'internal' 408
-        Invoke-ContentVerification $publicApk 'public' 0
-        $fingerprint = Get-ApkFingerprint $internalApk
-        Get-ApkFingerprint $publicApk | Out-Null
+        $builtApk = Join-Path $AndroidRoot "app\build\outputs\apk\$Flavor\release\app-$Flavor-release.apk"
+        Require-File $builtApk 'release APK'
+        Invoke-ContentVerification $builtApk $Flavor
+        $fingerprint = Get-ApkFingerprint $builtApk
+        Assert-Badging $builtApk
+        Invoke-Tool $ZipAlign @('-c', '-P', '16', '4', $builtApk)
         New-Item -ItemType Directory -Path $DeliveryDir -Force | Out-Null
-        Copy-Item -LiteralPath $internalApk -Destination $DeliveryApk -Force
-        Write-DeliveryMetadata $DeliveryApk $fingerprint
-        Invoke-DeliveryVerification
+        Copy-Item -LiteralPath $builtApk -Destination $DeliveryApk
+        if ($Flavor -eq 'public') {
+            Write-DeliveryMetadata $DeliveryApk $fingerprint
+            Invoke-DeliveryVerification
+        } else {
+            Write-Host 'Internal local-use APK only; no public release metadata generated.'
+        }
     }
     'Verify' {
         Set-ProjectEnvironment

@@ -2,7 +2,7 @@
 
 一个在电脑和 Android 手机上使用的面试复习工具。抽一轮题，用自己的话回答，查看反馈，再按掌握程度安排下一次复习。
 
-[快速开始](#快速开始) · [使用指南](docs/user-guide.md) · [Android 安装与更新](docs/android-beta.md) · [全部文档](docs/README.md)
+[快速开始](#快速开始) · [使用指南](docs/user-guide.md) · [数据迁移与更新](docs/data-transfer-and-updates.md) · [Android 安装与更新](docs/android-beta.md) · [全部文档](docs/README.md)
 
 ![桌面版作答与评分反馈：输入回答后查看模型点评](docs/images/desktop-practice.png)
 
@@ -16,6 +16,7 @@
 - **维护题库**：搜索、分类筛选、新增或修改题目，也可以批量导入 CSV。
 - **少打字**：支持浏览器或 Android 系统语音输入，转写后核对并手动提交。
 - **在手机上练习**：Android 应用可独立运行，不需要电脑一直开着。
+- **在两端迁移**：导出纯题库或含进度备份，在另一端预览并确认导入，不自动同步。
 
 题库和进度保存在本机，无需注册账号。AI 评卷会将题目、回答及参考资料发送给你选择的模型服务；电脑和手机的数据不会自动同步。
 
@@ -32,7 +33,7 @@ python bagu.py serve
 
 保持终端运行，在浏览器打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。日常使用不需要安装 pytest、Node.js 或 Android 开发工具。
 
-初次打开没有题目时，进入「题库管理」，新增一道题，或下载模板后导入 CSV。想从项目已配置的公开来源抓题，也可以另开终端执行：
+初次打开没有题目时，可从空题库页导入另一端的 `.bagu-backup`，也可以进入「题库管理」新增题目或导入 CSV。想从项目已配置的公开来源抓题，也可以另开终端执行：
 
 ```bash
 python bagu.py import
@@ -53,6 +54,8 @@ python bagu.py import
 *Android 实际使用截图，由用户提供；未据此认定安装包版本或设备验收范围。*
 
 仓库源码不附带本地 APK。内部 Beta 的历史构建带有种子题，public 构建为空题库；不要把截图中的 408 题理解为所有安装包都自带。安装、覆盖更新和构建方式见 [Android 指南](docs/android-beta.md)，已记录的版本与测试范围见[验收记录](docs/validation.md)。
+
+包含更新功能的新 Android 包可在设置中检查、下载并手动安装更新；自动检查不等于自动下载或安装。旧 internal 包可能需要先手动覆盖升级一次。候选版本源码已包含的功能不代表旧 APK 已更新，详见[更新与发布边界](docs/data-transfer-and-updates.md)。
 
 ## 完成第一次练习
 
@@ -118,7 +121,7 @@ AI 评卷前需先[配置模型](#配置评卷模型)。暂时不想配置时，
 
 **换手机或重装前要做什么？**
 
-先导出备份，并确认已保存到应用外。题库备份不包含模型配置、API Key、草稿、会话或评分分析；卸载会删除应用私有数据。详见[备份与恢复](docs/user-guide.md#备份与恢复)。
+先导出**含进度备份**，并确认已保存到应用外；纯题库导出不带复习进度。两者均不包含模型配置、API Key、草稿、会话或评分分析；卸载会删除应用私有数据。同名题内容会被导入文件覆盖，详见[迁移范围与恢复](docs/data-transfer-and-updates.md#电脑与手机之间迁移)。
 
 **语音输入不可用怎么办？**
 
@@ -128,8 +131,9 @@ AI 评卷前需先[配置模型](#配置评卷模型)。暂时不想配置时，
 
 - [使用指南](docs/user-guide.md)：日常操作、模型配置、题库导入、备份与排错。
 - [Android 指南](docs/android-beta.md)：安装、更新、构建和交付限制。
+- [数据迁移、更新与发布](docs/data-transfer-and-updates.md)：两种导出模式、确认与恢复、Android 更新和维护者 dry-run／发布流程。
 - [CLI 与 Hermes](docs/cli.md)、[HTTP API](docs/api.md)：命令行或程序接入。
 - [架构与数据约定](docs/architecture.md)、[开发与测试](docs/development.md)：了解实现和参与开发。
 - [文档导航](docs/README.md)：现行说明、验收记录与历史设计的统一入口。
 
-公开抓题来源为[小林 coding](https://xiaolincoding.com/)。题目与答案的使用、分享和再分发应遵守来源许可；本地字体的许可证保留在 [assets/fonts](assets/fonts/)。
+应用自有源码采用 [MIT License](LICENSE)，不包含对题库、第三方素材或运行时的再授权。公开抓题来源为[小林 coding](https://xiaolincoding.com/)；题目与答案不能因应用源码开放就随 public 包再分发。第三方内容保留各自许可，本地字体声明位于 [assets/fonts](assets/fonts/)，详见[许可与隐私边界](docs/data-transfer-and-updates.md#许可隐私与验收记录)。

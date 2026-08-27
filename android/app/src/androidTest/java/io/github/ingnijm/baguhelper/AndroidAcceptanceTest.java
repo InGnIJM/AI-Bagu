@@ -44,6 +44,9 @@ public final class AndroidAcceptanceTest {
     private final Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
 
     @Before public void launch() throws Exception {
+        // Isolated device QA must never contact a real update feed.
+        assertTrue(instrumentation.getTargetContext().getSharedPreferences("bagu-native-updates", Context.MODE_PRIVATE)
+            .edit().putBoolean("automatic", false).commit());
         scenario = ActivityScenario.launch(MainActivity.class);
         scenario.onActivity(value -> {
             activity = value;
@@ -484,8 +487,35 @@ public final class AndroidAcceptanceTest {
         device.executeShellCommand("cp " + valid.getAbsolutePath() + " /sdcard/Download/task6-valid.bagu-backup");
         js("window.__qaFileResult=null;document.getElementById('btn-backup-import').click();");
         pickQaDocument("task6-valid.bagu-backup");
+        assertTrue("Validated archive requires native confirmation", device.wait(androidx.test.uiautomator.Until.hasObject(By.text("确认导入")), 10000));
+        qa("assert_snapshot");
+        device.findObject(By.text("确认导入")).click();
         await("valid SAF import after failures", "window.__qaFileResult && window.__qaFileResult.status==='ok'", 10000);
         qa("assert_snapshot");
         assertEquals("0", js("window.__qaFileResult.added"));
+    }
+
+    @Test public void pureArchivePreviewSurvivesRecreationWithoutImplicitRestore() throws Exception {
+        UiDevice device = UiDevice.getInstance(instrumentation);
+        qa("save_snapshot");
+        File valid = new File(activity.getExternalFilesDir(null), "task-transfer-preview.bagu-backup");
+        Files.write(valid.toPath(), RuntimeHost.exportArchive("questions"));
+        device.executeShellCommand("cp " + valid.getAbsolutePath() + " /sdcard/Download/task-transfer-preview.bagu-backup");
+        js("showView('settings');document.getElementById('btn-backup-import').click();");
+        pickQaDocument("task-transfer-preview.bagu-backup");
+        assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(By.text("确认导入")), 10000));
+        qa("assert_snapshot");
+        // Changing the provider file after inspection must not change the confirmed bytes.
+        Files.write(valid.toPath(), "invalid replacement".getBytes(StandardCharsets.UTF_8));
+        device.executeShellCommand("cp " + valid.getAbsolutePath() + " /sdcard/Download/task-transfer-preview.bagu-backup");
+        scenario.recreate();
+        scenario.onActivity(value -> { activity = value; web = findWebView(value.getWindow().getDecorView()); });
+        await("recreated page", "typeof showView==='function' && /^[0-9]+$/.test(document.getElementById('st-total').textContent)", 30000);
+        assertTrue("Recreation must ask again, not confirm", device.wait(androidx.test.uiautomator.Until.hasObject(By.text("确认导入")), 10000));
+        qa("assert_snapshot");
+        js("showView('settings');window.__qaFileResult=null;window.addEventListener('bagu-native-result',e=>window.__qaFileResult=e.detail);");
+        device.findObject(By.text("确认导入")).click();
+        await("same validated snapshot restored", "window.__qaFileResult && window.__qaFileResult.status==='ok'", 10000);
+        qa("assert_snapshot");
     }
 }

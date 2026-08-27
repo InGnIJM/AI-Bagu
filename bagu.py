@@ -13,13 +13,17 @@ import io
 import ipaddress
 import json
 import logging
+import math
 import os
+import platform
 import re
 import secrets
 import shutil
 import sqlite3
 import sys
+import stat
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -40,6 +44,22 @@ EVENT_LOGGER = logging.getLogger("bagu.events")
 EVENT_LOGGER.setLevel(logging.INFO)
 EVENT_LOGGER.propagate = False
 REQUEST_ID = contextvars.ContextVar("bagu_request_id", default=None)
+DIAGNOSTIC_SOURCE_BYTES = 2 * 1024 * 1024
+DIAGNOSTIC_ZIP_BYTES = 8 * 1024 * 1024
+DIAGNOSTIC_EVENTS = frozenset((
+    "server.start", "server.stop", "runtime.start", "runtime.ready", "runtime.error",
+    "request.start", "request.error", "request.done", "model.request", "model.connected",
+    "model.first_reasoning", "model.first_content", "model.done", "model.error",
+    "reference.request", "reference.done", "reference.error", "judge.context_ready", "judge.graded",
+    "db.repair_multiple_open_sessions", "web.error", "web.unhandledrejection", "web.api",
+    "web.stream", "web.action", "web.speech", "web.dropped", "native.start", "native.startup", "native.page",
+    "native.speech", "native.file", "native.update", "native.crash",
+    "diagnostic.ready", "runtime.test",
+))
+DIAGNOSTIC_STAGES = frozenset("start ready error done cancelled busy permission load initialize dispatch stream connect parse write read export import check download verify install timeout".split())
+DIAGNOSTIC_ERRORS = frozenset("Error TypeError SyntaxError RangeError ReferenceError URIError EvalError AbortError NetworkError TimeoutError ValueError LookupError RuntimeError OSError IOError PermissionError FileNotFoundError FileExistsError IsADirectoryError NotADirectoryError ConnectionError ConnectionResetError ConnectionRefusedError BrokenPipeError HTTPError URLError JSONDecodeError ResponseParseError JudgeError GradeRejected SkipRejected SessionOpenError DatabaseError OperationalError IntegrityError IOException RuntimeException IllegalStateException IllegalArgumentException SecurityException NullPointerException ActivityNotFoundException JSONException PyException Exception OutOfMemoryError".split())
+DIAGNOSTIC_FILES = frozenset("bagu.py android_runtime.py index.html MainActivity.java RuntimeHost.java NativeBridge.java AndroidSpeechBackend.java SpeechInput.java UpdateEngine.java UpdateController.java UpdateIO.java BaguApplication.java DiagnosticPolicy.java DiagnosticStore.java AndroidDiagnostics.java".split())
+_LOG_FAILURES = 0
 
 
 @dataclass(frozen=True)
@@ -657,8 +677,15 @@ def _backup_json_bytes(value):
     ).encode("utf-8")
 
 
-def export_backup(conn, app_version="0.1.0-beta.1"):
-    """Export portable question content and scheduling progress, never session data."""
+def export_backup(conn, app_version=None, mode="progress"):
+    """Export question content, optionally with progress, never session data."""
+    if mode not in ("questions", "progress"):
+        raise ValueError("备份 mode 必须是 questions 或 progress")
+    if app_version is None:
+        try:
+            app_version = json.loads((Path(__file__).parent / "version.json").read_text(encoding="utf-8"))["versionName"]
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            raise ValueError("无法读取应用版本") from e
     rows = conn.execute(
         """SELECT category, question, answer, url, level, times_seen, times_right,
                   next_due, last_reviewed
@@ -667,14 +694,20 @@ def export_backup(conn, app_version="0.1.0-beta.1"):
     ).fetchall()
     if len(rows) > BACKUP_MAX_QUESTIONS:
         raise ValueError("备份最多包含 10000 道题")
-    questions = [{key: row[key] for key in BACKUP_QUESTION_FIELDS} for row in rows]
+    fields = BACKUP_QUESTION_FIELDS if mode == "progress" else set(QUESTION_IMPORT_FIELDS)
+    questions = [{key: row[key] for key in fields} for row in rows]
     for index, question in enumerate(questions, start=1):
-        _validate_backup_question(question, index)
+        # Older databases allow null optional text; v2 emits canonical strings.
+        for key in ("answer", "url"):
+            if question[key] is None:
+                question[key] = ""
+        _validate_backup_question(question, index, mode)
     questions.sort(key=lambda item: (item["category"], item["question"]))
     questions_bytes = _backup_json_bytes(questions)
     manifest = {
         "format": "bagu-backup",
-        "schema_version": 1,
+        "schema_version": 2,
+        "mode": mode,
         "created_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         ),
@@ -726,13 +759,18 @@ def _validate_backup_date(value, field):
     return value
 
 
-def _validate_backup_question(item, index):
-    if not isinstance(item, dict) or set(item) != BACKUP_QUESTION_FIELDS:
+def _validate_backup_question(item, index, mode="progress", schema_version=2):
+    fields = BACKUP_QUESTION_FIELDS if mode == "progress" else set(QUESTION_IMPORT_FIELDS)
+    if not isinstance(item, dict) or set(item) != fields:
         raise ValueError(f"第 {index} 道题字段不合法")
+    if schema_version == 2 and any(not isinstance(item[field], str) for field in QUESTION_IMPORT_FIELDS):
+        raise ValueError(f"第 {index} 道题内容字段必须是字符串")
     try:
         cleaned = _clean_question(item)
     except QuestionValidationError as e:
         raise ValueError(f"第 {index} 道题：{e}") from e
+    if mode == "questions":
+        return cleaned
     progress = {}
     for field in ("level", "times_seen", "times_right"):
         value = item[field]
@@ -749,7 +787,7 @@ def _validate_backup_question(item, index):
     return cleaned
 
 
-def parse_backup(data):
+def _parse_backup(data):
     """Fully validate a .bagu-backup archive before it can mutate a database."""
     if not isinstance(data, (bytes, bytearray)):
         raise ValueError("备份必须是 ZIP 字节数据")
@@ -778,10 +816,17 @@ def parse_backup(data):
         raise ValueError("备份解压后不能超过 50 MiB")
     manifest = _load_backup_json(manifest_raw, "manifest.json")
     questions = _load_backup_json(questions_raw, "questions.json")
-    if not isinstance(manifest, dict) or set(manifest) != BACKUP_MANIFEST_FIELDS:
+    if not isinstance(manifest, dict):
         raise ValueError("manifest.json 字段不合法")
-    if manifest["format"] != "bagu-backup" or type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1:
+    version = manifest.get("schema_version")
+    if type(version) is not int or version not in (1, 2):
         raise ValueError("不支持的备份格式或 schema_version")
+    fields = BACKUP_MANIFEST_FIELDS | ({"mode"} if version == 2 else set())
+    if set(manifest) != fields or manifest["format"] != "bagu-backup":
+        raise ValueError("manifest.json 字段或格式不合法")
+    mode = manifest["mode"] if version == 2 else "progress"
+    if mode not in ("questions", "progress"):
+        raise ValueError("manifest mode 不合法")
     if not isinstance(manifest["app_version"], str) or not manifest["app_version"].strip() or len(manifest["app_version"]) > 100:
         raise ValueError("manifest app_version 不合法")
     if not isinstance(manifest["created_at"], str):
@@ -804,13 +849,25 @@ def parse_backup(data):
     validated = []
     identities = set()
     for index, item in enumerate(questions, start=1):
-        cleaned = _validate_backup_question(item, index)
+        cleaned = _validate_backup_question(item, index, mode, version)
         identity = (cleaned["category"], cleaned["question"])
         if identity in identities:
             raise ValueError("备份中存在重复的分类和题目")
         identities.add(identity)
         validated.append(cleaned)
-    return validated
+    summary = {key: manifest[key] for key in ("schema_version", "question_count", "created_at", "app_version")}
+    summary["mode"] = mode
+    return summary, validated
+
+
+def parse_backup(data):
+    """Keep the historical list-returning API for validated archive content."""
+    return _parse_backup(data)[1]
+
+
+def inspect_backup(data):
+    """Fully validate every member and field without accessing a database."""
+    return _parse_backup(data)[0]
 
 
 def _backup_open_session_error(conn):
@@ -826,10 +883,8 @@ def _backup_open_session_error(conn):
 
 def restore_backup(conn, data):
     """Merge a fully validated backup without changing sessions or analysis history."""
-    questions = parse_backup(data)
-    blocked = _backup_open_session_error(conn)
-    if blocked:
-        raise blocked
+    summary, questions = _parse_backup(data)
+    has_progress = summary["mode"] == "progress"
     try:
         conn.execute("BEGIN IMMEDIATE")
         blocked = _backup_open_session_error(conn)
@@ -843,16 +898,23 @@ def restore_backup(conn, data):
                 (item["category"], item["question"]),
             ).fetchone()
             if existing:
-                conn.execute(
-                    """UPDATE questions SET answer=?, url=?, level=?, times_seen=?, times_right=?,
-                       next_due=?, last_reviewed=? WHERE id=?""",
-                    (
-                        item["answer"], item["url"], item["level"], item["times_seen"],
-                        item["times_right"], item["next_due"], item["last_reviewed"], existing["id"],
-                    ),
-                )
+                if not has_progress:
+                    conn.execute("UPDATE questions SET answer=?, url=? WHERE id=?",
+                                 (item["answer"], item["url"], existing["id"]))
+                else:
+                    conn.execute(
+                        """UPDATE questions SET answer=?, url=?, level=?, times_seen=?, times_right=?,
+                           next_due=?, last_reviewed=? WHERE id=?""",
+                        (
+                            item["answer"], item["url"], item["level"], item["times_seen"],
+                            item["times_right"], item["next_due"], item["last_reviewed"], existing["id"],
+                        ),
+                    )
                 updated += 1
             else:
+                if not has_progress:
+                    item = dict(item, level=0, times_seen=0, times_right=0,
+                                next_due=None, last_reviewed=None)
                 conn.execute(
                     """INSERT INTO questions(category, question, answer, url, level, times_seen,
                        times_right, next_due, last_reviewed) VALUES(?,?,?,?,?,?,?,?,?)""",
@@ -1892,26 +1954,139 @@ def _settings_root(root=None):
     return Path(root) if root else Path(__file__).parent
 
 
+def _diagnostic_route(value):
+    if not isinstance(value, str) or len(value) > 4096:
+        return "other"
+    path = urllib.parse.urlsplit(value).path
+    if path in {"/", "/index.html", "/api/stats", "/api/session", "/api/draw", "/api/skip", "/api/answer", "/api/answer/stream", "/api/reveal", "/api/review", "/api/settings", "/api/models", "/api/models/test", "/api/questions", "/api/questions/import", "/api/backup/export", "/api/backup/inspect", "/api/backup/restore", "/api/diagnostics/export", "/api/diagnostics/events"}:
+        return path
+    for prefix in ("models", "questions", "submissions"):
+        match = re.fullmatch(r"/api/" + prefix + r"/[^/]+(?:/(activate|copy))?", path)
+        if match:
+            return "/api/" + prefix + "/:id" + ("/" + match[1] if match[1] else "")
+    return "other"
+
+
+def sanitize_diagnostic(value, *, web_only=False):
+    """An allowlist, not a blacklist of secrets. Free-form text never survives."""
+    if not isinstance(value, dict) or not isinstance(value.get("event"), str) or value["event"] not in DIAGNOSTIC_EVENTS:
+        return None
+    event = value["event"]
+    if web_only and not event.startswith("web."):
+        return None
+    out = {"event": event, "level": value.get("level") if value.get("level") in ("INFO", "WARNING", "ERROR") else "INFO"}
+    timestamp = value.get("time")
+    try:
+        if not isinstance(timestamp, str) or len(timestamp) > 40:
+            raise ValueError
+        parsed = dt.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError
+        out["time"] = parsed.isoformat(timespec="milliseconds")
+    except ValueError:
+        out["time"] = dt.datetime.now().astimezone().isoformat(timespec="milliseconds")
+    enums = {
+        "stage": DIAGNOSTIC_STAGES, "method": {"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"},
+        "error_type": DIAGNOSTIC_ERRORS, "file": DIAGNOSTIC_FILES,
+        "provider": {"custom", "openai", "deepseek", "qwen", "moonshot", "zhipu", "siliconflow"},
+        "compat_profile": {"default"}, "finish_reason": {None, "stop", "length", "content_filter", "tool_calls", "function_call"},
+        "reference_source": {"stored", "remote", "missing"}, "outcome": {"ok", "error", "client_disconnected"},
+        "grade": {"again", "hard", "good", "easy"},
+    }
+    for key, allowed in enums.items():
+        item = value.get(key)
+        if key in value and isinstance(item, (str, type(None))) and item in allowed:
+            out[key] = item
+    if "error_type" in value and "error_type" not in out:
+        out["error_type"] = "Error"
+    for key, pattern in (("request_id", r"r_[a-f0-9]{8,32}"), ("operation_id", r"[wn]_[a-f0-9]{32}"), ("session_id", r"s_\d{8}_[a-f0-9]{8}"), ("kept_session_id", r"s_\d{8}_[a-f0-9]{8}")):
+        item = value.get(key)
+        if isinstance(item, str) and re.fullmatch(pattern, item):
+            out[key] = item
+    for key in ("path", "route"):
+        if key in value:
+            out[key] = _diagnostic_route(value[key])
+    for key in ("duration_ms", "status", "count", "dropped", "line", "column", "error_code", "question_id", "closed_count", "prompt_chars", "user_answer_chars", "content_chars", "reasoning_chars", "reasoning_chunks", "content_chunks", "limit", "port"):
+        item = value.get(key)
+        numeric = type(item) in (int, float) if key == "duration_ms" else type(item) is int
+        if numeric and (1 if key == "line" else 0) <= item <= (599 if key == "status" else 2**53 - 1) and math.isfinite(item):
+            out[key] = item
+    for key in ("stream", "saw_done", "replayed", "used_stored_answer"):
+        if type(value.get(key)) is bool:
+            out[key] = value[key]
+    frames = value.get("frames")
+    if isinstance(frames, list):
+        out["frames"] = [{"file": frame["file"], "line": frame["line"]} for frame in frames[:16]
+                         if isinstance(frame, dict) and frame.get("file") in DIAGNOSTIC_FILES
+                         and type(frame.get("line")) is int and 0 < frame["line"] < 1000000]
+    return out
+
+
+def diagnostic_exception(error):
+    frames = []
+    trace = error.__traceback__
+    while trace is not None and len(frames) < 16:
+        name = Path(trace.tb_frame.f_code.co_filename).name
+        if name in DIAGNOSTIC_FILES:
+            frames.append({"file": name, "line": trace.tb_lineno})
+        trace = trace.tb_next
+    return {"error_type": type(error).__name__, "frames": frames}
+
+
+def _safe_log_path(directory, filename):
+    directory = Path(directory).absolute()
+    path = directory / filename
+    for item in (path, directory, *directory.parents):
+        try:
+            info = item.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise OSError("Unsafe diagnostic path")
+    if path.exists() and not path.is_file():
+        raise OSError("Invalid diagnostic file")
+    return path
+
+
+class _DiagnosticFileHandler(RotatingFileHandler):
+    def handleError(self, record):
+        global _LOG_FAILURES
+        _LOG_FAILURES += 1  # Never let logging print its record/exception to stderr.
+
+    def emit(self, record):
+        try:
+            for suffix in ("", ".1", ".2", ".3"):
+                _safe_log_path(Path(self.baseFilename).parent, Path(self.baseFilename).name + suffix)
+            super().emit(record)
+        except Exception:
+            self.handleError(record)
+
+
+class _DiagnosticStreamHandler(logging.StreamHandler):
+    def handleError(self, record):
+        global _LOG_FAILURES
+        _LOG_FAILURES += 1
+
+
 def configure_logging(root=None, *, log_dir=None):
     """配置结构化事件日志，同时写入 stderr 与轮转文件。"""
     log_dir = Path(log_dir) if log_dir is not None else _settings_root(root) / ".superpowers"
-    log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "bagu-server.log"
-    for handler in list(EVENT_LOGGER.handlers):
-        EVENT_LOGGER.removeHandler(handler)
-        handler.close()
+    close_logging()
     formatter = logging.Formatter("%(message)s")
-    terminal = logging.StreamHandler(sys.stderr)
+    terminal = _DiagnosticStreamHandler(sys.stderr)
     terminal.setFormatter(formatter)
-    rotating = RotatingFileHandler(
-        log_path,
-        maxBytes=LOG_MAX_BYTES,
-        backupCount=LOG_BACKUP_COUNT,
-        encoding="utf-8",
-    )
-    rotating.setFormatter(formatter)
     EVENT_LOGGER.addHandler(terminal)
-    EVENT_LOGGER.addHandler(rotating)
+    try:
+        for suffix in ("", ".1", ".2", ".3"):
+            _safe_log_path(log_dir, "bagu-server.log" + suffix)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        rotating = _DiagnosticFileHandler(log_path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8")
+        rotating.setFormatter(formatter)
+        EVENT_LOGGER.addHandler(rotating)
+    except Exception:
+        global _LOG_FAILURES
+        _LOG_FAILURES += 1
     return log_path
 
 
@@ -1919,7 +2094,10 @@ def close_logging():
     """刷新并关闭本应用创建的日志处理器。"""
     for handler in list(EVENT_LOGGER.handlers):
         EVENT_LOGGER.removeHandler(handler)
-        handler.close()
+        try:
+            handler.close()
+        except Exception:
+            pass
 
 
 def _elapsed_ms(started_at):
@@ -1937,10 +2115,139 @@ def log_event(event, level="INFO", **fields):
     if request_id:
         payload["request_id"] = request_id
     payload.update(fields)
-    EVENT_LOGGER.log(
-        getattr(logging, payload["level"], logging.INFO),
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-    )
+    try:
+        payload = sanitize_diagnostic(payload)
+        if payload and EVENT_LOGGER.handlers:
+            EVENT_LOGGER.log(getattr(logging, payload["level"], logging.INFO), json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    except Exception:
+        global _LOG_FAILURES
+        _LOG_FAILURES += 1
+
+
+def _diagnostic_snapshot(log_dir, source):
+    records, total = [], 0
+    summary = {"missing": True, "unreadable": False, "dropped": 0, "truncated": False}
+    for suffix in ("", ".1", ".2", ".3"):
+        try:
+            path = _safe_log_path(log_dir, "bagu-" + source + ".log" + suffix)
+            if not path.exists():
+                continue
+            with path.open("rb") as stream:
+                size = os.fstat(stream.fileno()).st_size
+                offset = max(0, size - DIAGNOSTIC_SOURCE_BYTES - 4096)
+                stream.seek(offset)
+                raw = stream.read(DIAGNOSTIC_SOURCE_BYTES + 4096)
+            summary["missing"] = False
+            if offset:
+                raw = raw.partition(b"\n")[2]
+                summary["truncated"] = True
+            if raw and not raw.endswith(b"\n"):
+                raw = raw.rpartition(b"\n")[0] + (b"\n" if b"\n" in raw else b"")
+                summary["dropped"] += 1
+            for line in reversed(raw.splitlines()):
+                try:
+                    if len(line) > 4096:
+                        raise ValueError
+                    event = sanitize_diagnostic(json.loads(line))
+                    if event is None:
+                        raise ValueError
+                    encoded = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+                except (ValueError, TypeError, RecursionError):
+                    summary["dropped"] += 1
+                    continue
+                if total + len(encoded) > DIAGNOSTIC_SOURCE_BYTES:
+                    summary["truncated"] = True
+                    break
+                records.append(encoded)
+                total += len(encoded)
+            if summary["truncated"] and total:
+                break
+        except OSError:
+            summary["unreadable"] = True
+    records.reverse()
+    summary["records"] = len(records)
+    summary["bytes"] = total
+    summary["first_time"] = json.loads(records[0])["time"] if records else None
+    summary["last_time"] = json.loads(records[-1])["time"] if records else None
+    return b"".join(records), summary
+
+
+def export_diagnostics(log_dir, *, app_version=None, counters=None):
+    """Read logs only. Never open configuration, credentials, or a database."""
+    generated = dt.datetime.now().astimezone().isoformat(timespec="milliseconds")
+    version = app_version if isinstance(app_version, str) and re.fullmatch(r"\d+\.\d+\.\d+(?:-beta\.\d+)?", app_version) else "unknown"
+    if version == "unknown":
+        try:
+            value = json.loads((Path(__file__).parent / "version.json").read_text(encoding="utf-8")).get("versionName")
+            if isinstance(value, str) and re.fullmatch(r"\d+\.\d+\.\d+(?:-beta\.\d+)?", value):
+                version = value
+        except (OSError, ValueError, AttributeError):
+            pass
+    try:
+        release = re.match(r"\d+(?:\.\d+){0,3}", platform.release())
+        platform_version = release[0] if release else "unknown"
+    except Exception:
+        platform_version = "unknown"
+    manifest = {"format_version": 1, "generated_at": generated, "platform": sys.platform,
+                "platform_version": platform_version,
+                "app_version": version, "python_version": platform.python_version(),
+                "logging_failures": _LOG_FAILURES, "sources": {}}
+    if counters:
+        manifest["web_dropped"] = counters.get("dropped", 0)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for source in ("server", "web", "native"):
+            raw, summary = _diagnostic_snapshot(log_dir, source)
+            manifest["sources"][source] = summary
+            archive.writestr(source + ".jsonl", raw)
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        archive.writestr("README.txt", "八股助手诊断日志\n仅包含白名单事件与环境信息，不包含题库、配置、Key、令牌、作答或语音正文。\n请同时提供故障发生时间、操作步骤和错误编号。\n每个来源最多最近 2 MiB；缺失、丢弃及截断见 manifest.json。旧版本未记录的错误无法追补。\n")
+    if output.tell() > DIAGNOSTIC_ZIP_BYTES:
+        raise ValueError("诊断包超过大小限制")
+    return output.getvalue()
+
+
+class DiagnosticStore:
+    """Per-server bounded web-event sink. A failed sink never breaks requests."""
+    def __init__(self, directory):
+        self.directory = Path(directory)
+        self.lock = threading.Lock()
+        self.window = time.monotonic()
+        self.received = 0
+        self.dropped = 0
+
+    def accept(self, events):
+        if not isinstance(events, list) or len(events) > 20:
+            raise ValueError("诊断事件每批最多 20 条")
+        accepted, dropped = 0, 0
+        with self.lock:
+            now = time.monotonic()
+            if now - self.window >= 60:
+                self.window, self.received = now, 0
+            for item in events:
+                try:
+                    if self.received >= 120:
+                        raise ValueError
+                    self.received += 1
+                    event = sanitize_diagnostic(item, web_only=True)
+                    if event is None or len(json.dumps(item, ensure_ascii=False).encode("utf-8")) > 2048:
+                        raise ValueError
+                    for suffix in ("", ".1", ".2", ".3"):
+                        _safe_log_path(self.directory, "bagu-web.log" + suffix)
+                    self.directory.mkdir(parents=True, exist_ok=True)
+                    handler = _DiagnosticFileHandler(self.directory / "bagu-web.log", maxBytes=1024 * 1024, backupCount=3, encoding="utf-8")
+                    failures = _LOG_FAILURES
+                    try:
+                        handler.emit(logging.LogRecord("bagu.web", logging.INFO, "", 0, json.dumps(event, ensure_ascii=False, separators=(",", ":")), (), None))
+                    finally:
+                        handler.close()
+                    if failures != _LOG_FAILURES:
+                        raise OSError
+                    accepted += 1
+                except Exception:
+                    dropped += 1
+            self.dropped += dropped
+        return {"accepted": accepted, "dropped": dropped}
 
 
 def mask_api_key(key):
@@ -2936,7 +3243,7 @@ def _require_android_https(settings):
         raise ValueError("Android 模型地址必须使用 HTTPS，且不得包含用户名或密码")
 
 
-def handle_http(method, path, body, conn, root=None, *, static_root=None, android=False):
+def handle_http(method, path, body, conn, root=None, *, static_root=None, android=False, app_version=None):
     root = _settings_root(root)
     static_root = Path(static_root) if static_root is not None else Path(__file__).parent
     body = body or {}
@@ -2984,16 +3291,24 @@ def handle_http(method, path, body, conn, root=None, *, static_root=None, androi
         return 200, _session_payload(conn), json_ct
     if method == "GET" and path == "/api/backup/export":
         try:
-            return 200, export_backup(conn), "application/zip"
+            modes = urllib.parse.parse_qs(parsed_url.query, keep_blank_values=True).get("mode", ["progress"])
+            if len(modes) != 1 or modes[0] not in ("questions", "progress"):
+                raise ValueError("无效 mode")
+            return 200, export_backup(conn, app_version=app_version, mode=modes[0]), "application/zip"
         except ValueError:
             return 400, {"error": "导出失败，请检查题目字段和题库大小：最多 10000 题、解压后 50 MiB、压缩文件 20 MiB。原数据未改变。"}, json_ct
-    if method == "POST" and path == "/api/backup/restore":
+    if method == "POST" and path in ("/api/backup/inspect", "/api/backup/restore"):
+        if not isinstance(body, dict) or set(body) != {"archive_base64"}:
+            return 400, {"error": "请求只能包含 archive_base64"}, json_ct
         encoded = body.get("archive_base64")
-        if not isinstance(encoded, str):
+        if not isinstance(encoded, str) or len(encoded) > ((BACKUP_MAX_COMPRESSED_BYTES + 2) // 3) * 4:
             return 400, {"error": "缺少 archive_base64"}, json_ct
         try:
             archive = base64.b64decode(encoded.encode("ascii"), validate=True)
-            return 200, restore_backup(conn, archive), json_ct
+            if base64.b64encode(archive).decode("ascii") != encoded:
+                raise ValueError("备份编码无效")
+            payload = inspect_backup(archive) if path.endswith("/inspect") else restore_backup(conn, archive)
+            return 200, payload, json_ct
         except (UnicodeEncodeError, ValueError) as e:
             return 400, {"error": str(e) or "备份编码无效"}, json_ct
         except SessionOpenError as e:
@@ -3154,11 +3469,13 @@ def handle_http(method, path, body, conn, root=None, *, static_root=None, androi
 
 
 def make_http_handler(
-    root=None, stream_fn=None, *, db_path=None, static_root=None, access_token=None, android=False
+    root=None, stream_fn=None, *, db_path=None, static_root=None, access_token=None, android=False,
+    app_version=None, log_dir=None,
 ):
     if android and (not isinstance(access_token, str) or not access_token.strip()):
         raise ValueError("Android HTTP 服务必须配置非空 access_token")
     root = _settings_root(root)
+    diagnostic_store = DiagnosticStore(log_dir if log_dir is not None else root / ".superpowers")
 
     class Handler(BaseHTTPRequestHandler):
         _access_token = access_token
@@ -3166,8 +3483,33 @@ def make_http_handler(
         def log_message(self, fmt, *args):
             return
 
+        def end_headers(self):
+            if hasattr(self, "_request_id"):
+                self.send_header("X-Bagu-Request-Id", self._request_id)
+            super().end_headers()
+
+        def send_error(self, code, message=None, explain=None):
+            # BaseHTTPRequestHandler emits some errors before a do_* handler.
+            if not hasattr(self, "_request_id"):
+                self._request_id = "r_" + secrets.token_hex(4)
+            if android and getattr(self, "path", "").startswith("/api/diagnostics/"):
+                code, message, explain = 404, None, None
+            super().send_error(code, message, explain)
+
         def _authorized(self):
             parsed = urllib.parse.urlsplit(self.path)
+            if parsed.path.startswith("/api/diagnostics/"):
+                self.close_connection = True
+                if android:
+                    self._write(404, {"error": "not found"}, "application/json")
+                    return False
+                expected_host = "127.0.0.1:" + str(self.server.server_address[1])
+                if (self.headers.get_all("Host", []) != [expected_host]
+                        or self.headers.get_all("X-Bagu-Diagnostics", []) != ["1"]
+                        or self.headers.get_all("Origin", []) not in ([], ["http://" + expected_host])):
+                    self._write(403, {"error": "未授权诊断请求"}, "application/json")
+                    return False
+                return True
             if not self._access_token or (self.command == "GET" and _public_static_type(parsed.path)):
                 return True
             tokens = self.headers.get_all("X-Bagu-Token", [])
@@ -3193,16 +3535,21 @@ def make_http_handler(
                 self.close_connection = True
                 self._write(400, {"error": "无效的请求长度"}, "application/json")
                 return None
-            if n > MAX_REQUEST_BYTES:
+            diagnostic = urllib.parse.urlsplit(self.path).path.startswith("/api/diagnostics/")
+            if n > (32768 if diagnostic else MAX_REQUEST_BYTES):
                 self.close_connection = True
-                self._write(413, {"error": "请求体不得超过 32 MiB"}, "application/json")
+                self._write(413, {"error": "诊断请求不得超过 32 KiB" if diagnostic else "请求体不得超过 32 MiB"}, "application/json")
+                return None
+            if diagnostic and self.headers.get_content_type() != "application/json":
+                self.close_connection = True
+                self._write(400, {"error": "诊断请求必须是 JSON"}, "application/json")
                 return None
             raw = self.rfile.read(n) if n else b"{}"
             try:
                 body = json.loads(raw.decode("utf-8") or "{}")
                 if not isinstance(body, dict):
                     raise ValueError
-            except (UnicodeDecodeError, ValueError):
+            except (UnicodeDecodeError, ValueError, RecursionError):
                 self._write(400, {"error": "JSON 必须是有效对象"}, "application/json")
                 return None
             return body
@@ -3212,6 +3559,8 @@ def make_http_handler(
             self._request_started_at = time.perf_counter()
             self._request_completed = False
             self._request_token = REQUEST_ID.set(self._request_id)
+            if urllib.parse.urlsplit(self.path).path.startswith("/api/diagnostics/"):
+                return  # The diagnostic sink must not amplify its own traffic.
             log_event(
                 "request.start",
                 method=self.command,
@@ -3225,7 +3574,7 @@ def make_http_handler(
                 method=self.command,
                 path=urllib.parse.urlsplit(self.path).path,
                 stage=stage,
-                error_type=type(error).__name__,
+                **diagnostic_exception(error),
                 duration_ms=_elapsed_ms(self._request_started_at),
             )
 
@@ -3233,14 +3582,12 @@ def make_http_handler(
             if self._request_completed:
                 return
             self._request_completed = True
-            log_event(
-                "request.done",
-                method=self.command,
-                path=urllib.parse.urlsplit(self.path).path,
-                status=status,
-                outcome=outcome or ("ok" if status < 400 else "error"),
-                duration_ms=_elapsed_ms(self._request_started_at),
-            )
+            if not urllib.parse.urlsplit(self.path).path.startswith("/api/diagnostics/"):
+                log_event(
+                    "request.done", method=self.command, path=urllib.parse.urlsplit(self.path).path,
+                    status=status, outcome=outcome or ("ok" if status < 400 else "error"),
+                    duration_ms=_elapsed_ms(self._request_started_at),
+                )
             REQUEST_ID.reset(self._request_token)
 
         def _write(self, code, payload, ctype):
@@ -3254,26 +3601,47 @@ def make_http_handler(
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Cache-Control", "no-store")
+            if ctype == "application/zip" and urllib.parse.urlsplit(self.path).path == "/api/diagnostics/export":
+                filename = "bagu-diagnostics-" + dt.datetime.now().strftime("%Y%m%d-%H%M%S") + ".zip"
+                self.send_header("Content-Disposition", 'attachment; filename="' + filename + '"')
+                self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             try:
-                self.wfile.write(raw)
+                if self.command != "HEAD":
+                    self.wfile.write(raw)
             finally:
                 self._complete_request(code)
 
         def _dispatch(self, method, body):
             conn = None
             try:
+                diagnostic_path = urllib.parse.urlsplit(self.path).path
+                if diagnostic_path.startswith("/api/diagnostics/"):
+                    if method == "GET" and diagnostic_path == "/api/diagnostics/export":
+                        payload = export_diagnostics(diagnostic_store.directory, app_version=app_version,
+                                                     counters={"dropped": diagnostic_store.dropped})
+                        self._write(200, payload, "application/zip")
+                    elif method == "POST" and diagnostic_path == "/api/diagnostics/events":
+                        try:
+                            result = diagnostic_store.accept(body.get("events"))
+                        except ValueError:
+                            self._write(400, {"error": "诊断事件格式无效"}, "application/json")
+                        else:
+                            self._write(200, result, "application/json")
+                    else:
+                        self._write(404, {"error": "not found"}, "application/json")
+                    return
                 if urllib.parse.urlsplit(self.path).path.startswith("/api/"):
                     conn = get_conn(db_path)
                     init_db(conn)
                 code, payload, ctype = handle_http(
                     method, self.path, body, conn, root=root,
-                    static_root=static_root, android=android,
+                    static_root=static_root, android=android, app_version=app_version,
                 )
             except Exception as e:  # noqa: BLE001
                 self._request_error(e, "dispatch")
-                self._complete_request(500, "error")
-                raise
+                self._write(500, {"error": "请求处理失败"}, "application/json")
+                return
             finally:
                 if conn is not None:
                     conn.close()
@@ -3286,7 +3654,7 @@ def make_http_handler(
             try:
                 self.wfile.write(raw)
                 self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except OSError:
                 return False
             return True
 
@@ -3299,10 +3667,18 @@ def make_http_handler(
                 except ValueError as e:
                     self._write(400, {"error": str(e)}, "application/json")
                     return
-            conn = get_conn(db_path)
+            conn = None
+            try:
+                conn = get_conn(db_path)
+                init_db(conn)
+            except Exception as error:
+                self._request_error(error, "initialize")
+                if conn is not None:
+                    conn.close()
+                self._write(500, {"error": "评卷服务初始化失败"}, "application/json")
+                return
             outcome = "ok"
             try:
-                init_db(conn)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
@@ -3334,6 +3710,14 @@ def make_http_handler(
             self._begin_request()
             if self._authorized():
                 self._dispatch("GET", None)
+
+        def do_HEAD(self):
+            self._begin_request()
+            if self._authorized():
+                self._write(405, {"error": "不支持的请求方法"}, "application/json")
+
+        def do_OPTIONS(self):
+            self.do_HEAD()  # No CORS opt-in, including diagnostic preflights.
 
         def do_POST(self):
             self._begin_request()

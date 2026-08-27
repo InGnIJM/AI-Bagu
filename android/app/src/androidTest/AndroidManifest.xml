@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Test APK only; fixed synthetic output, never production files or permissions. -->
+        <provider android:name="io.github.ingnijm.baguhelper.DiagnosticOutputProvider"
+            android:authorities="io.github.ingnijm.baguhelper.test.diagnostics"
+            android:exported="true" />
+    </application>
+</manifest>

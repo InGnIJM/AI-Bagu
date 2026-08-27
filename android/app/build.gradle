@@ -13,6 +13,19 @@ abstract class BaguSeed extends Exec {
 }
 
 def repoRoot = rootProject.projectDir.parentFile
+def releaseVersion = new groovy.json.JsonSlurper().parse(new File(repoRoot, 'version.json'))
+if (releaseVersion.keySet() != ['versionName', 'versionCode', 'channel'] as Set ||
+    !(releaseVersion.versionCode instanceof Integer) || releaseVersion.versionCode < 1 ||
+    releaseVersion.versionCode > 2100000000 ||
+    !(releaseVersion.versionName ==~ /\d+\.\d+\.\d+(-beta\.\d+)?/) ||
+    !(releaseVersion.channel in ['beta', 'stable']) ||
+    releaseVersion.versionName.contains('-beta.') != (releaseVersion.channel == 'beta')) {
+    throw new GradleException('Invalid version.json')
+}
+def qaBuild = providers.gradleProperty('baguQaBuild').getOrElse('false') == 'true'
+if (!qaBuild && (providers.gradleProperty('baguVersionCode').isPresent() || providers.gradleProperty('baguVersionName').isPresent())) {
+    throw new GradleException('Version overrides are only allowed for explicit baguQaBuild=true builds')
+}
 def buildPythonCommand = providers.gradleProperty('baguBuildPython').getOrElse('python')
 def selectedAbi = providers.gradleProperty('baguAbi').getOrElse('arm64-v8a')
 if (!(selectedAbi in ['arm64-v8a', 'x86_64'])) {
@@ -39,8 +52,9 @@ android {
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
         minSdk 29
         targetSdk 36
-        versionCode providers.gradleProperty('baguVersionCode').getOrElse('1').toInteger()
-        versionName providers.gradleProperty('baguVersionName').getOrElse('0.1.0-beta.1')
+        versionCode providers.gradleProperty('baguVersionCode').getOrElse(releaseVersion.versionCode.toString()).toInteger()
+        versionName providers.gradleProperty('baguVersionName').getOrElse(releaseVersion.versionName)
+        buildConfigField 'String', 'UPDATE_CHANNEL', '"' + releaseVersion.channel + '"'
         ndk { abiFilters selectedAbi }
     }
     signingConfigs {

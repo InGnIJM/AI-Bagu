@@ -3,6 +3,7 @@ package io.github.ingnijm.baguhelper;
 import android.annotation.SuppressLint;
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
@@ -60,6 +61,8 @@ public final class MainActivity extends Activity {
     private TextView progressText;
     private ProgressBar progress;
     private Button retry;
+    private Button diagnostics;
+    private TextView diagnosticsResult;
     private HostState state;
     private boolean pageReady;
     private boolean pageLoadFailed;
@@ -69,6 +72,11 @@ public final class MainActivity extends Activity {
     private SpeechInput speechInput;
     private Consumer<Boolean> microphoneReply;
     private boolean resumed;
+    private AlertDialog importDialog;
+    private UpdateController updater;
+    private final UpdateInstallGate updateInstallGate = new UpdateInstallGate();
+    private Runnable updatePrepareTimeout;
+    private String speechOperationId;
 
     /** Retained across configuration recreation; never retains an Activity strongly. */
     private static final class HostState {
@@ -79,44 +87,67 @@ public final class MainActivity extends Activity {
         String workingOperation;
         String operation;
         String template;
+        String diagnosticsId;
+        String startupOperationId = DiagnosticPolicy.newOperation();
+        String diagnosticsMessage;
+        byte[] pendingArchive;
+        JSONObject pendingPreview;
         ValueCallback<Uri[]> csvCallback;
         final ArrayList<JSONObject> results = new ArrayList<>();
 
         void result(String operation, String status, String message, JSONObject counts) {
+            AndroidDiagnostics.event("native.file", "ok".equals(status) ? "done" : status, null, diagnosticsId, null);
             JSONObject detail = new JSONObject();
+            if (diagnosticsId != null && ("error".equals(status) || "ok".equals(status))) message += "\n反馈编号：" + diagnosticsId;
             try {
                 detail.put("operation", operation).put("status", status).put("message", message);
+                if (diagnosticsId != null) detail.put("operation_id", diagnosticsId);
                 if (counts != null) {
                     detail.put("added", counts.getInt("added")).put("updated", counts.getInt("updated"));
                 }
             } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
             results.add(detail);
+            if ("diagnostics".equals(operation)) diagnosticsMessage = message;
             MainActivity activity = owner.get();
-            if (activity != null) activity.flushResults();
+            if (activity != null) { activity.updateDiagnosticsUi(); activity.flushResults(); }
         }
     }
 
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
-        speechInput = new SpeechInput(new AndroidSpeechBackend(this, this::requestMicrophone),
-            (delay, job) -> { MAIN.postDelayed(job, delay); return () -> MAIN.removeCallbacks(job); },
-            this::publishSpeech);
         Object retained = getLastNonConfigurationInstance();
         state = retained instanceof HostState ? (HostState) retained : new HostState();
         state.owner = new WeakReference<>(this);
         if (retained == null && saved != null) {
+            String savedId = saved.getString("documentOperationId");
+            if (savedId != null && savedId.matches("n_[a-f0-9]{32}")) state.diagnosticsId = savedId;
             state.operation = saved.getString("documentOperation");
             state.template = saved.getString("documentTemplate");
+            if ("diagnostics".equals(state.operation)) {
+                state.operation = null;
+                state.template = null;
+                state.result("diagnostics", "cancelled", "应用已重新启动，诊断导出已取消。请重新选择保存位置。", null);
+            }
             if (saved.getBoolean("documentWorking")) {
-                state.result(saved.getString("workingOperation", "import"), "error", "文件操作被中断，请重试。", null);
+                String operation = saved.getString("workingOperation", "import");
+                state.result(operation, "error", "import".equals(operation)
+                    ? "导入操作被中断，是否完成未知。请先核对题库与进度，不要重复导入。"
+                    : "文件操作被中断，请检查保存位置。", null);
+            } else if (saved.getBoolean("documentPendingImport")) {
+                state.result("import", "cancelled", "待确认的导入已取消，原数据未改变。请重新选择文件。", null);
             }
         }
-        buildViews();
+        try { buildViews(); }
+        catch (Throwable failure) {
+            AndroidDiagnostics.event("native.startup", "initialize", failure, state.startupOperationId, null);
+            discardWebView(); showStartupError();
+        }
+        if (updater != null) updater.attach(this);
         if (Build.VERSION.SDK_INT >= 33) {
             backCallback = this::handleBack;
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
         }
-        startRuntime();
+        if (web != null) startRuntime();
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -149,6 +180,10 @@ public final class MainActivity extends Activity {
                 insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
             return insets.consumeSystemWindowInsets().consumeDisplayCutout();
         });
+        buildStartupPanel();
+        updater = UpdateController.get(this);
+        if (speechInput == null) speechInput = new SpeechInput(new AndroidSpeechBackend(this, this::requestMicrophone),
+            (delay, job) -> { MAIN.postDelayed(job, delay); return () -> MAIN.removeCallbacks(job); }, this::publishSpeech);
         web = new WebView(this);
         web.setBackgroundColor(Color.rgb(250, 245, 255));
         WebSettings settings = web.getSettings();
@@ -164,6 +199,7 @@ public final class MainActivity extends Activity {
         web.addJavascriptInterface(new NativeBridge(getSharedPreferences("bagu-ui-state", MODE_PRIVATE), this), "BaguNative");
         web.setWebViewClient(new WebViewClient() {
             @Override public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                cancelUpdatePreparation("页面已重载，请重新点击安装。");
                 speechInput.cancelActive();
                 pageReady = false;
             }
@@ -181,14 +217,33 @@ public final class MainActivity extends Activity {
             @Override public void onPageFinished(WebView view, String url) {
                 if (!pageLoadFailed && state.runtime != null && HostPolicy.isLocalUrl(url, state.runtime.optInt("port"))) {
                     pageReady = true;
+                    AndroidDiagnostics.event("native.page", "ready", null, state.startupOperationId, null);
                     progressPanel.setVisibility(View.GONE);
                     publishImeVisibility();
                     flushResults();
+                    publishDocumentState();
+                    showImportConfirmation();
+                    updater.foreground(MainActivity.this);
                 }
             }
 
             @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) showStartupError();
+                if (request.isForMainFrame()) {
+                    AndroidDiagnostics.event("native.page", "error", null, state.startupOperationId, Math.abs(error.getErrorCode()));
+                    showStartupError();
+                }
+            }
+            @Override public void onReceivedHttpError(WebView view, WebResourceRequest request, android.webkit.WebResourceResponse response) {
+                if (request.isForMainFrame()) {
+                    AndroidDiagnostics.event("native.page", "error", null, state.startupOperationId, response.getStatusCode());
+                    showStartupError();
+                }
+            }
+            @Override public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                AndroidDiagnostics.event("native.page", "error", null, state.startupOperationId, detail.didCrash() ? 1 : 0);
+                showStartupError();
+                discardWebView();
+                return true;
             }
             // The default onReceivedSslError cancels; never bypass TLS validation.
         });
@@ -209,7 +264,7 @@ public final class MainActivity extends Activity {
             @Override public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams parameters) {
                 if (state.csvCallback != null) state.csvCallback.onReceiveValue(null);
                 state.csvCallback = callback;
-                if (!pageReady || state.operation != null || state.working) {
+                if (!pageReady || state.operation != null || state.working || state.pendingArchive != null || updateInstallGate.isActive()) {
                     callback.onReceiveValue(null);
                     state.csvCallback = null;
                     toast("请先完成当前文件操作。");
@@ -219,7 +274,10 @@ public final class MainActivity extends Activity {
                 return true;
             }
         });
-        root.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(web, 0, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    private void buildStartupPanel() {
         progressPanel = new LinearLayout(this);
         progressPanel.setOrientation(LinearLayout.VERTICAL);
         progressPanel.setGravity(Gravity.CENTER);
@@ -248,27 +306,45 @@ public final class MainActivity extends Activity {
         retry.setVisibility(View.GONE);
         retry.setOnClickListener(view -> startRuntime());
         progressPanel.addView(retry);
+        diagnostics = new Button(this);
+        diagnostics.setText("导出诊断日志");
+        diagnostics.setMinHeight(dp(48));
+        diagnostics.setOnClickListener(view -> openDocument("diagnostics", null));
+        progressPanel.addView(diagnostics);
+        diagnosticsResult = new TextView(this);
+        diagnosticsResult.setGravity(Gravity.CENTER);
+        progressPanel.addView(diagnosticsResult);
         root.addView(progressPanel, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
         root.requestApplyInsets();
+        updateDiagnosticsUi();
     }
 
     private void startRuntime() {
+        if (!state.starting) state.startupOperationId = DiagnosticPolicy.newOperation();
+        if (web == null) {
+            try { buildViews(); if (updater != null) updater.attach(this); }
+            catch (Throwable failure) {
+                AndroidDiagnostics.event("native.startup", "initialize", failure, state.startupOperationId, null);
+                discardWebView(); showStartupError(); return;
+            }
+        }
         pageReady = false;
         pageLoadFailed = false;
         progressPanel.setVisibility(View.VISIBLE);
         progress.setVisibility(View.VISIBLE);
         progressText.setText(R.string.starting);
         retry.setVisibility(View.GONE);
-        if (state.runtime != null) { web.loadUrl(state.runtime.optString("url")); return; }
+        if (state.runtime != null) { loadRuntimePage(state.runtime); return; }
         if (state.starting) return;
         state.starting = true;
         HostState target = state;
         Context app = getApplicationContext();
+        String startupId = state.startupOperationId;
         RuntimeHost.WORKER.execute(() -> {
             JSONObject result = null;
             try { result = RuntimeHost.start(app); }
-            catch (Exception ignored) { /* No exception text: no paths, tokens or config in UI/logs. */ }
+            catch (Throwable failure) { AndroidDiagnostics.event("native.startup", "error", failure, startupId, null); }
             JSONObject ready = result;
             MAIN.post(() -> {
                 target.starting = false;
@@ -276,25 +352,33 @@ public final class MainActivity extends Activity {
                 MainActivity owner = target.owner.get();
                 if (owner != null) {
                     if (ready == null) owner.showStartupError();
-                    else owner.web.loadUrl(ready.optString("url"));
+                    else if (owner.web != null) owner.loadRuntimePage(ready);
                 }
             });
         });
     }
 
     private void showStartupError() {
-        speechInput.cancelActive();
+        if (speechInput != null) speechInput.cancelActive();
         pageReady = false;
         pageLoadFailed = true;
         progressPanel.setVisibility(View.VISIBLE);
         progress.setVisibility(View.GONE);
-        progressText.setText(R.string.startup_error);
+        progressText.setText(getString(R.string.startup_error_with_diagnostic, state.startupOperationId));
         retry.setVisibility(View.VISIBLE);
     }
 
+    private void loadRuntimePage(JSONObject runtime) {
+        try { web.loadUrl(runtime.optString("url")); }
+        catch (Throwable failure) {
+            AndroidDiagnostics.event("native.page", "load", failure, state.startupOperationId, null);
+            showStartupError();
+        }
+    }
+
     void openDocument(String operation, String template) {
-        if (!pageReady || state.operation != null || state.working) {
-            if (!"csv".equals(operation)) state.result(operation, "error", "请先完成当前文件操作。", null);
+        if ((!pageReady && !"diagnostics".equals(operation)) || state.operation != null || state.working || state.pendingArchive != null || updateInstallGate.isActive()) {
+            if (!"csv".equals(operation)) state.result(operation, "diagnostics".equals(operation) ? "busy" : "error", "请先完成当前文件操作。", null);
             return;
         }
         if ("template".equals(operation) && (template == null || template.getBytes(StandardCharsets.UTF_8).length > 65536)) {
@@ -303,13 +387,23 @@ public final class MainActivity extends Activity {
         }
         state.operation = operation;
         state.template = template;
+        state.diagnosticsId = DiagnosticPolicy.newOperation();
+        AndroidDiagnostics.event("native.file", "start", null, state.diagnosticsId, null);
+        if ("diagnostics".equals(operation)) {
+            state.diagnosticsMessage = "请选择诊断 ZIP 的保存位置。";
+            AndroidDiagnostics.event("native.file", "export", null, state.diagnosticsId, null);
+        }
+        updateDiagnosticsUi();
         boolean read = "import".equals(operation) || "csv".equals(operation);
         Intent intent = new Intent(read ? Intent.ACTION_OPEN_DOCUMENT : Intent.ACTION_CREATE_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType(read ? "*/*" : "template".equals(operation) ? "text/csv" : "application/octet-stream");
-        if (!read) intent.putExtra(Intent.EXTRA_TITLE, "template".equals(operation) ? "questions-template.csv" : "bagu-backup.bagu-backup");
+        intent.setType(read ? "*/*" : "diagnostics".equals(operation) ? "application/zip" : "template".equals(operation) ? "text/csv" : "application/octet-stream");
+        if (!read) intent.putExtra(Intent.EXTRA_TITLE, "template".equals(operation) ? "questions-template.csv"
+            : "diagnostics".equals(operation) ? "bagu-diagnostics-" + java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.ROOT).withZone(java.time.ZoneOffset.UTC).format(java.time.Instant.now()) + ".zip"
+            : "export-questions".equals(operation) ? "bagu-questions.bagu-backup" : "bagu-progress.bagu-backup");
         try { startActivityForResult(intent, DOCUMENT_REQUEST); }
-        catch (ActivityNotFoundException ignored) {
+        catch (RuntimeException failure) {
+            AndroidDiagnostics.event("native.file", "error", failure, state.diagnosticsId, null);
             state.operation = null;
             state.template = null;
             if ("csv".equals(operation)) finishCsv(null, "系统文件选择器不可用。");
@@ -319,6 +413,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == UpdateController.INSTALL_REQUEST) { if (updater != null) updater.installerReturned(); return; }
         if (request != DOCUMENT_REQUEST || state.operation == null) return;
         String operation = state.operation;
         String template = state.template;
@@ -335,6 +430,7 @@ public final class MainActivity extends Activity {
             else state.result(operation, "error", "请选择系统文件提供方中的文档。", null);
             return;
         }
+        if ("diagnostics".equals(operation)) { exportDiagnostics(uri); return; }
         state.working = true;
         state.workingOperation = operation;
         HostState target = state;
@@ -351,8 +447,18 @@ public final class MainActivity extends Activity {
                     try (InputStream input = app.getContentResolver().openInputStream(uri)) {
                         bytes = HostPolicy.readBounded(input, "csv".equals(operation) ? 2 * 1024 * 1024 : 20 * 1024 * 1024);
                     }
-                    if ("import".equals(operation)) counts = RuntimeHost.restoreArchive(bytes);
-                    else {
+                    if ("import".equals(operation)) {
+                        JSONObject preview = RuntimeHost.inspectArchive(bytes);
+                        MAIN.post(() -> {
+                            target.working = false;
+                            target.workingOperation = null;
+                            target.pendingArchive = bytes;
+                            target.pendingPreview = preview;
+                            MainActivity owner = target.owner.get();
+                            if (owner != null) owner.showImportConfirmation();
+                        });
+                        return;
+                    } else {
                         File directory = new File(app.getCacheDir(), "csv-imports");
                         if (!directory.isDirectory() && !directory.mkdirs()) throw new java.io.IOException("Cannot create cache");
                         File snapshot = new File(directory, UUID.randomUUID() + ".csv");
@@ -361,14 +467,15 @@ public final class MainActivity extends Activity {
                             .appendPath(snapshot.getName()).build();
                     }
                 } else {
-                    byte[] bytes = "template".equals(operation) ? template.getBytes(StandardCharsets.UTF_8) : RuntimeHost.exportArchive();
+                    byte[] bytes = "template".equals(operation) ? template.getBytes(StandardCharsets.UTF_8)
+                        : RuntimeHost.exportArchive("export-questions".equals(operation) ? "questions" : "progress");
                     try (OutputStream output = app.getContentResolver().openOutputStream(uri, "wt")) {
                         if (output == null) throw new java.io.IOException("Cannot open destination");
                         output.write(bytes);
                     }
                 }
                 success = true;
-            } catch (Exception ignored) { /* User-facing messages are fixed and contain no private exception text. */ }
+            } catch (Exception failure) { AndroidDiagnostics.event("native.file", "error", failure, target.diagnosticsId, null); }
             boolean ok = success;
             JSONObject restored = counts;
             Uri chosenCsv = csv;
@@ -385,7 +492,7 @@ public final class MainActivity extends Activity {
                 } else {
                     String message = ok ? "操作完成。" : "import".equals(operation)
                         ? "导入失败。请先结束当前练习，并选择有效且不超过 20 MiB 的备份。"
-                        : "export".equals(operation)
+                        : ("export".equals(operation) || "export-questions".equals(operation))
                             ? "导出失败。请检查题目字段和题库大小（最多 10000 题、解压后 50 MiB、文件 20 MiB），并确认保存位置可写。原题库未改变。"
                             : "文件写入失败，请重试。";
                     target.result(operation, ok ? "ok" : "error", message, restored);
@@ -400,6 +507,7 @@ public final class MainActivity extends Activity {
             state.csvCallback = null;
         }
         if (message != null) toast(message);
+        updateDiagnosticsUi();
     }
 
     private void flushResults() {
@@ -417,10 +525,117 @@ public final class MainActivity extends Activity {
             + "{detail:{visible:" + imeVisible + "}}));", null);
     }
 
+    /** SAF diagnostics never initializes Python, reads the database, or enters its worker. */
+    private void exportDiagnostics(Uri uri) {
+        state.working = true;
+        state.workingOperation = "diagnostics";
+        state.diagnosticsMessage = "正在保存诊断日志…";
+        updateDiagnosticsUi();
+        HostState target = state;
+        Context app = getApplicationContext();
+        String operationId = state.diagnosticsId;
+        AndroidDiagnostics.EXPORTER.execute(() -> {
+            boolean success = false;
+            try {
+                byte[] archive = AndroidDiagnostics.export(app);
+                try (OutputStream output = app.getContentResolver().openOutputStream(uri, "wt")) {
+                    if (output == null) throw new java.io.IOException("Destination unavailable");
+                    output.write(archive);
+                }
+                success = true; // Closing a provider stream is part of a successful save.
+                AndroidDiagnostics.event("native.file", "done", null, operationId, null);
+            } catch (Throwable failure) {
+                AndroidDiagnostics.event("native.file", "error", failure, operationId, null);
+            }
+            boolean ok = success;
+            MAIN.post(() -> {
+                target.working = false;
+                target.workingOperation = null;
+                target.result("diagnostics", ok ? "ok" : "error", ok ? "诊断日志已保存。"
+                    : "诊断日志保存失败。请检查或删除保存位置中的不完整文件后重试。", null);
+            });
+        });
+    }
+
+    private void updateDiagnosticsUi() {
+        if (state == null || diagnostics == null) return;
+        diagnostics.setEnabled(state.operation == null && !state.working && state.pendingArchive == null && !updateInstallGate.isActive());
+        if (diagnosticsResult != null) diagnosticsResult.setText(state.diagnosticsMessage == null ? "" : state.diagnosticsMessage);
+    }
+
+    private void discardWebView() {
+        if (web == null) return;
+        WebView previous = web;
+        web = null;
+        try { previous.removeJavascriptInterface("BaguNative"); if (root != null) root.removeView(previous); previous.destroy(); }
+        catch (Throwable failure) { AndroidDiagnostics.event("native.page", "error", failure, null, null); }
+    }
+
+    private void showImportConfirmation() {
+        if (!resumed || !pageReady || isFinishing() || isDestroyed() || importDialog != null
+            || state.pendingArchive == null || state.pendingPreview == null) return;
+        final byte[] bytes = state.pendingArchive;
+        JSONObject preview = state.pendingPreview;
+        boolean pure = "questions".equals(preview.optString("mode"));
+        String message = "类型：" + (pure ? "纯题库（保留本机复习进度）" : "含进度备份（覆盖同名题的复习进度）")
+            + "\n题目：" + preview.optInt("question_count") + " 道"
+            + "\n创建时间：" + preview.optString("created_at")
+            + "\n来源版本：" + preview.optString("app_version")
+            + "\n\n同名题答案和链接将被覆盖，包括空内容。本机其他题目及历史记录保留。建议先导出备份。";
+        importDialog = new AlertDialog.Builder(this).setTitle("导入预览").setMessage(message)
+            .setNegativeButton("取消", (dialog, which) -> cancelImport(bytes))
+            .setPositiveButton("确认导入", (dialog, which) -> confirmImport(bytes))
+            .setOnCancelListener(dialog -> cancelImport(bytes)).create();
+        importDialog.setOnDismissListener(dialog -> importDialog = null);
+        importDialog.show();
+    }
+
+    private void publishDocumentState() {
+        String operation = state.operation != null ? state.operation
+            : state.working ? state.workingOperation : state.pendingArchive != null ? "import" : null;
+        if (operation != null && !"csv".equals(operation)) {
+            state.result(operation, "busy", "文件操作进行中，请完成选择或确认。", null);
+        }
+    }
+
+    private void cancelImport(byte[] expected) {
+        if (state.pendingArchive != expected) return;
+        state.pendingArchive = null;
+        state.pendingPreview = null;
+        state.result("import", "cancelled", "已取消导入，原数据未改变。", null);
+    }
+
+    private void confirmImport(byte[] expected) {
+        if (state.pendingArchive != expected || !resumed || !pageReady || isDestroyed()) return;
+        // Only this explicit button consumes the validated snapshot. No URI reread,
+        // Bundle serialization, JS transfer, or automatic restore on recreation.
+        state.pendingArchive = null;
+        state.pendingPreview = null;
+        state.working = true;
+        state.workingOperation = "import";
+        HostState target = state;
+        RuntimeHost.WORKER.execute(() -> {
+            JSONObject counts = null;
+            boolean success = false;
+            try { counts = RuntimeHost.restoreArchive(expected); success = true; }
+            catch (Exception failure) { AndroidDiagnostics.event("native.file", "import", failure, target.diagnosticsId, null); }
+            JSONObject result = counts;
+            boolean ok = success;
+            MAIN.post(() -> {
+                target.working = false;
+                target.workingOperation = null;
+                target.result("import", ok ? "ok" : "error", ok ? "导入完成。"
+                    : "导入失败。请核对题库与进度，并确认本轮练习已结束。", result);
+            });
+        });
+    }
+
     void speech(String operation, String requestId) {
+        if ("start".equals(operation)) speechOperationId = DiagnosticPolicy.newOperation();
+        if (speechInput == null) { publishSpeech(new SpeechInput.Event(requestId, "error", null, "语音服务尚未就绪。")); return; }
         if ("cancel".equals(operation)) { speechInput.cancel(requestId); return; }
         if ("stop".equals(operation)) { speechInput.stop(requestId); return; }
-        if (!resumed || !pageReady || isFinishing() || isDestroyed()) {
+        if (!resumed || !pageReady || isFinishing() || isDestroyed() || updateInstallGate.isActive()) {
             publishSpeech(new SpeechInput.Event(requestId, "error", null, "当前页面无法使用语音输入，请返回练习页重试。"));
             return;
         }
@@ -431,7 +646,7 @@ public final class MainActivity extends Activity {
         if (microphoneReply != null) throw new IllegalStateException("Permission request pending");
         microphoneReply = reply;
         try { requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, MICROPHONE_REQUEST); }
-        catch (RuntimeException failure) { microphoneReply = null; throw failure; }
+        catch (RuntimeException failure) { microphoneReply = null; AndroidDiagnostics.event("native.speech", "permission", failure, null, null); throw failure; }
     }
 
     @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] grants) {
@@ -444,21 +659,71 @@ public final class MainActivity extends Activity {
     }
 
     private void publishSpeech(SpeechInput.Event event) {
+        if ("error".equals(event.type)) AndroidDiagnostics.event("native.speech", "error", null, speechOperationId, null);
         if (!pageReady || web == null || isDestroyed()) return;
         try {
             JSONObject detail = new JSONObject().put("requestId", event.requestId).put("type", event.type);
             if (event.text != null) detail.put("text", event.text);
-            if (event.message != null) detail.put("message", event.message);
+            if (event.message != null) detail.put("message", event.message + (speechOperationId == null ? "" : "\n反馈编号：" + speechOperationId));
             String json = JSONObject.quote(detail.toString()).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
             web.evaluateJavascript("window.dispatchEvent(new CustomEvent('bagu-speech',{detail:JSON.parse(" + json + ")}));", null);
         } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
     }
 
-    @Override protected void onResume() { super.onResume(); resumed = true; }
+    boolean updateForeground() { return resumed && pageReady && !isFinishing() && !isDestroyed(); }
+
+    void publishUpdate(String detail) {
+        if (!updateForeground() || web == null) return;
+        String quoted = JSONObject.quote(detail).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
+        web.evaluateJavascript("window.dispatchEvent(new CustomEvent('bagu-update',{detail:JSON.parse(" + quoted + ")}));", null);
+    }
+
+    private boolean nativeUpdateIdle() {
+        return UpdateEngine.canInstall(updateForeground(), state.operation != null, state.working,
+            state.pendingArchive != null, speechInput != null && speechInput.isActive(), false, false, false, false);
+    }
+
+    void validateUpdateInstallation(String operationId, UpdatePolicy.Release candidate) {
+        final WebView expectedPage = web;
+        updateInstallGate.begin(operationId, new UpdateInstallGate.Boundary() {
+            public boolean idle() { return nativeUpdateIdle() && web == expectedPage && updater.installCurrent(operationId, candidate.id()); }
+            public void reserve(String op, Consumer<Boolean> reply) {
+                updatePrepareTimeout = () -> cancelUpdatePreparation("安装前检查超时，请重试。");
+                MAIN.postDelayed(updatePrepareTimeout, 15000);
+                callPage("baguReserveUpdateInstallation", op, reply);
+            }
+            public void noSession(Consumer<Boolean> reply) {
+                RuntimeHost.WORKER.execute(() -> {
+                    boolean idle;
+                    try { idle = !RuntimeHost.hasOpenSession(); } catch (RuntimeException ignored) { idle = false; }
+                    final boolean noSession = idle;
+                    MAIN.post(() -> reply.accept(noSession));
+                });
+            }
+            public void stillReserved(String op, Consumer<Boolean> reply) { callPage("baguUpdateReservationCurrent", op, reply); }
+            public boolean launch() { return updater.launchInstaller(MainActivity.this, operationId, candidate); }
+            public void abort(String op, String reason) { updater.blocked(op, reason); }
+            public void release(String op) {
+                if (updatePrepareTimeout != null) MAIN.removeCallbacks(updatePrepareTimeout);
+                updatePrepareTimeout = null;
+                if (!isDestroyed() && web == expectedPage) callPage("baguReleaseUpdateInstallation", op, ignored -> {});
+            }
+            private void callPage(String function, String op, Consumer<Boolean> reply) {
+                String quoted = JSONObject.quote(op);
+                expectedPage.evaluateJavascript("(function(){return typeof window." + function + "==='function'&&window." + function + "(" + quoted + ")===true;})()", value -> reply.accept("true".equals(value)));
+            }
+        });
+    }
+
+    void cancelUpdatePreparation(String reason) { updateInstallGate.cancel(reason); }
+
+    @Override protected void onResume() { super.onResume(); resumed = true; showImportConfirmation(); if (updater != null) updater.foreground(this); }
 
     @Override protected void onPause() {
+        cancelUpdatePreparation("应用已离开前台，请重新点击安装。");
         resumed = false;
-        speechInput.pause();
+        if (updater != null) updater.background(this);
+        if (speechInput != null) speechInput.pause();
         super.onPause();
     }
 
@@ -497,20 +762,29 @@ public final class MainActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle saved) {
         super.onSaveInstanceState(saved);
         saved.putString("documentOperation", state.operation);
+        saved.putString("documentOperationId", state.diagnosticsId);
         saved.putString("documentTemplate", state.template);
         saved.putBoolean("documentWorking", state.working);
         saved.putString("workingOperation", state.workingOperation);
+        saved.putBoolean("documentPendingImport", state.pendingArchive != null);
     }
 
     @Override protected void onDestroy() {
-        speechInput.cancelActive();
+        cancelUpdatePreparation("页面已重建，请重新点击安装。");
+        if (updater != null) updater.detach(this);
+        if (importDialog != null) {
+            // Dismissing the old Activity is not user cancellation or confirmation.
+            importDialog.setOnCancelListener(null);
+            importDialog.setOnDismissListener(null);
+            importDialog.dismiss();
+            importDialog = null;
+        }
+        if (speechInput != null) speechInput.cancelActive();
         microphoneReply = null;
         finishCsv(null, null);
         if (state.owner.get() == this) state.owner.clear();
         if (Build.VERSION.SDK_INT >= 33 && backCallback != null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
-        web.removeJavascriptInterface("BaguNative");
-        root.removeView(web);
-        web.destroy();
+        discardWebView();
         super.onDestroy();
     }
 
