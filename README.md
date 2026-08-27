@@ -33,12 +33,17 @@ python bagu.py serve           # 打开 http://127.0.0.1:8765
 
 网页评卷前，先点击作答页顶部的当前模型条进入配置库，新建或选用一条可用配置。
 
+## Android Beta（本地构建）
+
+Android Beta 使用项目本地工具链和稳定的本地签名身份构建；完整的构建、校验、安装、更新和 `.bagu-backup` 迁移说明见 [docs/android-beta.md](docs/android-beta.md)。不会自动发布到 GitHub 或应用商店。
+
 ## 命令
 
 | 命令 | 作用 |
 | --- | --- |
 | `python bagu.py init` | 初始化 SQLite（`bagu.db`） |
 | `python bagu.py import` | 按章节抓取题目与答案；已有题更新正文/锚点且保留复习进度 |
+| `python bagu.py import --code-only` | 自动备份后，仅恢复旧答案中与来源匹配的代码块和缩进；不新增题目、不替换正文、不改复习记录 |
 | `python bagu.py stats` | 总题 / 今日到期 / 已掌握 / 分类进度 |
 | `python bagu.py list` | 列出全部题目 |
 | `python bagu.py draw -n 5 [--cat MySQL]` | 开一轮会话并打印题目 |
@@ -57,6 +62,7 @@ python bagu.py serve           # 打开 http://127.0.0.1:8765
 5. 全部题判完后会话自动 `closed`。
 6. 旧写法 `grade <id> <result>`（不带 session）已废除。
 7. 网页和 Hermes 抢同一把锁：任一方持有 open 会话，另一方 `draw` 失败。
+8. 会话锁和评分使用 SQLite 原子事务；并发请求也只允许一条 open、同题只计分一次。
 
 `session_id` 格式：`s_` + 日期 `YYYYMMDD` + `_` + 8 位小写十六进制，例如 `s_20260826_a3f2c91b`。
 
@@ -87,9 +93,17 @@ python bagu.py serve --port 8765
 - 背题：每题直接展示题库答案，看完后自行选择 `again / hard / good / easy`
 - 非 `easy` 才展开完整答案
 - 模型失败、断流或结果解析失败都不落库，可保留草稿重试
+- 草稿保存在本机浏览器 `localStorage`；关闭标签页或重启浏览器后仍可恢复
+- 网页提交带 submission ID；若评分已成功但响应丢失，刷新后会恢复原判定、点评和完整答案
 - 「结束本轮 skip」关闭会话
 
 ## 题库管理与 CSV 导入
+
+旧版本抓取的答案可能没有代码围栏，导致 SQL、Java 等代码显示为普通正文。
+可执行 `python bagu.py import --code-only`：先在数据库旁创建
+`*.before-code-format-*.sqlite3` 备份，再从公开来源恢复能逐行匹配的代码块格式。
+已有围栏、内容有改动或匹配数量不一致的答案/片段会保持原样；不会更新历史评卷文本。
+修复后刷新网页并重新打开答案即可；此命令不需要模型 Key，也不调用模型。
 
 点击页面右上角「题库管理」进入管理页。支持按题目、答案、分类或 URL 搜索，可直接展开答案正文；答案支持标题、粗体、链接、图片、列表、引用、代码块和表格等常用 Markdown，并会经过安全转义。也可打开带题目锚点的来源链接。为保留复习历史，已经进入过会话的题目不能删除，但仍可修改题干、答案、分类和来源 URL。
 
@@ -154,8 +168,10 @@ Hermes 路径**不**调用本仓库配置的 LLM。禁止：不带 session 的 g
 | DELETE | `/api/questions/:id` | 删除未进入过会话的题目 |
 | POST | `/api/questions/import` | 解析并导入 UTF-8 CSV 文本 |
 | POST | `/api/draw` | `{n, cat?}`；已有会话返回 409 |
-| POST | `/api/answer` | `{session_id, question_id, text}` → 调模型 → grade |
+| POST | `/api/answer` | `{session_id, question_id, text, submission_id?}` → 调模型 → grade |
 | POST | `/api/answer/stream` | 同上；SSE 推送 `start` / `delta` / `done` / `error`，完整解析后才 grade |
+| POST | `/api/review` | `{session_id, question_id, result, submission_id?}` → 自评并持久化题库答案 |
+| GET | `/api/submissions/:id` | 查询已完成 submission；会话关闭后仍可恢复结果 |
 | POST | `/api/skip` | 关闭本轮 |
 | GET | `/api/models` | 模型列表 + `active_id` + 掩码 Key + 预设 |
 | POST | `/api/models` | 新建（服务端先测再写） |
