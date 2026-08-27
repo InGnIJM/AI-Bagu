@@ -1,0 +1,141 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+// DirectoryProperty lets AGP carry producer dependencies to every consumer,
+// including navigation resource extraction and lint, rather than enumerating task names.
+abstract class BaguSync extends Sync {
+    @OutputDirectory abstract DirectoryProperty getOutputDirectory()
+}
+abstract class BaguSeed extends Exec {
+    @OutputDirectory abstract DirectoryProperty getOutputDirectory()
+}
+
+def repoRoot = rootProject.projectDir.parentFile
+def buildPythonCommand = providers.gradleProperty('baguBuildPython').getOrElse('python')
+def selectedAbi = providers.gradleProperty('baguAbi').getOrElse('arm64-v8a')
+if (!(selectedAbi in ['arm64-v8a', 'x86_64'])) {
+    throw new GradleException('baguAbi must be arm64-v8a or the explicit x86_64 test override')
+}
+def signingProperties = new Properties()
+def signingPropertiesFile = new File(repoRoot, '.signing/keystore.properties')
+if (!signingPropertiesFile.isFile()) {
+    throw new GradleException('Missing local release signing configuration in .signing')
+}
+signingPropertiesFile.withInputStream { signingProperties.load(it) }
+
+def generatedPython = layout.buildDirectory.dir('generated/bagu/python')
+def generatedStatic = layout.buildDirectory.dir('generated/bagu/assets')
+def generatedBranding = layout.buildDirectory.dir('generated/bagu/res')
+
+android {
+    namespace 'io.github.ingnijm.baguhelper'
+    compileSdk 36
+    // Only the separately packaged instrumentation APK uses these settings.
+    testBuildType providers.gradleProperty('baguTestBuildType').getOrElse('debug')
+    defaultConfig {
+        applicationId 'io.github.ingnijm.baguhelper'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        minSdk 29
+        targetSdk 36
+        versionCode providers.gradleProperty('baguVersionCode').getOrElse('1').toInteger()
+        versionName providers.gradleProperty('baguVersionName').getOrElse('0.1.0-beta.1')
+        ndk { abiFilters selectedAbi }
+    }
+    signingConfigs {
+        stableRelease {
+            storeFile new File(repoRoot, '.signing/release.jks')
+            storePassword signingProperties.getProperty('storePassword')
+            keyAlias signingProperties.getProperty('keyAlias')
+            keyPassword signingProperties.getProperty('keyPassword')
+        }
+    }
+    flavorDimensions 'distribution'
+    productFlavors {
+        internal { dimension 'distribution' }
+        create('public') { dimension 'distribution' }
+    }
+    buildTypes {
+        debug { signingConfig signingConfigs.stableRelease }
+        release {
+            signingConfig signingConfigs.stableRelease
+            minifyEnabled false
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { buildConfig true }
+    lint { abortOnError true }
+}
+
+chaquopy {
+    defaultConfig {
+        version = '3.11'
+        buildPython buildPythonCommand
+    }
+    sourceSets { main { srcDirs = [generatedPython.get().asFile] } }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.7.0'
+    androidTestImplementation 'androidx.test.ext:junit:1.3.0'
+    androidTestImplementation 'androidx.test:core:1.7.0'
+    androidTestImplementation 'androidx.test.uiautomator:uiautomator:2.4.0'
+}
+
+def syncPython = tasks.register('syncPython', Sync) {
+    from(new File(repoRoot, 'bagu.py'))
+    from('src/main/python/android_runtime.py')
+    into generatedPython
+}
+def syncStatic = tasks.register('syncStatic', BaguSync) {
+    outputDirectory.set(generatedStatic)
+    from(new File(repoRoot, 'web/index.html')) { into 'static/web' }
+    from(new File(repoRoot, 'assets/branding/bagu-helper-icon-concept.png')) { into 'static/assets/branding' }
+    from(new File(repoRoot, 'assets/fonts')) {
+        include 'PlusJakartaSans.ttf', 'FiraCode.ttf', 'MaterialSymbolsRounded.ttf'
+        include 'PlusJakartaSans-OFL.txt', 'FiraCode-OFL.txt', 'MaterialSymbolsRounded-APACHE-2.0.txt'
+        into 'static/assets/fonts'
+    }
+    into outputDirectory
+}
+def syncBranding = tasks.register('syncBranding', BaguSync) {
+    outputDirectory.set(generatedBranding)
+    from(new File(repoRoot, 'assets/branding/bagu-helper-icon-concept.png')) {
+        rename { 'brand_icon.png' }
+        into 'drawable-nodpi'
+    }
+    into outputDirectory
+}
+def seedTasks = [:]
+['internal', 'public'].each { flavor ->
+    def output = layout.buildDirectory.file("generated/bagu/${flavor}/seed/bagu-seed.db")
+    seedTasks[flavor] = tasks.register("generate${flavor.capitalize()}Seed", BaguSeed) {
+        outputDirectory.set(layout.buildDirectory.dir("generated/bagu/${flavor}"))
+        inputs.file new File(repoRoot, 'scripts/build_android_seed.py')
+        inputs.file new File(repoRoot, 'bagu.py')
+        // Only the approved seed builder may open the real database (read-only).
+        // Do not register it as an input: Gradle would read it to fingerprint it.
+        if (flavor == 'internal') { outputs.upToDateWhen { false } }
+        outputs.file output
+        workingDir repoRoot
+        def arguments = [buildPythonCommand, new File(repoRoot, 'scripts/build_android_seed.py').absolutePath]
+        arguments += flavor == 'internal' ? ['--source', new File(repoRoot, 'bagu.db').absolutePath] : ['--empty']
+        commandLine arguments + ['--output', output.get().asFile.absolutePath]
+    }
+}
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.sources.assets.addGeneratedSourceDirectory(syncStatic) { it.outputDirectory }
+        variant.sources.res.addGeneratedSourceDirectory(syncBranding) { it.outputDirectory }
+        variant.sources.assets.addGeneratedSourceDirectory(seedTasks[variant.flavorName]) { it.outputDirectory }
+    }
+}
+// Chaquopy has its own source model; wire its documented merge task explicitly.
+tasks.configureEach { task ->
+    if (task.name ==~ /merge.*PythonSources/) { task.dependsOn syncPython }
+}
