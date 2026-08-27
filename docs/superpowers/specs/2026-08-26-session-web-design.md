@@ -4,6 +4,8 @@
 状态：已实现（2026-08-26）
 
 > 说明：本文仍是会话协议、CLI 与本地网页基础行为的依据；其中单模型配置、`BAGU_API_KEY` 和 Hermes 导入接口已被 `2026-08-26-model-profiles-design.md` 的多模型配置库设计取代。当前模型行为以该设计和代码为准。
+>
+> 2026-08-27 补充：数据库级唯一会话、原子评分、submission 幂等和中断恢复以 `2026-08-27-session-fault-recovery-design.md` 为准。
 
 ## 目标
 
@@ -91,6 +93,9 @@ CREATE TABLE session_items (
   question_id INTEGER NOT NULL,
   grade TEXT,
   graded_at TEXT,
+  submission_id TEXT,
+  result_comment TEXT,
+  result_full_answer TEXT,
   PRIMARY KEY (session_id, question_id),
   FOREIGN KEY (session_id) REFERENCES sessions(id),
   FOREIGN KEY (question_id) REFERENCES questions(id)
@@ -99,7 +104,7 @@ CREATE TABLE session_items (
 
 启动时 `CREATE TABLE IF NOT EXISTS`，与现有 `init_db` 一起做。
 
-约束用代码保证「最多一条 open」，并加查询：`SELECT id FROM sessions WHERE status='open'`。
+「最多一条 open」由部分唯一索引在数据库层保证；代码仍保留友好的冲突提示。
 
 ## 谁来评卷
 
@@ -150,7 +155,10 @@ Hermes **不得**：不带 session 调用 grade；同一题再 grade；用户未
 | GET | `/api/stats` | 看板数据 |
 | GET | `/api/session` | 当前 open 会话及未判/已判题 |
 | POST | `/api/draw` | `{n, cat?}` |
-| POST | `/api/answer` | `{session_id, question_id, text}` → 调模型 → grade；返回判定和可选完整答案 |
+| POST | `/api/answer` | `{session_id, question_id, text, submission_id?}` → 调模型 → grade；返回判定和可选完整答案 |
+| POST | `/api/answer/stream` | 同上；SSE 流式评判，完整解析后才 grade |
+| POST | `/api/review` | `{session_id, question_id, result, submission_id?}` → 自评并持久化题库答案 |
+| GET | `/api/submissions/:id` | 查询已完成 submission 的持久化结果 |
 | POST | `/api/skip` | 关闭本轮 |
 | GET/POST | `/api/settings` | 读/写模型配置；GET 的 key 为掩码 |
 | POST | `/api/settings/import-hermes` | 从本机 Hermes `.env` 导入 API Key 类供应商 |

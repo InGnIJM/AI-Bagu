@@ -2,12 +2,14 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>八股抽问 - 艾宾浩斯复习与智能评卷</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" rel="stylesheet">
+  <meta name="referrer" content="no-referrer">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>八股助手 - 艾宾浩斯复习与智能评卷</title>
+  <link rel="icon" href="/assets/branding/bagu-helper-icon-concept.png" type="image/png">
   <style>
+    @font-face { font-family: 'Plus Jakarta Sans'; src: url('/assets/fonts/PlusJakartaSans.ttf') format('truetype'); font-weight: 200 800; font-display: swap; }
+    @font-face { font-family: 'Fira Code'; src: url('/assets/fonts/FiraCode.ttf') format('truetype'); font-weight: 300 700; font-display: swap; }
+    @font-face { font-family: 'Material Symbols Rounded'; src: url('/assets/fonts/MaterialSymbolsRounded.ttf') format('truetype'); font-weight: 100 700; font-display: block; }
     :root {
       --color-primary: #0F172A;
       --color-primary-hover: #1E293B;
@@ -59,7 +61,7 @@
       -webkit-font-smoothing: antialiased;
     }
 
-    /* Google Material Symbols 基础规范 */
+    /* 本地 Material Symbols 字体，无外部运行时请求 */
     .material-symbols-rounded {
       font-family: 'Material Symbols Rounded';
       font-weight: 600;
@@ -87,6 +89,10 @@
       cursor: pointer;
       user-select: none;
       touch-action: manipulation;
+    }
+    button:focus, input:focus, select:focus, textarea:focus, summary:focus, a:focus, [tabindex]:focus {
+      outline: 3px solid var(--color-ring);
+      outline-offset: 2px;
     }
     button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
       outline: 3px solid var(--color-ring);
@@ -136,16 +142,15 @@
       box-shadow: var(--shadow-hard);
     }
     .brand-mark {
-      width: 44px;
-      height: 44px;
-      border-radius: 12px;
-      background: var(--color-accent);
-      border: 2px solid var(--color-border);
-      box-shadow: 2px 2px 0px var(--color-border);
-      color: var(--color-primary);
-      display: grid;
-      place-items: center;
+      width: 54px;
+      height: 54px;
       flex-shrink: 0;
+    }
+    .brand-logo {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
     }
     .brand-title h1 {
       font-size: 18px;
@@ -1244,6 +1249,89 @@
       .quiz-actions { grid-template-columns: 1fr; }
       .review-grid { grid-template-columns: 1fr 1fr; }
     }
+    .android-only { display: none; }
+    /* Native consumes system/IME insets; env() is a web-only safe-area fallback. */
+    body.android-app .android-only { display: block; }
+    body.android-app .app { max-width: 960px; padding: 12px 12px 94px; padding-bottom: calc(94px + env(safe-area-inset-bottom, 0px)); }
+    body.android-app .bento-container { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+    body.android-app .bento-sidebar { position: static; display: block; }
+    body.android-app .nav-card { display: none; }
+    body.android-app .brand-card { padding: 10px 14px; box-shadow: var(--shadow-hard-sm); }
+    body.android-app .brand-mark { width: 38px; height: 38px; }
+    body.android-app .brand-title h1 { font-size: 18px; }
+    body.android-app .brand-title p { font-size: 10px; }
+    body.android-app .bento-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+    body.android-app .stats { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    body.android-app .stat { padding: 10px 6px; box-shadow: var(--shadow-hard-sm); }
+    body.android-app .stat .k { font-size: 10px; letter-spacing: 0; }
+    body.android-app .stat .v { font-size: 20px; }
+    body.android-app .card { padding: 18px 16px; }
+    body.android-app h2.q, body.android-app .idle-hero h2 { font-size: 22px; }
+    body.android-app h2, body.android-app h3, body.android-app p, body.android-app .pill,
+    body.android-app .lib-card .u, body.android-app .lib-card .n, body.android-app .format-note,
+    body.android-app .markdown-body { min-width: 0; overflow-wrap: break-word; word-wrap: break-word; }
+    body.android-app .card, body.android-app section, body.android-app .stat,
+    body.android-app .lib-card, body.android-app .field, body.android-app .study-answer { min-width: 0; }
+    body.android-app input, body.android-app select, body.android-app textarea { font-size: 16px; min-width: 0; }
+    body.android-app button, body.android-app summary, body.android-app .answer-source { min-height: 44px; }
+    body.android-app .question-meta a,
+    body.android-app .markdown-body a:not(.answer-image-link),
+    body.android-app .answer-source {
+      display: inline-block;
+      min-width: 44px;
+      min-height: 44px;
+      max-width: 100%;
+      padding: 10px 0;
+      vertical-align: middle;
+      overflow-wrap: break-word;
+    }
+    body.android-app .answer-image-link { min-width: 44px; min-height: 44px; }
+    body.android-app .side-nav-badge { min-height: 0; }
+    body.android-app .answer-label { display: block !important; }
+    body.android-app .answer-shortcut { display: none; }
+    body.android-app .row, body.android-app .manage-toolbar { grid-template-columns: minmax(0, 1fr); }
+    body.android-app .manage-head { display: block; }
+    body.android-app .manage-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 14px; }
+    body.android-app .manage-actions button { padding: 8px; }
+    body.android-app .question-item { grid-template-columns: minmax(0, 1fr); padding: 14px; }
+    body.android-app .question-ops { display: grid; grid-template-columns: 1fr 1fr; }
+    body.android-app .lib-ops { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    body.android-app .lib-ops button { justify-content: center; padding: 0 6px; }
+    body.android-app .quiz-actions { grid-template-columns: minmax(0, 1fr); }
+    body.android-app .review-grid { grid-template-columns: 1fr 1fr; }
+    body.android-app .pager { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; }
+    body.android-app .pager button { padding: 0 8px; }
+    body.android-app .pager span { text-align: center; }
+    body.android-app .markdown-body pre, body.android-app .answer-table-wrap { max-width: 100%; }
+    body.android-app .markdown-body pre { white-space: pre; overflow-wrap: normal; }
+    body.android-app .answer-media img { max-width: 100%; height: auto; }
+    body.android-app .settings-stack { display: grid; gap: 16px; }
+    body.android-app .settings-stack h2 { font-size: 20px; margin-bottom: 8px; }
+    body.android-app #view-overview .sidebar-cats-card { margin-top: 14px; }
+    body.android-app .backup-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
+    body.android-app .mobile-nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; padding: 8px 10px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); background: var(--color-background); border-top: 2px solid var(--color-border); }
+    body.android-app .mobile-nav button { display: grid; justify-items: center; align-content: center; gap: 3px; border: 2px solid transparent; border-radius: 12px; background: transparent; color: var(--color-foreground); min-height: 56px; font-size: 12px; font-weight: 800; }
+    body.android-app .mobile-nav button.active { background: var(--color-accent); border-color: var(--color-border); }
+    body.android-app .mobile-nav .material-symbols-rounded { font-size: 22px; }
+    body.android-app.keyboard-open .mobile-nav { display: none; }
+    body.android-app.keyboard-open .app { padding-bottom: 24px; }
+    body.android-app textarea { scroll-margin-bottom: 100px; }
+    /* WebView 74 has Grid gap but no Flexbox gap. This class is set by a real layout probe. */
+    .no-flex-gap .bento-sidebar > * + *, .no-flex-gap .bento-main > * + * { margin-top: 16px; }
+    .no-flex-gap .nav-group > * + *, .no-flex-gap .model-bar > * + * { margin-top: 8px; }
+    .no-flex-gap .brand-title { margin-left: 12px; }
+    .no-flex-gap .side-nav-btn > * + *, .no-flex-gap .model-status-chip > * + *,
+    .no-flex-gap .sidebar-sec-title-wrap > * + *, .no-flex-gap .lib-card .n > * + *,
+    .no-flex-gap .eyebrow > * + *, .no-flex-gap .question-meta > * + * { margin-left: 8px; }
+    .no-flex-gap button > .material-symbols-rounded { margin-right: 5px; }
+    .no-flex-gap .eyebrow > *, .no-flex-gap .question-meta > * { margin-bottom: 6px; }
+    body.android-app.no-flex-gap .bento-main > * + *, body.android-app.no-flex-gap .mobile-nav .material-symbols-rounded { margin: 0; }
+    @media (max-width: 350px) {
+      body.android-app .app { padding-left: 10px; padding-right: 10px; }
+      body.android-app .card { padding: 16px 12px; }
+      body.android-app .stats { gap: 6px; }
+      body.android-app .stat .v { font-size: 18px; }
+    }
     @media (prefers-reduced-motion: reduce) {
       * { transition: none !important; animation: none !important; }
     }
@@ -1262,10 +1350,10 @@
         <!-- 品牌卡片 -->
         <div class="brand-card">
           <div class="brand-mark" aria-hidden="true">
-            <span class="material-symbols-rounded filled">psychology</span>
+            <img src="/assets/branding/bagu-helper-icon-concept.png" alt="" class="brand-logo">
           </div>
           <div class="brand-title">
-            <h1>八股抽问</h1>
+            <h1>八股助手</h1>
             <p>SPACED REPETITION</p>
           </div>
         </div>
@@ -1360,11 +1448,18 @@
                 </button>
               </div>
               <p class="mode-note" id="mode-help">先用自己的话回答，再交给模型评判。</p>
-              <p>到期复习优先。Hermes 客户端和本页面共用同一把会话锁。</p>
+              <p id="session-scope-note">到期复习优先。Hermes 客户端和本页面共用同一把会话锁。</p>
               <button class="cta" type="button" id="btn-draw">
                 <span class="material-symbols-rounded filled">play_arrow</span>
                 抽 5 题开始
               </button>
+              <div id="empty-bank-help" class="hidden">
+                <p class="help">题库还是空的。导入 UTF-8 CSV，或先新增一道题，就能开始练习。</p>
+                <div class="actions">
+                  <button type="button" class="secondary" id="btn-empty-import">导入 CSV</button>
+                  <button type="button" class="secondary" id="btn-empty-add">新增题目</button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1379,9 +1474,9 @@
             
             <!-- 答题模式流 -->
             <div id="answer-flow">
-              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <div class="answer-label" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
                 <label for="ans" style="margin-bottom:0">用自己的话阐述</label>
-                <span style="font-family:var(--font-mono); font-size:12px; color:var(--color-muted-fg); font-weight:700;">支持 Ctrl + Enter 快捷提交</span>
+                <span class="answer-shortcut" style="font-family:var(--font-mono); font-size:12px; color:var(--color-muted-fg); font-weight:700;">支持 Ctrl + Enter 快捷提交</span>
               </div>
               <textarea id="ans" placeholder="按你的理解组织回答；如果完全不会，可以点击下方直接揭晓答案"></textarea>
               <div class="quiz-actions">
@@ -1438,6 +1533,38 @@
         </section>
 
         <!-- 模型配置库列表视图 -->
+        <section id="view-overview" class="card hidden" aria-labelledby="overview-title">
+          <h2 id="overview-title">学习概览</h2>
+          <p class="help">看看各分类的学习进度，也可以点选分类开始练习。</p>
+          <div id="overview-categories"></div>
+        </section>
+
+        <section id="view-settings" class="hidden" aria-labelledby="settings-title">
+          <div class="settings-stack">
+            <div class="card">
+              <h2 id="settings-title">设置</h2>
+              <p class="help">评卷模型只用于答题模式；背题模式无需配置模型。</p>
+              <div id="settings-model" style="margin-top:14px"></div>
+            </div>
+            <div class="card">
+              <h2>备份与恢复</h2>
+              <p class="help">备份包含题目、答案和复习进度，不包含模型配置、API Key、草稿或进行中的会话。恢复会按分类与题目合并，更新同名题目及其进度。</p>
+              <p class="help" id="backup-session-warning">恢复前请先结束本轮练习。</p>
+              <div class="backup-actions">
+                <button type="button" class="secondary" id="btn-backup-export">导出备份</button>
+                <button type="button" class="secondary" id="btn-backup-import">恢复备份</button>
+              </div>
+              <p id="native-message" class="help" role="status" aria-live="polite"></p>
+            </div>
+            <div class="card">
+              <h2>关于八股助手</h2>
+              <p id="app-version" class="help"></p>
+              <p id="app-distribution" class="help"></p>
+              <p class="help">练习数据保存在本机。模型评卷会将题目和你的回答发送给所选服务，请勿提交敏感信息。</p>
+            </div>
+          </div>
+        </section>
+
         <section id="view-lib" class="card hidden">
           <button type="button" class="back" id="btn-back-quiz">
             <span class="material-symbols-rounded">arrow_back</span>
@@ -1600,8 +1727,33 @@
 
   </div>
 
+  <nav class="mobile-nav android-only" aria-label="底部导航">
+    <button type="button" id="mobile-nav-quiz" data-mobile-view="quiz" class="active" aria-current="page"><span class="material-symbols-rounded" aria-hidden="true">play_circle</span><span>练习</span></button>
+    <button type="button" id="mobile-nav-questions" data-mobile-view="questions"><span class="material-symbols-rounded" aria-hidden="true">menu_book</span><span>题库</span></button>
+    <button type="button" id="mobile-nav-overview" data-mobile-view="overview"><span class="material-symbols-rounded" aria-hidden="true">pie_chart</span><span>概览</span></button>
+    <button type="button" id="mobile-nav-settings" data-mobile-view="settings"><span class="material-symbols-rounded" aria-hidden="true">tune</span><span>设置</span></button>
+  </nav>
+
   <script>
     const $ = (id) => document.getElementById(id);
+    const startupParams = new URLSearchParams(location.search);
+    const nativeStore = startupParams.get("platform") === "android" && window.BaguNative;
+    const isAndroidApp = Boolean(nativeStore);
+    // Keep the protected URL reloadable; the early no-referrer policy prevents URL leakage.
+    const accessToken = nativeStore ? startupParams.get("token") || "" : "";
+    const appStorage = nativeStore ? {
+      getItem: (key) => nativeStore.getItem(key),
+      setItem: (key, value) => nativeStore.setItem(key, String(value)),
+      removeItem: (key) => nativeStore.removeItem(key),
+      key: (index) => JSON.parse(nativeStore.keys())[index] || null,
+      get length() { return JSON.parse(nativeStore.keys()).length; }
+    } : localStorage;
+    function requestHeaders(json) {
+      const headers = {};
+      if (accessToken) headers["X-Bagu-Token"] = accessToken;
+      if (json) headers["Content-Type"] = "application/json";
+      return headers;
+    }
     const presets = {
       deepseek: { base: "https://api.deepseek.com/v1", model: "deepseek-chat" },
       openrouter: { base: "https://openrouter.ai/api/v1", model: "openrouter/auto" },
@@ -1616,13 +1768,89 @@
     let testedOk = false;
     let testGen = 0;
     let revealGeneration = 0;
-    let selectedMode = localStorage.getItem("bagu-study-mode") === "memorize" ? "memorize" : "answer";
+    let selectedMode = appStorage.getItem("bagu-study-mode") === "memorize" ? "memorize" : "answer";
     let lastVerdict = null;
     let judgeTimer = null;
     let judgeStartedAt = 0;
+    let currentView = "quiz";
+    let nativeBusy = "";
+
+    function setNativeMessage(message, error) {
+      $("native-message").textContent = message;
+      $("native-message").classList.toggle("error", Boolean(error));
+    }
+    function setNativeBusy(operation) {
+      nativeBusy = operation;
+      ["btn-backup-export", "btn-backup-import", "btn-download-template"].forEach((id) => {
+        $(id).disabled = Boolean(operation);
+      });
+    }
+    function startNativeOperation(operation, content) {
+      if (!nativeStore || nativeBusy) return;
+      if (operation === "import" && session.session_id) {
+        setNativeMessage("请先回到练习页结束本轮，再恢复备份。", true);
+        return;
+      }
+      if (!["export", "import", "template"].includes(operation)) return;
+      setNativeBusy(operation);
+      setNativeMessage("请在系统文件选择器中完成操作…", false);
+      try {
+        if (operation === "export") nativeStore.exportBackup();
+        else if (operation === "import") nativeStore.importBackup();
+        else nativeStore.saveCsvTemplate(content);
+      } catch (_) {
+        setNativeBusy("");
+        setNativeMessage("无法打开文件选择器，请重试。", true);
+      }
+    }
+    async function handleNativeResult(event) {
+      const data = event.detail;
+      if (!data || !["export", "import", "template"].includes(data.operation) ||
+          !["ok", "cancelled", "error"].includes(data.status)) return;
+      // Results can arrive after Activity/process recreation, when JS has no busy flag.
+      if (nativeBusy && data.operation !== nativeBusy) return;
+      setNativeBusy("");
+      let message = typeof data.message === "string" ? data.message : "文件操作已结束。";
+      if (data.operation === "import" && data.status === "ok") {
+        if (!Number.isInteger(data.added) || data.added < 0 || !Number.isInteger(data.updated) || data.updated < 0) {
+          setNativeMessage("备份结果无效，请重新打开应用核对题库。", true);
+          return;
+        }
+        message = `恢复完成：新增 ${data.added} 道，更新 ${data.updated} 道。`;
+        try {
+          await refresh();
+          if (currentView === "questions") await loadQuestions(1);
+        } catch (_) { message += " 请重新打开练习页刷新数据。"; }
+      }
+      setNativeMessage(message, data.status === "error");
+      if (data.operation === "template") showQuestionMessage(data.status === "error" ? "error" : "success", message);
+    }
+    function renderAppInfo() {
+      if (!nativeStore) return;
+      try {
+        const info = JSON.parse(nativeStore.getAppInfo());
+        $("app-version").textContent = `${info.name} · ${info.versionName} (${info.versionCode})`;
+        $("app-distribution").textContent = info.flavor === "internal"
+          ? "内部测试版 · 内置题库仅供个人学习，请勿对外分发。"
+          : "公开测试版 · 题库由你自行新增或导入。";
+      } catch (_) {
+        $("app-version").textContent = "版本信息暂不可用";
+        $("app-distribution").textContent = "请在系统应用信息中查看版本。";
+      }
+    }
+    function readTextFile(file) {
+      if (typeof file.text === "function") return file.text();
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("读取文件失败"));
+        reader.onabort = () => reject(new Error("已取消读取文件"));
+        reader.readAsText(file, "UTF-8");
+      });
+    }
 
     async function api(method, path, body) {
-      const init = { method, headers: {} };
+      const init = { method, headers: requestHeaders(Boolean(body)) };
       if (body) {
         init.headers["Content-Type"] = "application/json";
         init.body = JSON.stringify(body);
@@ -1633,7 +1861,9 @@
       const payload = isJson ? await r.json() : await r.text();
       if (!r.ok) {
         const msg = isJson && payload && payload.error ? payload.error : `${r.status} ${payload}`;
-        throw new Error(msg);
+        const error = new Error(msg);
+        error.status = r.status;
+        throw error;
       }
       return payload;
     }
@@ -1641,7 +1871,7 @@
     async function streamAnswer(body, onEvent) {
       const response = await fetch("/api/answer/stream", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: requestHeaders(true),
         body: JSON.stringify(body)
       });
       if (!response.ok) {
@@ -1679,7 +1909,7 @@
             }
             if (event.type === "error") throw new Error(event.error || "评卷失败");
             if (onEvent) onEvent(event);
-            if (event.type === "done") finalVerdict = event;
+            if (event.type === "done") finalVerdict = event.result;
           }
         }
       }
@@ -1717,35 +1947,124 @@
       $("judge-progress").classList.add("hidden");
     }
 
+    const ACTIVE_SUBMISSION_KEY = "bagu-active-submission";
     function draftKey(sid, qid) { return `bagu-draft:${sid}:${qid}`; }
     function saveDraft() {
       const q = currentQuestion();
-      if (!session.session_id || !q) return;
-      sessionStorage.setItem(draftKey(session.session_id, q.id), $("ans").value);
+      if (!session.session_id || !q) return true;
+      try {
+        appStorage.setItem(draftKey(session.session_id, q.id), $("ans").value);
+        return true;
+      } catch (_) {
+        $("q-err").textContent = "草稿保存失败，请保留当前页面并缩短回答后重试。";
+        $("q-err").classList.remove("hidden");
+        return false;
+      }
     }
     function loadDraft() {
       const q = currentQuestion();
       if (!session.session_id || !q) return "";
-      return sessionStorage.getItem(draftKey(session.session_id, q.id)) || "";
+      return appStorage.getItem(draftKey(session.session_id, q.id)) || "";
     }
     function clearDraft(sid, qid) {
-      sessionStorage.removeItem(draftKey(sid, qid));
+      appStorage.removeItem(draftKey(sid, qid));
+    }
+    function clearSessionDrafts(sid) {
+      if (!sid) return;
+      const prefix = `bagu-draft:${sid}:`;
+      for (let index = appStorage.length - 1; index >= 0; index -= 1) {
+        const key = appStorage.key(index);
+        if (key && key.startsWith(prefix)) appStorage.removeItem(key);
+      }
+    }
+    function readActiveSubmission() {
+      try {
+        const active = JSON.parse(appStorage.getItem(ACTIVE_SUBMISSION_KEY) || "null");
+        if (!active || typeof active !== "object") return null;
+        if (!active.submission_id || !active.session_id || !Number.isInteger(active.question_id)) return null;
+        if (active.flow !== "answer" && active.flow !== "review") return null;
+        return active;
+      } catch (_) {
+        appStorage.removeItem(ACTIVE_SUBMISSION_KEY);
+        return null;
+      }
+    }
+    function writeActiveSubmission(active) {
+      appStorage.setItem(ACTIVE_SUBMISSION_KEY, JSON.stringify(active));
+      return active;
+    }
+    function newSubmissionId() {
+      if (typeof crypto.randomUUID === "function") return `sub_${crypto.randomUUID()}`;
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      bytes[6] = (bytes[6] & 15) | 64;
+      bytes[8] = (bytes[8] & 63) | 128;
+      const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      return `sub_${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    }
+    function ensureActiveSubmission(sid, qid, flow) {
+      const current = readActiveSubmission();
+      if (current && current.session_id === sid && current.question_id === qid) {
+        if (current.flow !== flow) {
+          current.flow = flow;
+          writeActiveSubmission(current);
+        }
+        return current;
+      }
+      return writeActiveSubmission({
+        submission_id: newSubmissionId(),
+        session_id: sid,
+        question_id: qid,
+        flow
+      });
+    }
+    function prepareSubmission(sid, qid, flow) {
+      try { return ensureActiveSubmission(sid, qid, flow); }
+      catch (_) {
+        $("q-err").textContent = "提交状态保存失败，尚未提交。请保留回答并重试。";
+        $("q-err").classList.remove("hidden");
+        return null;
+      }
+    }
+    function clearActiveSubmission() {
+      appStorage.removeItem(ACTIVE_SUBMISSION_KEY);
+    }
+    async function recoverActiveSubmission() {
+      const active = readActiveSubmission();
+      if (!active) return false;
+      try {
+        const payload = await api(
+          "GET",
+          "/api/submissions/" + encodeURIComponent(active.submission_id)
+        );
+        clearDraft(active.session_id, active.question_id);
+        renderRecoveredSubmission(payload, active);
+        return true;
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        const q = currentQuestion();
+        if (session.session_id === active.session_id && q && q.id === active.question_id) {
+          return false;
+        }
+        clearDraft(active.session_id, active.question_id);
+        clearActiveSubmission();
+        return false;
+      }
     }
     function sessionModeKey(sid) { return "bagu-session-mode:" + sid; }
     function currentSessionMode() {
       if (!session.session_id) return selectedMode;
-      return sessionStorage.getItem(sessionModeKey(session.session_id)) || "answer";
+      return appStorage.getItem(sessionModeKey(session.session_id)) || "answer";
     }
     function rememberSessionMode(sid, mode) {
-      if (sid) sessionStorage.setItem(sessionModeKey(sid), mode);
+      if (sid) appStorage.setItem(sessionModeKey(sid), mode);
     }
     function forgetSessionMode(sid) {
-      if (sid) sessionStorage.removeItem(sessionModeKey(sid));
+      if (sid) appStorage.removeItem(sessionModeKey(sid));
     }
 
     function setStudyMode(mode) {
       selectedMode = mode === "memorize" ? "memorize" : "answer";
-      localStorage.setItem("bagu-study-mode", selectedMode);
+      appStorage.setItem("bagu-study-mode", selectedMode);
       const memorize = selectedMode === "memorize";
       $("mode-answer").setAttribute("aria-pressed", memorize ? "false" : "true");
       $("mode-memorize").setAttribute("aria-pressed", memorize ? "true" : "false");
@@ -1783,6 +2102,68 @@
       document.querySelectorAll("[data-review]").forEach((button) => { button.disabled = disabled; });
     }
 
+    function renderRecoveredSubmission(payload, active) {
+      const q = payload.question;
+      const out = payload.result;
+      lastVerdict = out;
+      revealGeneration += 1;
+      stopJudgeProgress();
+      $("idle").classList.add("hidden");
+      $("quiz").classList.remove("hidden");
+      $("q-err").classList.add("hidden");
+      $("q-cat").textContent = q.category;
+      $("q-sid").textContent = payload.session_id;
+      $("q-title").textContent = (q.question.split("｜").pop() || q.question).trim();
+      $("q-meta").textContent = `#${q.id} · 已恢复上次评判`;
+      $("btn-skip").disabled = !session.session_id;
+      const box = $("verdict");
+      box.className = "verdict " + out.grade;
+      const recoveredMemorizeReview = active.flow === "review" && currentSessionMode() === "memorize";
+      if (recoveredMemorizeReview) {
+        box.innerHTML = `<span class="badge">已记录 · ${escapeHtml(out.grade)}</span>` +
+          `<div style="margin-top:10px">${answerMarkup({
+            answer: out.full_answer,
+            answer_html: out.full_answer_html,
+            url: q.url || ""
+          })}</div>`;
+        $("answer-flow").classList.add("hidden");
+        $("memorize-flow").classList.remove("hidden");
+        $("memorize-answer").classList.add("hidden");
+        $("review-actions").classList.add("hidden");
+        $("btn-review-next").classList.remove("hidden");
+        $("btn-submit").dataset.mode = "";
+      } else {
+        let html;
+        if (active.flow === "review") {
+          html = `<span class="badge">已记录 · ${escapeHtml(out.grade)}</span>` +
+            `<div style="margin-top:10px">${answerMarkup({
+              answer: out.full_answer,
+              answer_html: out.full_answer_html,
+              url: q.url || ""
+            })}</div>`;
+        } else {
+          html = `<span class="badge">模型判定 · ${escapeHtml(out.grade)}</span>` +
+            `<p style="margin-top:10px; font-weight:600;">${escapeHtml(out.comment || "")}</p>`;
+          if (out.grade !== "easy" && out.full_answer) {
+            html += `<div class="markdown-body" style="margin-top:10px">${out.full_answer_html || escapeHtml(out.full_answer)}</div>`;
+          }
+        }
+        box.innerHTML = html;
+        $("answer-flow").classList.remove("hidden");
+        $("memorize-flow").classList.add("hidden");
+        $("review-actions").classList.remove("hidden");
+        $("btn-review-next").classList.add("hidden");
+        $("ans").value = "";
+        $("ans").disabled = true;
+        $("btn-dont-know").classList.add("hidden");
+        $("btn-submit").dataset.mode = "next";
+        $("btn-submit").textContent = "下一题";
+        $("btn-submit").disabled = false;
+      }
+      bindAnswerImageFallbacks(box);
+      box.classList.remove("hidden");
+    }
+
     async function revealCurrentQuestion(q) {
       const generation = ++revealGeneration;
       const box = $("memorize-answer");
@@ -1793,7 +2174,8 @@
           session_id: session.session_id,
           question_id: q.id
         });
-        if (generation !== revealGeneration || currentQuestion()?.id !== q.id) return;
+        const current = currentQuestion();
+        if (generation !== revealGeneration || !current || current.id !== q.id) return;
         box.innerHTML = answerMarkup(out);
         bindAnswerImageFallbacks(box);
         setReviewButtonsDisabled(false);
@@ -1809,6 +2191,8 @@
       const q = currentQuestion();
       if (!q) return;
       const memorize = currentSessionMode() === "memorize";
+      const active = prepareSubmission(session.session_id, q.id, "review");
+      if (!active) return;
       let completed = false;
       $("q-err").classList.add("hidden");
       $("btn-skip").disabled = true;
@@ -1819,7 +2203,8 @@
         const out = await api("POST", "/api/review", {
           session_id: session.session_id,
           question_id: q.id,
-          result
+          result,
+          submission_id: active.submission_id
         });
         completed = true;
         clearDraft(session.session_id, q.id);
@@ -1854,7 +2239,8 @@
     }
 
     function showView(name) {
-      ["view-quiz", "view-lib", "view-edit", "view-questions", "view-question-edit"].forEach((id) => {
+      currentView = name;
+      ["view-quiz", "view-lib", "view-edit", "view-questions", "view-question-edit", "view-overview", "view-settings"].forEach((id) => {
         $(id).classList.toggle("hidden", id !== "view-" + name);
       });
       document.querySelector(".app").classList.toggle("wide", name === "questions");
@@ -1864,7 +2250,30 @@
       $("btn-question-bank").classList.toggle("active", name === "questions");
       $("btn-nav-models").classList.toggle("active", name === "lib" || name === "edit");
       $("btn-question-bank").setAttribute("aria-current", name === "questions" ? "page" : "false");
+      const tab = name === "question-edit" ? "questions" : (name === "lib" || name === "edit" ? "settings" : name);
+      ["quiz", "questions", "overview", "settings"].forEach((view) => {
+        $("mobile-nav-" + view).classList.toggle("active", view === tab);
+        $("mobile-nav-" + view).setAttribute("aria-current", view === tab ? "page" : "false");
+      });
     }
+
+    window.baguHandleBack = function () {
+      const focused = document.activeElement;
+      if (focused && ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName)) {
+        focused.blur();
+        return true;
+      }
+      const openDetails = $("view-" + currentView).querySelectorAll("details[open]");
+      if (openDetails.length) {
+        openDetails[openDetails.length - 1].open = false;
+        return true;
+      }
+      const parent = { "question-edit": "questions", edit: "lib", lib: isAndroidApp ? "settings" : "quiz" };
+      if (currentView === "quiz") return false;
+      if (currentView === "edit") $("key").value = "";
+      showView(parent[currentView] || "quiz");
+      return true;
+    };
 
     function renderStats(s) {
       $("st-total").textContent = s.total;
@@ -1875,6 +2284,11 @@
       const roundText = session.session_id ? `${t - n}/${t}` : "无";
       $("st-round").textContent = roundText;
       $("side-round-badge").textContent = session.session_id ? `${t - n}/${t}题` : `${s.due}到期`;
+      $("empty-bank-help").classList.toggle("hidden", s.total !== 0);
+      $("btn-draw").disabled = s.total === 0;
+      $("backup-session-warning").textContent = session.session_id
+        ? "本轮练习进行中。恢复前请回到练习页结束本轮。"
+        : "恢复将合并并更新题目与进度；建议先导出一份备份。";
     }
 
     function setCatsCollapsed(collapsed) {
@@ -1883,7 +2297,7 @@
       if (!toggleBtn || !collapsible) return;
       toggleBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
       collapsible.classList.toggle("collapsed", collapsed);
-      localStorage.setItem("bagu-cats-collapsed", collapsed ? "true" : "false");
+      appStorage.setItem("bagu-cats-collapsed", collapsed ? "true" : "false");
     }
 
     function renderCats(s) {
@@ -1921,6 +2335,7 @@
       $("q-err").classList.add("hidden");
       $("answer-flow").classList.remove("hidden");
       $("memorize-flow").classList.add("hidden");
+      $("memorize-answer").classList.remove("hidden");
       $("review-actions").classList.remove("hidden");
       $("btn-review-next").classList.add("hidden");
       $("btn-submit").dataset.mode = "";
@@ -1950,12 +2365,19 @@
       if (memorize) revealCurrentQuestion(q);
     }
 
+    async function refreshQuestionStats() {
+      const stats = await api("GET", "/api/stats");
+      renderStats(stats);
+      renderCats(stats);
+    }
+
     async function refresh() {
       const s = await api("GET", "/api/stats");
       session = await api("GET", "/api/session");
       renderStats(s);
       renderCats(s);
       renderQuiz();
+      await recoverActiveSubmission();
     }
 
     async function draw(n, cat) {
@@ -1972,6 +2394,9 @@
 
     async function advanceQuestion() {
       const sid = session.session_id;
+      const active = readActiveSubmission();
+      if (active) clearDraft(active.session_id, active.question_id);
+      clearActiveSubmission();
       await refresh();
       if (!session.session_id) forgetSessionMode(sid);
     }
@@ -2064,7 +2489,7 @@
           const metaEsc = String(meta).replace(/[&<>"']/g, (c) => ({
             "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
           }[c]));
-          return `<div class="lib-card${active ? " active" : ""}" data-id="${m.id}">
+          return `<div class="lib-card${active ? " active" : ""}" data-id="${m.id}" tabindex="0" role="group" aria-label="${name}，按回车选用">
             <div class="n">
               <span class="material-symbols-rounded" style="color:${active ? '#15803D' : '#64748B'};">${active ? 'verified' : 'tune'}</span>
               <span>${name}</span>
@@ -2079,6 +2504,12 @@
           </div>`;
         }).join("");
         box.querySelectorAll(".lib-card").forEach((card) => {
+          card.addEventListener("keydown", (event) => {
+            if (event.target === card && (event.key === "Enter" || event.key === " ")) {
+              event.preventDefault();
+              card.click();
+            }
+          });
           card.addEventListener("click", async () => {
             try {
               await api("POST", "/api/models/" + card.dataset.id + "/activate");
@@ -2131,7 +2562,8 @@
       root.querySelectorAll("img[data-answer-image]").forEach((img) => {
         const showFallback = () => {
           img.hidden = true;
-          const fallback = img.closest(".answer-image-link")?.querySelector("[data-image-fallback]");
+          const link = img.closest(".answer-image-link");
+          const fallback = link && link.querySelector("[data-image-fallback]");
           if (fallback) fallback.classList.remove("hidden");
         };
         img.addEventListener("error", showFallback, { once: true });
@@ -2190,6 +2622,7 @@
           try {
             await api("DELETE", "/api/questions/" + id);
             await loadQuestions(questionState.page);
+            await refreshQuestionStats();
             showQuestionMessage("success", `题目 #${id} 已成功删除。`);
           } catch (e) {
             showQuestionMessage("error", e.message);
@@ -2260,10 +2693,11 @@
     
     $("btn-skip").addEventListener("click", async () => {
       try {
-        const q = currentQuestion();
         const sid = session.session_id;
         await api("POST", "/api/skip", { session_id: session.session_id });
-        if (sid && q) clearDraft(sid, q.id);
+        clearSessionDrafts(sid);
+        const active = readActiveSubmission();
+        if (active && active.session_id === sid) clearActiveSubmission();
         forgetSessionMode(sid);
         await refresh();
       } catch (e) {
@@ -2290,6 +2724,9 @@
       const q = currentQuestion();
       const text = $("ans").value.trim();
       if (!q || !text) return;
+      if (!saveDraft()) return;
+      const active = prepareSubmission(session.session_id, q.id, "answer");
+      if (!active) return;
       $("btn-submit").disabled = true;
       $("btn-submit").textContent = "模型分析中…";
       $("btn-dont-know").disabled = true;
@@ -2301,7 +2738,8 @@
         const out = await streamAnswer({
           session_id: session.session_id,
           question_id: q.id,
-          text
+          text,
+          submission_id: active.submission_id
         }, (event) => {
           if (event.type === "delta") appendJudgeDelta(event.text || "");
         });
@@ -2343,7 +2781,7 @@
 
     // 全局快捷键：背题模式下的 1, 2, 3, 4 打分
     window.addEventListener("keydown", (e) => {
-      if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+      if (document.activeElement && ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) return;
       if (session.session_id && currentSessionMode() === "memorize" && !$("memorize-flow").classList.contains("hidden")) {
         const map = { "1": "again", "2": "hard", "3": "good", "4": "easy" };
         if (map[e.key]) {
@@ -2421,6 +2859,7 @@
         else await api("POST", "/api/questions", payload);
         showView("questions");
         await loadQuestions(editingQuestionId ? questionState.page : 1);
+        await refreshQuestionStats();
         showQuestionMessage("success", wasEditing ? "题目已更新。" : "题目已新增。");
         editingQuestionId = null;
       } catch (e) {
@@ -2442,8 +2881,9 @@
       showQuestionMessage("", "");
       try {
         if (file.size > 2 * 1024 * 1024) throw new Error("导入文件不能超过 2 MiB");
-        const result = await api("POST", "/api/questions/import", { content: await file.text() });
+        const result = await api("POST", "/api/questions/import", { content: await readTextFile(file) });
         await loadQuestions(1);
+        await refreshQuestionStats();
         showQuestionMessage("success", `导入完成：新增 ${result.inserted} 道，跳过重复 ${result.skipped} 道。`);
       } catch (e) {
         showQuestionMessage("error", e.message);
@@ -2456,6 +2896,10 @@
 
     $("btn-download-template").addEventListener("click", () => {
       const content = "\ufeffcategory,question,answer,url\nMySQL,什么是事务？,事务是一组不可分割的数据库操作,https://example.com/reference\n";
+      if (nativeStore) {
+        startNativeOperation("template", content);
+        return;
+      }
       const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
       const link = document.createElement("a");
       link.href = url;
@@ -2464,7 +2908,7 @@
       URL.revokeObjectURL(url);
     });
 
-    $("btn-back-quiz").addEventListener("click", () => showView("quiz"));
+    $("btn-back-quiz").addEventListener("click", () => showView(isAndroidApp ? "settings" : "quiz"));
     $("btn-back-lib").addEventListener("click", async () => {
       showView("lib");
       await renderLibrary();
@@ -2531,10 +2975,48 @@
       }
     });
 
+    // Android shell shares every question/model/session handler with desktop.
+    $("btn-empty-add").addEventListener("click", openQuestionNew);
+    $("btn-empty-import").addEventListener("click", () => {
+      showView("questions");
+      loadQuestions(1);
+      $("q-import-file").click();
+    });
+    window.addEventListener("bagu-native-result", handleNativeResult);
+    $("btn-backup-export").addEventListener("click", () => startNativeOperation("export"));
+    $("btn-backup-import").addEventListener("click", () => startNativeOperation("import"));
+    document.querySelectorAll("[data-mobile-view]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        showView(button.dataset.mobileView);
+        if (button.dataset.mobileView === "questions") await loadQuestions(1);
+      });
+    });
+    if (isAndroidApp) {
+      document.body.classList.add("android-app");
+      $("settings-model").appendChild($("model-bar"));
+      $("overview-categories").appendChild($("sidebar-cats-box"));
+      $("btn-back-quiz").textContent = "返回设置";
+      $("session-scope-note").textContent = "到期复习优先。题库与练习进度保存在本机，离线也能背题。";
+      renderAppInfo();
+      window.addEventListener("bagu-ime", (event) => {
+        if (event.detail && typeof event.detail.visible === "boolean") {
+          document.body.classList.toggle("keyboard-open", event.detail.visible);
+        }
+      });
+    }
+    // A layout measurement, not CSS.supports(gap), distinguishes old Flexbox from Grid.
+    const gapProbe = document.createElement("div");
+    gapProbe.style.cssText = "position:absolute;visibility:hidden;display:flex;flex-direction:column;row-gap:1px;";
+    gapProbe.appendChild(document.createElement("div"));
+    gapProbe.appendChild(document.createElement("div"));
+    document.body.appendChild(gapProbe);
+    document.body.classList.toggle("no-flex-gap", gapProbe.scrollHeight !== 1);
+    gapProbe.remove();
+
     // 初始化启动
     showView("quiz");
     setStudyMode(selectedMode);
-    const initialCatsCollapsed = localStorage.getItem("bagu-cats-collapsed") === "true";
+    const initialCatsCollapsed = appStorage.getItem("bagu-cats-collapsed") === "true";
     setCatsCollapsed(initialCatsCollapsed);
     fetchModels().catch(() => {});
     refresh().catch((e) => { $("q-err").textContent = e.message; $("q-err").classList.remove("hidden"); });

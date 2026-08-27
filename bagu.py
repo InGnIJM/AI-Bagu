@@ -2,33 +2,60 @@
 # -*- coding: utf-8 -*-
 """八股抽问系统 - SQLite + 艾宾浩斯复习调度"""
 import argparse
+import ast
+import base64
 import contextvars
 import csv
 import datetime as dt
+import hashlib
 import html as html_lib
 import io
+import ipaddress
 import json
 import logging
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
+import zipfile
+import zlib
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "bagu.db"
+DATABASE_VERSION = 1
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
 LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
 EVENT_LOGGER = logging.getLogger("bagu.events")
 EVENT_LOGGER.setLevel(logging.INFO)
 EVENT_LOGGER.propagate = False
 REQUEST_ID = contextvars.ContextVar("bagu_request_id", default=None)
+
+
+@dataclass(frozen=True)
+class AppPaths:
+    data_dir: Path
+    config_dir: Path
+    static_dir: Path
+    log_dir: Path
+
+    def __post_init__(self):
+        for name in ("data_dir", "config_dir", "static_dir", "log_dir"):
+            object.__setattr__(self, name, Path(getattr(self, name)))
+
+    @property
+    def db_path(self):
+        return self.data_dir / "bagu.db"
 
 PAGES = {
     "MySQL": "https://xiaolincoding.com/interview/mysql.html",
@@ -48,6 +75,19 @@ QUESTION_IMPORT_FIELDS = ["category", "question", "answer", "url"]
 LEGACY_QUESTION_IMPORT_FIELDS = ["category", "question", "url"]
 MAX_IMPORT_BYTES = 2 * 1024 * 1024
 MAX_IMPORT_ROWS = 5000
+BACKUP_MAX_COMPRESSED_BYTES = 20 * 1024 * 1024
+BACKUP_MAX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
+BACKUP_MAX_QUESTIONS = 10000
+BACKUP_MEMBER_NAMES = {"manifest.json", "questions.json"}
+BACKUP_QUESTION_FIELDS = {
+    "category", "question", "answer", "url", "level", "times_seen",
+    "times_right", "next_due", "last_reviewed",
+}
+BACKUP_MANIFEST_FIELDS = {
+    "format", "schema_version", "created_at", "app_version", "question_count",
+    "questions_sha256",
+}
+SQLITE_INTEGER_MAX = 2**63 - 1
 ANSWER_IMAGE_RE = re.compile(
     r"\[图片[：:](?P<alt>[^\]\r\n]*)\]\((?P<url>https?://[^\s)]+)\)", re.I
 )
@@ -60,6 +100,10 @@ MARKDOWN_LINK_RE = re.compile(
 MARKDOWN_LIST_RE = re.compile(
     r"^(?P<indent>[ \t]*)(?P<marker>[-+*]|\d+\.)[ \t]+(?P<body>.*)$"
 )
+SUBMISSION_ID_RE = re.compile(
+    r"^sub_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.I,
+)
 
 
 def get_conn(db_path=None):
@@ -69,45 +113,90 @@ def get_conn(db_path=None):
 
 
 def init_db(conn):
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS questions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT NOT NULL,
-            question TEXT NOT NULL,
-            answer TEXT DEFAULT '',
-            url TEXT DEFAULT '',
-            level INTEGER DEFAULT 0,
-            times_seen INTEGER DEFAULT 0,
-            times_right INTEGER DEFAULT 0,
-            next_due DATE,
-            last_reviewed DATE,
-            UNIQUE(category, question)
-        )"""
-    )
-    question_columns = {row[1] for row in conn.execute("PRAGMA table_info(questions)")}
-    if "answer" not in question_columns:
-        conn.execute("ALTER TABLE questions ADD COLUMN answer TEXT DEFAULT ''")
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            status TEXT NOT NULL CHECK (status IN ('open','closed')),
-            created_at TEXT NOT NULL,
-            n INTEGER NOT NULL,
-            cat TEXT
-        )"""
-    )
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS session_items (
-            session_id TEXT NOT NULL,
-            question_id INTEGER NOT NULL,
-            grade TEXT,
-            graded_at TEXT,
-            PRIMARY KEY (session_id, question_id),
-            FOREIGN KEY (session_id) REFERENCES sessions(id),
-            FOREIGN KEY (question_id) REFERENCES questions(id)
-        )"""
-    )
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version > DATABASE_VERSION:
+        raise ValueError("数据库版本高于当前程序支持的版本")
+    conn.execute("SAVEPOINT bagu_schema")
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS questions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL,
+                question TEXT NOT NULL,
+                answer TEXT DEFAULT '',
+                url TEXT DEFAULT '',
+                level INTEGER DEFAULT 0,
+                times_seen INTEGER DEFAULT 0,
+                times_right INTEGER DEFAULT 0,
+                next_due DATE,
+                last_reviewed DATE,
+                UNIQUE(category, question)
+            )"""
+        )
+        question_columns = {row[1] for row in conn.execute("PRAGMA table_info(questions)")}
+        if "answer" not in question_columns:
+            conn.execute("ALTER TABLE questions ADD COLUMN answer TEXT DEFAULT ''")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL CHECK (status IN ('open','closed')),
+                created_at TEXT NOT NULL,
+                n INTEGER NOT NULL,
+                cat TEXT
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS session_items (
+                session_id TEXT NOT NULL,
+                question_id INTEGER NOT NULL,
+                grade TEXT,
+                graded_at TEXT,
+                PRIMARY KEY (session_id, question_id),
+                FOREIGN KEY (session_id) REFERENCES sessions(id),
+                FOREIGN KEY (question_id) REFERENCES questions(id)
+            )"""
+        )
+        item_columns = {row[1] for row in conn.execute("PRAGMA table_info(session_items)")}
+        for name in ("submission_id", "result_comment", "result_full_answer"):
+            if name not in item_columns:
+                conn.execute(f"ALTER TABLE session_items ADD COLUMN {name} TEXT")
+        open_sessions = conn.execute(
+            """SELECT id FROM sessions WHERE status='open'
+               ORDER BY created_at DESC, rowid DESC"""
+        ).fetchall()
+        repaired_open_sessions = []
+        if len(open_sessions) > 1:
+            repaired_open_sessions = [row["id"] for row in open_sessions[1:]]
+            placeholders = ",".join("?" for _ in repaired_open_sessions)
+            conn.execute(
+                f"UPDATE sessions SET status='closed' WHERE id IN ({placeholders})",
+                repaired_open_sessions,
+            )
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_one_open
+               ON sessions(status) WHERE status='open'"""
+        )
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS uq_session_items_submission
+               ON session_items(submission_id) WHERE submission_id IS NOT NULL"""
+        )
+        # Every API request inspects the schema. Rewriting an unchanged version
+        # upgrades parallel readers to competing writers during page startup.
+        if version != DATABASE_VERSION:
+            conn.execute(f"PRAGMA user_version={DATABASE_VERSION}")
+        conn.execute("RELEASE SAVEPOINT bagu_schema")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT bagu_schema")
+        conn.execute("RELEASE SAVEPOINT bagu_schema")
+        raise
     conn.commit()
+    if repaired_open_sessions:
+        log_event(
+            "db.repair_multiple_open_sessions",
+            level="WARNING",
+            kept_session_id=open_sessions[0]["id"],
+            closed_count=len(repaired_open_sessions),
+        )
 
 
 def new_session_id():
@@ -120,8 +209,11 @@ def get_open_session(conn):
 
 
 def _safe_http_url(value, base_url=None):
-    candidate = urllib.parse.urljoin(base_url, value) if base_url else str(value or "")
-    parsed = urllib.parse.urlsplit(candidate)
+    try:
+        candidate = urllib.parse.urljoin(base_url, value) if base_url else str(value or "")
+        parsed = urllib.parse.urlsplit(candidate)
+    except ValueError:
+        return ""
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         return ""
     return candidate
@@ -404,7 +496,66 @@ def _question_identity(category, question):
     return category.casefold(), re.sub(r"\s+", "", normalized).casefold()
 
 
-def import_all(conn):
+def restore_code_blocks(answer, reference):
+    """Restore only uniquely matched source code; leave prose and existing fences alone."""
+    answer = answer or ""
+    if re.search(r"(?m)^\s*(?:`{3,}|~{3,})", answer):
+        return answer
+    groups = {}
+    for block in re.finditer(
+        r"(?m)^```(?P<language>[A-Za-z0-9_+-]*)\n(?P<code>[\s\S]*?)\n```[ \t]*$",
+        (reference or "").replace("\r\n", "\n"),
+    ):
+        code = block.group("code").strip("\n")
+        normalized = []
+        for line in code.splitlines():
+            value = line.strip()
+            if value or not normalized or normalized[-1]:
+                normalized.append(value)
+        if not any(normalized):
+            continue
+        fenced = f"```{block.group('language')}\n{code}\n```"
+        groups.setdefault(tuple(normalized), []).append(fenced)
+    replacements = []
+    # Match larger blocks first so a shorter example inside one isn't ambiguous.
+    for normalized, fenced_blocks in sorted(groups.items(), key=lambda item: -len(item[0])):
+        pattern = (
+            r"(?m)^[ \t]*"
+            + r"[ \t]*\r?\n[ \t]*".join(re.escape(line) for line in normalized)
+            + r"[ \t]*(?=\r?$)"
+        )
+        matches = [
+            match for match in re.finditer(pattern, answer)
+            if not any(match.start() < b and match.end() > a for a, b, _ in replacements)
+        ]
+        if len(matches) != len(fenced_blocks):
+            continue
+        for match, fenced in zip(matches, fenced_blocks):
+            replacements.append((*match.span(), fenced))
+    for start, end, fenced in sorted(replacements, reverse=True):
+        answer = answer[:start] + fenced + answer[end:]
+    return answer
+
+
+def import_all(conn, *, code_only=False):
+    if code_only:
+        if conn.in_transaction:
+            raise ValueError("修复代码格式前请先结束当前数据库事务")
+        database = next(row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main")
+        if not database:
+            raise ValueError("修复代码格式需要可备份的数据库文件")
+        path = Path(database)
+        fd, backup_path = tempfile.mkstemp(
+            prefix=f"{path.stem}.before-code-format-{dt.datetime.now():%Y%m%d-%H%M%S}-",
+            suffix=".sqlite3", dir=path.parent,
+        )
+        os.close(fd)
+        backup = sqlite3.connect(backup_path)
+        try:
+            conn.backup(backup)
+        finally:
+            backup.close()
+        print(f"[OK] 修复前备份: {backup_path}")
     total_new = 0
     total_updated = 0
     existing = {}
@@ -422,6 +573,17 @@ def import_all(conn):
             matches = existing.get(_question_identity(c, q), [])
             exact = [row for row in matches if row["category"] == c and row["question"] == q]
             old = exact[0] if len(exact) == 1 else matches[0] if len(matches) == 1 else None
+            if code_only:
+                if old:
+                    restored = restore_code_blocks(old["answer"], answer)
+                    if restored != (old["answer"] or ""):
+                        cur = conn.execute(
+                            "UPDATE questions SET answer=? WHERE id=? AND answer IS ?",
+                            (restored, old["id"], old["answer"]),
+                        )
+                        category_updated += cur.rowcount
+                        total_updated += cur.rowcount
+                continue
             if old:
                 next_answer = answer or old["answer"] or ""
                 if (
@@ -487,6 +649,303 @@ def _clean_question(data):
     if len(values["url"]) > 2048:
         raise QuestionValidationError("URL 不能超过 2048 个字符")
     return values
+
+
+def _backup_json_bytes(value):
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def export_backup(conn, app_version="0.1.0-beta.1"):
+    """Export portable question content and scheduling progress, never session data."""
+    rows = conn.execute(
+        """SELECT category, question, answer, url, level, times_seen, times_right,
+                  next_due, last_reviewed
+           FROM questions ORDER BY category, question LIMIT ?""",
+        (BACKUP_MAX_QUESTIONS + 1,),
+    ).fetchall()
+    if len(rows) > BACKUP_MAX_QUESTIONS:
+        raise ValueError("备份最多包含 10000 道题")
+    questions = [{key: row[key] for key in BACKUP_QUESTION_FIELDS} for row in rows]
+    for index, question in enumerate(questions, start=1):
+        _validate_backup_question(question, index)
+    questions.sort(key=lambda item: (item["category"], item["question"]))
+    questions_bytes = _backup_json_bytes(questions)
+    manifest = {
+        "format": "bagu-backup",
+        "schema_version": 1,
+        "created_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "app_version": app_version,
+        "question_count": len(questions),
+        "questions_sha256": hashlib.sha256(questions_bytes).hexdigest(),
+    }
+    manifest_bytes = _backup_json_bytes(manifest)
+    if len(manifest_bytes) + len(questions_bytes) > BACKUP_MAX_UNCOMPRESSED_BYTES:
+        raise ValueError("备份解压后不能超过 50 MiB")
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("manifest.json", manifest_bytes)
+        archive.writestr("questions.json", questions_bytes)
+    payload = out.getvalue()
+    # Keep export and restore on the same format/field/byte contract, before
+    # either caller can write or report a successful portable archive.
+    parse_backup(payload)
+    return payload
+
+
+def _load_backup_json(raw, name):
+    def reject_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"{name} 含重复字段")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            raw.decode("utf-8"), object_pairs_hook=reject_duplicates,
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"{name} 含非法数字")),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as e:
+        raise ValueError(f"{name} 不是有效 UTF-8 JSON") from e
+
+
+def _validate_backup_date(value, field):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise ValueError(f"{field} 必须是 YYYY-MM-DD 日期或 null")
+    try:
+        dt.date.fromisoformat(value)
+    except ValueError as e:
+        raise ValueError(f"{field} 不是有效日期") from e
+    return value
+
+
+def _validate_backup_question(item, index):
+    if not isinstance(item, dict) or set(item) != BACKUP_QUESTION_FIELDS:
+        raise ValueError(f"第 {index} 道题字段不合法")
+    try:
+        cleaned = _clean_question(item)
+    except QuestionValidationError as e:
+        raise ValueError(f"第 {index} 道题：{e}") from e
+    progress = {}
+    for field in ("level", "times_seen", "times_right"):
+        value = item[field]
+        if type(value) is not int or not 0 <= value <= SQLITE_INTEGER_MAX:
+            raise ValueError(f"第 {index} 道题 {field} 必须是非负整数")
+        progress[field] = value
+    if progress["level"] > 3:
+        raise ValueError(f"第 {index} 道题 level 超出范围")
+    if progress["times_right"] > progress["times_seen"]:
+        raise ValueError(f"第 {index} 道题 times_right 不能大于 times_seen")
+    cleaned.update(progress)
+    cleaned["next_due"] = _validate_backup_date(item["next_due"], "next_due")
+    cleaned["last_reviewed"] = _validate_backup_date(item["last_reviewed"], "last_reviewed")
+    return cleaned
+
+
+def parse_backup(data):
+    """Fully validate a .bagu-backup archive before it can mutate a database."""
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("备份必须是 ZIP 字节数据")
+    raw = bytes(data)
+    if len(raw) > BACKUP_MAX_COMPRESSED_BYTES:
+        raise ValueError("备份压缩文件不能超过 20 MiB")
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw), "r") as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if len(infos) != len(BACKUP_MEMBER_NAMES) or set(names) != BACKUP_MEMBER_NAMES:
+                raise ValueError("备份只能包含 manifest.json 和 questions.json")
+            if len(set(names)) != len(names):
+                raise ValueError("备份 ZIP 成员不能重复")
+            if any(info.flag_bits & 0x1 for info in infos):
+                raise ValueError("不支持加密备份")
+            if any("/" in name or "\\" in name or name in {".", ".."} for name in names):
+                raise ValueError("备份 ZIP 路径不合法")
+            if sum(info.file_size for info in infos) > BACKUP_MAX_UNCOMPRESSED_BYTES:
+                raise ValueError("备份解压后不能超过 50 MiB")
+            manifest_raw = archive.read("manifest.json")
+            questions_raw = archive.read("questions.json")
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, zlib.error) as e:
+        raise ValueError("备份不是有效 ZIP 文件") from e
+    if len(manifest_raw) + len(questions_raw) > BACKUP_MAX_UNCOMPRESSED_BYTES:
+        raise ValueError("备份解压后不能超过 50 MiB")
+    manifest = _load_backup_json(manifest_raw, "manifest.json")
+    questions = _load_backup_json(questions_raw, "questions.json")
+    if not isinstance(manifest, dict) or set(manifest) != BACKUP_MANIFEST_FIELDS:
+        raise ValueError("manifest.json 字段不合法")
+    if manifest["format"] != "bagu-backup" or type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1:
+        raise ValueError("不支持的备份格式或 schema_version")
+    if not isinstance(manifest["app_version"], str) or not manifest["app_version"].strip() or len(manifest["app_version"]) > 100:
+        raise ValueError("manifest app_version 不合法")
+    if not isinstance(manifest["created_at"], str):
+        raise ValueError("manifest created_at 不合法")
+    try:
+        dt.datetime.strptime(manifest["created_at"], "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as e:
+        raise ValueError("manifest created_at 必须是 UTC 时间") from e
+    if type(manifest["question_count"]) is not int or not 0 <= manifest["question_count"] <= BACKUP_MAX_QUESTIONS:
+        raise ValueError("manifest question_count 不合法")
+    digest = manifest["questions_sha256"]
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("manifest questions_sha256 不合法")
+    if hashlib.sha256(questions_raw).hexdigest() != digest:
+        raise ValueError("questions.json 哈希不匹配")
+    if not isinstance(questions, list) or len(questions) != manifest["question_count"]:
+        raise ValueError("questions.json 题目数量不匹配")
+    if len(questions) > BACKUP_MAX_QUESTIONS:
+        raise ValueError("一次最多恢复 10000 道题")
+    validated = []
+    identities = set()
+    for index, item in enumerate(questions, start=1):
+        cleaned = _validate_backup_question(item, index)
+        identity = (cleaned["category"], cleaned["question"])
+        if identity in identities:
+            raise ValueError("备份中存在重复的分类和题目")
+        identities.add(identity)
+        validated.append(cleaned)
+    return validated
+
+
+def _backup_open_session_error(conn):
+    session = get_open_session(conn)
+    if not session:
+        return None
+    pending = conn.execute(
+        "SELECT question_id FROM session_items WHERE session_id=? AND grade IS NULL ORDER BY question_id",
+        (session["id"],),
+    ).fetchall()
+    return SessionOpenError(session["id"], [row["question_id"] for row in pending])
+
+
+def restore_backup(conn, data):
+    """Merge a fully validated backup without changing sessions or analysis history."""
+    questions = parse_backup(data)
+    blocked = _backup_open_session_error(conn)
+    if blocked:
+        raise blocked
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        blocked = _backup_open_session_error(conn)
+        if blocked:
+            raise blocked
+        added = 0
+        updated = 0
+        for item in questions:
+            existing = conn.execute(
+                "SELECT id FROM questions WHERE category=? AND question=?",
+                (item["category"], item["question"]),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """UPDATE questions SET answer=?, url=?, level=?, times_seen=?, times_right=?,
+                       next_due=?, last_reviewed=? WHERE id=?""",
+                    (
+                        item["answer"], item["url"], item["level"], item["times_seen"],
+                        item["times_right"], item["next_due"], item["last_reviewed"], existing["id"],
+                    ),
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    """INSERT INTO questions(category, question, answer, url, level, times_seen,
+                       times_right, next_due, last_reviewed) VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (
+                        item["category"], item["question"], item["answer"], item["url"], item["level"],
+                        item["times_seen"], item["times_right"], item["next_due"], item["last_reviewed"],
+                    ),
+                )
+                added += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {"added": added, "updated": updated, "total": len(questions)}
+
+
+def create_seed_database(source_path, destination_path):
+    """Build a clean initialized database from a read-only source question bank."""
+    source = Path(source_path).resolve()
+    destination = Path(destination_path).resolve()
+    if source == destination:
+        raise ValueError("种子输出不能覆盖源数据库")
+    source_uri = source.as_uri() + "?mode=ro"
+    source_conn = sqlite3.connect(source_uri, uri=True)
+    source_conn.row_factory = sqlite3.Row
+    try:
+        columns = {row[1] for row in source_conn.execute("PRAGMA table_info(questions)")}
+        if not {"category", "question", "url"} <= columns:
+            raise ValueError("源数据库缺少 questions 内容字段")
+        answer = "answer" if "answer" in columns else "'' AS answer"
+        source_rows = source_conn.execute(
+            f"SELECT category, question, {answer}, url FROM questions ORDER BY category, question"
+        ).fetchall()
+        questions = [_clean_question(dict(row)) for row in source_rows]
+    finally:
+        source_conn.close()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        seed_conn = get_conn(temporary)
+        try:
+            init_db(seed_conn)
+            for item in questions:
+                seed_conn.execute(
+                    "INSERT INTO questions(category, question, answer, url) VALUES(?,?,?,?)",
+                    (item["category"], item["question"], item["answer"], item["url"]),
+                )
+            seed_conn.commit()
+        finally:
+            seed_conn.close()
+        os.replace(temporary, destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return len(questions)
+
+
+def prepare_mobile_database(db_path, seed_path=None):
+    """Create a mobile database once; subsequent launches only migrate it."""
+    database = Path(db_path)
+    if database.exists():
+        conn = get_conn(database)
+        try:
+            init_db(conn)
+        finally:
+            conn.close()
+        return
+    database.parent.mkdir(parents=True, exist_ok=True)
+    if seed_path is not None:
+        seed = Path(seed_path)
+        if not seed.is_file():
+            raise ValueError("种子数据库不存在")
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{database.name}.", suffix=".tmp", dir=database.parent)
+        os.close(fd)
+        temporary = Path(temporary_name)
+        try:
+            shutil.copyfile(seed, temporary)
+            seed_conn = get_conn(temporary)
+            try:
+                init_db(seed_conn)
+            finally:
+                seed_conn.close()
+            os.replace(temporary, database)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+    conn = get_conn(database)
+    try:
+        init_db(conn)
+    finally:
+        conn.close()
 
 
 def parse_question_csv(text):
@@ -607,6 +1066,28 @@ def _render_inline_markdown(value):
             if not source.startswith(marker, index):
                 continue
             end = source.find(marker, index + len(marker))
+            if marker == "_":
+                before = source[index - 1] if index else ""
+                after = source[index + 1 : index + 2]
+                if (
+                    before.isalnum() or before == "_"
+                    or not after or after.isspace() or after == "_"
+                ):
+                    continue
+                while end != -1:
+                    following = source[end + 1 : end + 2]
+                    backslashes = 0
+                    cursor = end - 1
+                    while cursor >= 0 and source[cursor] == "\\":
+                        backslashes += 1
+                        cursor -= 1
+                    if (
+                        not source[end - 1].isspace()
+                        and not following.isalnum() and following != "_"
+                        and backslashes % 2 == 0
+                    ):
+                        break
+                    end = source.find(marker, end + 1)
             if end <= index + len(marker):
                 continue
             inner = _render_inline_markdown(source[index + len(marker) : end])
@@ -722,6 +1203,35 @@ def _is_standalone_safe_image(line):
     return match if match and _safe_http_url(match.group("url")) else None
 
 
+def _legacy_python_code_end(lines, start):
+    """兼容旧抓题丢失围栏的简单 Python 示例；只解析语法，绝不执行。
+
+    必须以 import/from 起始，并至少包含两行可识别语句。仅接纳逐行
+    完整的导入、赋值和调用；遇到正文立即停止，末尾标题不作为注释吞入。
+    """
+    if not re.match(r"^(?:import|from)\s+", lines[start].strip()):
+        return None
+    end = start
+    statements = 0
+    for index in range(start, len(lines)):
+        stripped = lines[index].strip()
+        if not stripped or (stripped.startswith("#") and not stripped.startswith("##")):
+            continue
+        try:
+            nodes = ast.parse(stripped).body
+        except (SyntaxError, ValueError, RecursionError):
+            break
+        if not nodes or not all(
+            isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign, ast.AugAssign))
+            or (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call))
+            for node in nodes
+        ):
+            break
+        statements += 1
+        end = index + 1
+    return end if statements >= 2 else None
+
+
 def _is_markdown_block_start(lines, index):
     line = lines[index]
     stripped = line.strip()
@@ -734,6 +1244,8 @@ def _is_markdown_block_start(lines, index):
     if re.fullmatch(r"(?:-{3,}|\*{3,}|_{3,})", stripped):
         return True
     if _is_standalone_safe_image(line):
+        return True
+    if _legacy_python_code_end(lines, index) is not None:
         return True
     return (
         "|" in line
@@ -763,6 +1275,12 @@ def _render_markdown_blocks(source):
             class_attr = f' class="language-{language}"' if language else ""
             code = html_lib.escape("\n".join(code_lines), quote=False)
             blocks.append(f"<pre><code{class_attr}>{code}</code></pre>")
+            continue
+        legacy_end = _legacy_python_code_end(lines, index)
+        if legacy_end is not None:
+            code = html_lib.escape("\n".join(lines[index:legacy_end]), quote=False)
+            blocks.append(f'<pre><code class="language-python">{code}</code></pre>')
+            index = legacy_end
             continue
         heading = re.match(r"^(#{1,6})\s+(.+?)\s*#*$", stripped)
         if heading:
@@ -948,55 +1466,112 @@ class SessionOpenError(Exception):
 
 def draw(conn, n=5, cat=None):
     """优先到期复习题，不足则补新题。成功返回 (session_id, rows)。"""
-    open_s = get_open_session(conn)
-    if open_s:
-        pending = [
-            r[0]
-            for r in conn.execute(
-                "SELECT question_id FROM session_items WHERE session_id=? AND grade IS NULL",
-                (open_s["id"],),
-            )
-        ]
-        raise SessionOpenError(open_s["id"], pending)
-    today = dt.date.today().isoformat()
-    where = "WHERE (next_due IS NULL OR next_due <= ?)"
-    params = [today]
-    if cat:
-        where += " AND category = ?"
-        params.append(cat)
-    rows = conn.execute(
-        f"""SELECT * FROM questions {where}
-            ORDER BY (next_due IS NOT NULL) DESC,
-                     CASE WHEN next_due IS NULL THEN RANDOM() ELSE 0 END
-            LIMIT ?""",
-        params + [n],
-    ).fetchall()
-    if not rows:
-        return None, []
-    sid = new_session_id()
-    conn.execute(
-        "INSERT INTO sessions(id, status, created_at, n, cat) VALUES (?,?,?,?,?)",
-        (sid, "open", dt.datetime.now().isoformat(timespec="seconds"), n, cat),
-    )
-    for r in rows:
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        open_s = get_open_session(conn)
+        if open_s:
+            pending = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT question_id FROM session_items WHERE session_id=? AND grade IS NULL",
+                    (open_s["id"],),
+                )
+            ]
+            raise SessionOpenError(open_s["id"], pending)
+        today = dt.date.today().isoformat()
+        where = "WHERE (next_due IS NULL OR next_due <= ?)"
+        params = [today]
+        if cat:
+            where += " AND category = ?"
+            params.append(cat)
+        rows = conn.execute(
+            f"""SELECT * FROM questions {where}
+                ORDER BY (next_due IS NOT NULL) DESC,
+                         CASE WHEN next_due IS NULL THEN RANDOM() ELSE 0 END
+                LIMIT ?""",
+            params + [n],
+        ).fetchall()
+        if not rows:
+            conn.commit()
+            return None, []
+        sid = new_session_id()
         conn.execute(
-            "INSERT INTO session_items(session_id, question_id) VALUES (?,?)",
-            (sid, r["id"]),
+            "INSERT INTO sessions(id, status, created_at, n, cat) VALUES (?,?,?,?,?)",
+            (sid, "open", dt.datetime.now().isoformat(timespec="seconds"), n, cat),
         )
-    conn.commit()
-    return sid, rows
+        for r in rows:
+            conn.execute(
+                "INSERT INTO session_items(session_id, question_id) VALUES (?,?)",
+                (sid, r["id"]),
+            )
+        conn.commit()
+        return sid, rows
+    except SessionOpenError:
+        conn.rollback()
+        raise
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        open_s = get_open_session(conn)
+        if open_s:
+            pending = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT question_id FROM session_items WHERE session_id=? AND grade IS NULL",
+                    (open_s["id"],),
+                )
+            ]
+            raise SessionOpenError(open_s["id"], pending) from None
+        raise
+    except Exception:
+        conn.rollback()
+        raise
 
 
 class GradeRejected(Exception):
     pass
 
 
-def grade(conn, session_id, qid, result):
-    """result: again/hard/good/easy。同一会话同一题只认第一次。"""
-    if result not in GRADE_INTERVALS:
-        raise ValueError(f"未知评级: {result}")
+def _normalize_submission_id(value):
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise ValueError("submission_id 格式无效")
+    value = value.strip().lower()
+    if not SUBMISSION_ID_RE.fullmatch(value):
+        raise ValueError("submission_id 格式无效")
+    return value
+
+
+def _submission_result_from_item(item):
+    full_answer = item["result_full_answer"] or ""
+    return {
+        "submission_id": item["submission_id"],
+        "grade": item["grade"],
+        "comment": item["result_comment"] or "",
+        "full_answer": full_answer,
+        "full_answer_html": render_answer_html(full_answer),
+    }
+
+
+def _find_submission_item(conn, submission_id):
+    if not submission_id:
+        return None
+    return conn.execute(
+        "SELECT * FROM session_items WHERE submission_id=?", (submission_id,)
+    ).fetchone()
+
+
+def _preflight_grade(conn, session_id, qid, submission_id=None):
+    """模型调用前快速拒绝无效目标；最终写入仍由事务内校验决定。"""
+    submission_id = _normalize_submission_id(submission_id)
+    existing = _find_submission_item(conn, submission_id)
+    if existing:
+        if existing["session_id"] != session_id or existing["question_id"] != qid:
+            raise ValueError("submission_id 已用于其他题目")
+        if existing["grade"] is not None:
+            return _submission_result_from_item(existing)
     sess = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
-    if not sess or sess["status"] != "open":
+    if not sess:
         raise GradeRejected(f"会话不可用: {session_id}")
     item = conn.execute(
         "SELECT * FROM session_items WHERE session_id=? AND question_id=?",
@@ -1006,36 +1581,131 @@ def grade(conn, session_id, qid, result):
         raise GradeRejected(f"题目不属于本轮: id={qid}")
     if item["grade"] is not None:
         raise GradeRejected(f"本题已评判: id={qid}")
-    row = conn.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
-    if not row:
-        raise LookupError(f"题目不存在: id={qid}")
-    today = dt.date.today()
-    if result == "again":
-        new_level = 0
-        interval = 1
-    else:
-        new_level = min(row["level"] + 1, 3)
-        interval = GRADE_INTERVALS[result] * LEVEL_MULT[new_level]
-    next_due = (today + dt.timedelta(days=interval)).isoformat()
-    right = 1 if result in ("good", "easy") else 0
-    conn.execute(
-        """UPDATE questions SET level=?, times_seen=times_seen+1,
-           times_right=times_right+?, next_due=?, last_reviewed=?
-           WHERE id=?""",
-        (new_level, right, next_due, today.isoformat(), qid),
-    )
-    conn.execute(
-        "UPDATE session_items SET grade=?, graded_at=? WHERE session_id=? AND question_id=?",
-        (result, today.isoformat(), session_id, qid),
-    )
-    left = conn.execute(
-        "SELECT COUNT(*) c FROM session_items WHERE session_id=? AND grade IS NULL",
-        (session_id,),
-    ).fetchone()[0]
-    if left == 0:
-        conn.execute("UPDATE sessions SET status='closed' WHERE id=?", (session_id,))
-    conn.commit()
-    return next_due
+    if sess["status"] != "open":
+        raise GradeRejected(f"会话不可用: {session_id}")
+    return None
+
+
+def _record_grade(
+    conn,
+    session_id,
+    qid,
+    result,
+    *,
+    submission_id=None,
+    comment="",
+    full_answer="",
+    allow_replay=False,
+):
+    if result not in GRADE_INTERVALS:
+        raise ValueError(f"未知评级: {result}")
+    submission_id = _normalize_submission_id(submission_id)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = _find_submission_item(conn, submission_id)
+        if existing:
+            if existing["session_id"] != session_id or existing["question_id"] != qid:
+                raise ValueError("submission_id 已用于其他题目")
+            if existing["grade"] is not None and allow_replay:
+                row = conn.execute(
+                    "SELECT next_due FROM questions WHERE id=?", (qid,)
+                ).fetchone()
+                conn.commit()
+                return {
+                    "next_due": row["next_due"] if row else None,
+                    "replayed": True,
+                    "result": _submission_result_from_item(existing),
+                }
+        sess = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        if not sess:
+            raise GradeRejected(f"会话不可用: {session_id}")
+        item = conn.execute(
+            "SELECT * FROM session_items WHERE session_id=? AND question_id=?",
+            (session_id, qid),
+        ).fetchone()
+        if not item:
+            raise GradeRejected(f"题目不属于本轮: id={qid}")
+        if item["grade"] is not None:
+            if (
+                allow_replay
+                and submission_id
+                and item["submission_id"] == submission_id
+            ):
+                row = conn.execute(
+                    "SELECT next_due FROM questions WHERE id=?", (qid,)
+                ).fetchone()
+                conn.commit()
+                return {
+                    "next_due": row["next_due"] if row else None,
+                    "replayed": True,
+                    "result": _submission_result_from_item(item),
+                }
+            raise GradeRejected(f"本题已评判: id={qid}")
+        if sess["status"] != "open":
+            raise GradeRejected(f"会话不可用: {session_id}")
+        row = conn.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
+        if not row:
+            raise LookupError(f"题目不存在: id={qid}")
+        today = dt.date.today()
+        if result == "again":
+            new_level = 0
+            interval = 1
+        else:
+            new_level = min(row["level"] + 1, 3)
+            interval = GRADE_INTERVALS[result] * LEVEL_MULT[new_level]
+        next_due = (today + dt.timedelta(days=interval)).isoformat()
+        right = 1 if result in ("good", "easy") else 0
+        updated = conn.execute(
+            """UPDATE session_items
+               SET grade=?, graded_at=?, submission_id=?,
+                   result_comment=?, result_full_answer=?
+               WHERE session_id=? AND question_id=? AND grade IS NULL""",
+            (
+                result,
+                today.isoformat(),
+                submission_id,
+                comment or "",
+                full_answer or "",
+                session_id,
+                qid,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise GradeRejected(f"本题已评判: id={qid}")
+        conn.execute(
+            """UPDATE questions SET level=?, times_seen=times_seen+1,
+               times_right=times_right+?, next_due=?, last_reviewed=?
+               WHERE id=?""",
+            (new_level, right, next_due, today.isoformat(), qid),
+        )
+        left = conn.execute(
+            "SELECT COUNT(*) c FROM session_items WHERE session_id=? AND grade IS NULL",
+            (session_id,),
+        ).fetchone()[0]
+        if left == 0:
+            conn.execute("UPDATE sessions SET status='closed' WHERE id=?", (session_id,))
+        # Rendering may fail too: prepare the response before committing progress.
+        response = {
+            "next_due": next_due,
+            "replayed": False,
+            "result": {
+                "submission_id": submission_id,
+                "grade": result,
+                "comment": comment or "",
+                "full_answer": full_answer or "",
+                "full_answer_html": render_answer_html(full_answer or ""),
+            },
+        }
+        conn.commit()
+        return response
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def grade(conn, session_id, qid, result):
+    """result: again/hard/good/easy。同一会话同一题只认第一次。"""
+    return _record_grade(conn, session_id, qid, result)["next_due"]
 
 
 def reveal_answer(conn, session_id, qid):
@@ -1065,11 +1735,34 @@ def reveal_answer(conn, session_id, qid):
     }
 
 
-def review_question(conn, session_id, qid, result):
+def review_question(conn, session_id, qid, result, submission_id=None):
     """无需模型直接自评，并返回题库答案。"""
+    submission_id = _normalize_submission_id(submission_id)
+    cached = _preflight_grade(conn, session_id, qid, submission_id)
+    if cached:
+        row = conn.execute("SELECT url FROM questions WHERE id=?", (qid,)).fetchone()
+        return {
+            "question_id": qid,
+            "answer": cached["full_answer"],
+            "answer_html": cached["full_answer_html"],
+            "url": (row["url"] if row else "") or "",
+            "next_due": conn.execute(
+                "SELECT next_due FROM questions WHERE id=?", (qid,)
+            ).fetchone()[0],
+            **cached,
+        }
     payload = reveal_answer(conn, session_id, qid)
-    payload["next_due"] = grade(conn, session_id, qid, result)
-    payload["grade"] = result
+    recorded = _record_grade(
+        conn,
+        session_id,
+        qid,
+        result,
+        submission_id=submission_id,
+        full_answer=payload["answer"],
+        allow_replay=bool(submission_id),
+    )
+    payload["next_due"] = recorded["next_due"]
+    payload.update(recorded["result"])
     return payload
 
 
@@ -1082,15 +1775,22 @@ class JudgeError(Exception):
 
 
 def skip_session(conn, session_id=None):
-    if session_id:
-        sess = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
-    else:
-        sess = get_open_session(conn)
-    if not sess or sess["status"] != "open":
-        raise SkipRejected("没有进行中的会话")
-    conn.execute("UPDATE sessions SET status='closed' WHERE id=?", (sess["id"],))
-    conn.commit()
-    return sess["id"]
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if session_id:
+            sess = conn.execute(
+                "SELECT * FROM sessions WHERE id=?", (session_id,)
+            ).fetchone()
+        else:
+            sess = get_open_session(conn)
+        if not sess or sess["status"] != "open":
+            raise SkipRejected("没有进行中的会话")
+        conn.execute("UPDATE sessions SET status='closed' WHERE id=?", (sess["id"],))
+        conn.commit()
+        return sess["id"]
+    except Exception:
+        conn.rollback()
+        raise
 
 
 PROVIDER_PRESETS = {
@@ -1187,9 +1887,9 @@ def _settings_root(root=None):
     return Path(root) if root else Path(__file__).parent
 
 
-def configure_logging(root=None):
+def configure_logging(root=None, *, log_dir=None):
     """配置结构化事件日志，同时写入 stderr 与轮转文件。"""
-    log_dir = _settings_root(root) / ".superpowers"
+    log_dir = Path(log_dir) if log_dir is not None else _settings_root(root) / ".superpowers"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "bagu-server.log"
     for handler in list(EVENT_LOGGER.handlers):
@@ -1382,6 +2082,7 @@ def _draft_settings(body, root=None):
         src = next((m for m in s["models"] if m["id"] == body["id"]), None)
         key = (src or {}).get("api_key") or ""
     return {
+        "provider": body.get("provider") or "",
         "model": body.get("model") or "",
         "base_url": body.get("base_url") or "",
         "api_key": key,
@@ -1392,8 +2093,12 @@ def test_model_draft(body, root=None, chat_fn=None):
     settings = _draft_settings(body, root=root)
     if not settings["api_key"]:
         raise JudgeError("未配置模型")
-    fn = chat_fn or _openai_chat
-    fn("ping", settings)
+    if chat_fn is not None:
+        chat_fn("ping", settings)
+        return
+    content = "".join(_openai_chat_stream("ping", settings))
+    if not content.strip():
+        raise JudgeError("模型未返回内容")
 
 
 def create_model(body, root=None, chat_fn=None):
@@ -1507,37 +2212,140 @@ def parse_judge_output(text):
     return {"grade": grade_v, "comment": comment, "full_answer": full}
 
 
-def _openai_chat(prompt, settings):
-    key = (settings or {}).get("api_key") or ""
+def _model_compat_profile(settings):
+    """返回模型请求兼容档案，供后续按模型精确扩展。"""
+    return {"name": "default", "temperature": None}
+
+
+def _build_openai_request(prompt, settings, *, stream):
+    """构造同步与流式 OpenAI 兼容请求。"""
+    settings = settings or {}
+    key = settings.get("api_key") or ""
     if not key:
         raise JudgeError("未配置模型")
+    model = settings.get("model") or "deepseek-chat"
+    profile = _model_compat_profile(settings)
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    temperature = profile.get("temperature")
+    if isinstance(temperature, (int, float)) and not isinstance(temperature, bool):
+        body["temperature"] = temperature
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {key}",
+    }
+    if stream:
+        body["stream"] = True
+        headers["Accept"] = "text/event-stream"
+    url = (settings.get("base_url") or "").rstrip("/") + "/chat/completions"
+    return urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+
+
+def _validate_finish_reason(finish_reason):
+    if finish_reason in (None, "stop"):
+        return
+    if finish_reason == "length":
+        raise JudgeError("模型输出被截断")
+    if finish_reason == "content_filter":
+        raise JudgeError("模型回答被内容过滤")
+    if finish_reason in {"tool_calls", "function_call"}:
+        raise JudgeError("模型返回了不支持的工具调用")
+    raise JudgeError("模型返回未知结束原因")
+
+
+def _parse_chat_response(payload):
+    """严格解析一次性聊天响应，不把空内容或拒绝视为成功。"""
+    if not isinstance(payload, dict):
+        raise JudgeError("模型返回无法解析")
+    if payload.get("error"):
+        error = payload["error"]
+        message = error.get("message") if isinstance(error, dict) else str(error)
+        raise JudgeError(f"模型调用失败: {message}")
+    try:
+        choice = payload["choices"][0]
+        message = choice["message"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise JudgeError("模型返回无法解析") from e
+    if not isinstance(choice, dict) or not isinstance(message, dict):
+        raise JudgeError("模型返回无法解析")
+    if message.get("refusal"):
+        raise JudgeError("模型拒绝回答")
+    finish_reason = choice.get("finish_reason")
+    _validate_finish_reason(finish_reason)
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise JudgeError("模型未返回内容")
+    return {"content": content, "finish_reason": finish_reason}
+
+
+def _parse_stream_chunk(payload):
+    """解析单个 SSE 数据块，隐藏推理内容只返回诊断计数所需文本。"""
+    if not isinstance(payload, dict):
+        raise JudgeError("模型流式返回无法解析")
+    if payload.get("error"):
+        error = payload["error"]
+        message = error.get("message") if isinstance(error, dict) else str(error)
+        raise JudgeError(f"模型调用失败: {message}")
+    choices = payload.get("choices")
+    if choices == [] and payload.get("usage") is not None:
+        return {
+            "content": "",
+            "reasoning": "",
+            "finish_reason": None,
+            "usage_only": True,
+        }
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise JudgeError("模型流式返回无法解析")
+    choice = choices[0]
+    delta = choice.get("delta")
+    if not isinstance(delta, dict):
+        raise JudgeError("模型流式返回无法解析")
+    if delta.get("refusal") or choice.get("refusal"):
+        raise JudgeError("模型拒绝回答")
+    finish_reason = choice.get("finish_reason")
+    _validate_finish_reason(finish_reason)
+    content = delta.get("content")
+    if content is None:
+        content = ""
+    elif not isinstance(content, str):
+        raise JudgeError("模型流式返回无法解析")
+    reasoning = delta.get("reasoning_content")
+    if not isinstance(reasoning, str) or not reasoning:
+        reasoning = delta.get("reasoning")
+    if reasoning is None:
+        reasoning = ""
+    elif not isinstance(reasoning, str):
+        raise JudgeError("模型流式返回无法解析")
+    return {
+        "content": content,
+        "reasoning": reasoning,
+        "finish_reason": finish_reason,
+        "usage_only": False,
+    }
+
+
+def _openai_chat(prompt, settings):
+    settings = settings or {}
     started_at = time.perf_counter()
     model = settings.get("model") or "deepseek-chat"
     provider = settings.get("provider") or ""
+    compat_profile = _model_compat_profile(settings)["name"]
     log_event(
         "model.request",
         provider=provider,
         model=model,
         stream=False,
+        compat_profile=compat_profile,
         prompt_chars=len(prompt),
     )
-    url = (settings.get("base_url") or "").rstrip("/") + "/chat/completions"
-    body = json.dumps(
-        {
-            "model": model,
-            "temperature": 0.2,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {key}",
-        },
-        method="POST",
-    )
+    req = _build_openai_request(prompt, settings, stream=False)
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             log_event(
@@ -1547,7 +2355,7 @@ def _openai_chat(prompt, settings):
                 stream=False,
                 duration_ms=_elapsed_ms(started_at),
             )
-            payload = json.loads(resp.read().decode("utf-8", "ignore"))
+            raw_payload = resp.read().decode("utf-8", "ignore")
     except Exception as e:  # noqa: BLE001
         log_event(
             "model.error",
@@ -1560,8 +2368,20 @@ def _openai_chat(prompt, settings):
         )
         raise JudgeError(f"模型调用失败: {e}") from e
     try:
-        content = payload["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as e:
+        payload = json.loads(raw_payload)
+        parsed = _parse_chat_response(payload)
+    except JudgeError:
+        log_event(
+            "model.error",
+            level="ERROR",
+            provider=provider,
+            model=model,
+            stream=False,
+            duration_ms=_elapsed_ms(started_at),
+            error_type="ResponseParseError",
+        )
+        raise
+    except (json.JSONDecodeError, TypeError) as e:
         log_event(
             "model.error",
             level="ERROR",
@@ -1572,57 +2392,44 @@ def _openai_chat(prompt, settings):
             error_type="ResponseParseError",
         )
         raise JudgeError("模型返回无法解析") from e
+    content = parsed["content"]
     log_event(
         "model.done",
         provider=provider,
         model=model,
         stream=False,
         duration_ms=_elapsed_ms(started_at),
-        content_chars=len(content) if isinstance(content, str) else 0,
+        content_chars=len(content),
+        finish_reason=parsed["finish_reason"],
     )
     return content
 
 
 def _openai_chat_stream(prompt, settings):
     """调用 OpenAI 兼容 SSE 接口，逐段产出文本。"""
-    key = (settings or {}).get("api_key") or ""
-    if not key:
-        raise JudgeError("未配置模型")
+    settings = settings or {}
     started_at = time.perf_counter()
     model = settings.get("model") or "deepseek-chat"
     provider = settings.get("provider") or ""
+    compat_profile = _model_compat_profile(settings)["name"]
     reasoning_chunks = 0
     reasoning_chars = 0
     content_chunks = 0
     content_chars = 0
+    saw_visible_content = False
     first_reasoning_logged = False
     first_content_logged = False
+    finish_reason = None
+    saw_done = False
     log_event(
         "model.request",
         provider=provider,
         model=model,
         stream=True,
+        compat_profile=compat_profile,
         prompt_chars=len(prompt),
     )
-    url = (settings.get("base_url") or "").rstrip("/") + "/chat/completions"
-    body = json.dumps(
-        {
-            "model": model,
-            "temperature": 0.2,
-            "stream": True,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "Authorization": f"Bearer {key}",
-        },
-        method="POST",
-    )
+    req = _build_openai_request(prompt, settings, stream=True)
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             log_event(
@@ -1644,27 +2451,34 @@ def _openai_chat_stream(prompt, settings):
                 saw_sse = True
                 data = line[5:].strip()
                 if data == "[DONE]":
+                    saw_done = True
                     break
                 try:
                     payload = json.loads(data)
-                    if payload.get("error"):
-                        error = payload["error"]
-                        message = error.get("message") if isinstance(error, dict) else str(error)
-                        raise JudgeError(f"模型调用失败: {message}")
-                    choices = payload.get("choices")
-                    if choices == [] and payload.get("usage") is not None:
-                        continue
-                    if not isinstance(choices, list) or not choices:
-                        raise KeyError("choices")
-                    delta = choices[0].get("delta")
-                    if not isinstance(delta, dict):
-                        raise KeyError("delta")
-                    reasoning = delta.get("reasoning_content")
-                    content = delta.get("content")
+                    choices = payload.get("choices") if isinstance(payload, dict) else None
+                    if choices and isinstance(choices[0], dict):
+                        candidate = choices[0].get("finish_reason")
+                        if candidate in {
+                            "stop",
+                            "length",
+                            "content_filter",
+                            "tool_calls",
+                            "function_call",
+                        }:
+                            finish_reason = candidate
+                        elif candidate is not None:
+                            finish_reason = "unknown"
+                    parsed = _parse_stream_chunk(payload)
                 except JudgeError:
                     raise
-                except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+                except (json.JSONDecodeError, TypeError) as e:
                     raise JudgeError("模型流式返回无法解析") from e
+                if parsed["usage_only"]:
+                    continue
+                reasoning = parsed["reasoning"]
+                content = parsed["content"]
+                if parsed["finish_reason"] is not None:
+                    finish_reason = parsed["finish_reason"]
                 if isinstance(reasoning, str) and reasoning:
                     reasoning_chunks += 1
                     reasoning_chars += len(reasoning)
@@ -1679,6 +2493,8 @@ def _openai_chat_stream(prompt, settings):
                 if isinstance(content, str) and content:
                     content_chunks += 1
                     content_chars += len(content)
+                    if content.strip():
+                        saw_visible_content = True
                     if not first_content_logged:
                         first_content_logged = True
                         log_event(
@@ -1691,21 +2507,29 @@ def _openai_chat_stream(prompt, settings):
             if not saw_sse and fallback_lines:
                 try:
                     payload = json.loads("".join(fallback_lines))
-                    content = payload["choices"][0]["message"]["content"]
-                except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+                    parsed = _parse_chat_response(payload)
+                except JudgeError:
+                    raise
+                except (json.JSONDecodeError, TypeError) as e:
                     raise JudgeError("模型流式返回无法解析") from e
-                if isinstance(content, str) and content:
-                    content_chunks += 1
-                    content_chars += len(content)
-                    if not first_content_logged:
-                        first_content_logged = True
-                        log_event(
-                            "model.first_content",
-                            provider=provider,
-                            model=model,
-                            duration_ms=_elapsed_ms(started_at),
-                        )
-                    yield content
+                content = parsed["content"]
+                finish_reason = parsed["finish_reason"]
+                content_chunks += 1
+                content_chars += len(content)
+                saw_visible_content = True
+                if not first_content_logged:
+                    first_content_logged = True
+                    log_event(
+                        "model.first_content",
+                        provider=provider,
+                        model=model,
+                        duration_ms=_elapsed_ms(started_at),
+                    )
+                yield content
+            if not saw_visible_content:
+                raise JudgeError("模型未返回内容")
+            if saw_sse and not saw_done and finish_reason != "stop":
+                raise JudgeError("模型流式连接中断")
         log_event(
             "model.done",
             provider=provider,
@@ -1716,6 +2540,8 @@ def _openai_chat_stream(prompt, settings):
             reasoning_chars=reasoning_chars,
             content_chunks=content_chunks,
             content_chars=content_chars,
+            finish_reason=finish_reason,
+            saw_done=saw_done,
         )
     except JudgeError as e:
         log_event(
@@ -1726,6 +2552,8 @@ def _openai_chat_stream(prompt, settings):
             stream=True,
             duration_ms=_elapsed_ms(started_at),
             error_type=type(e).__name__,
+            finish_reason=finish_reason,
+            saw_done=saw_done,
         )
         raise
     except Exception as e:  # noqa: BLE001
@@ -1737,6 +2565,8 @@ def _openai_chat_stream(prompt, settings):
             stream=True,
             duration_ms=_elapsed_ms(started_at),
             error_type=type(e).__name__,
+            finish_reason=finish_reason,
+            saw_done=saw_done,
         )
         raise JudgeError(f"模型调用失败: {e}") from e
 
@@ -1808,27 +2638,51 @@ def _judge_context(conn, session_id, qid, user_text, root=None, require_model=Tr
     return settings, stored_answer, prompt
 
 
-def _finish_judge(conn, session_id, qid, raw, stored_answer):
+def _finish_judge(
+    conn, session_id, qid, raw, stored_answer, submission_id=None
+):
     started_at = time.perf_counter()
     parsed = parse_judge_output(raw)
     if parsed["grade"] == "easy":
         parsed["full_answer"] = ""
     elif stored_answer:
         parsed["full_answer"] = stored_answer
-    parsed["full_answer_html"] = render_answer_html(parsed["full_answer"])
-    grade(conn, session_id, qid, parsed["grade"])
+    recorded = _record_grade(
+        conn,
+        session_id,
+        qid,
+        parsed["grade"],
+        submission_id=submission_id,
+        comment=parsed["comment"],
+        full_answer=parsed["full_answer"],
+        allow_replay=bool(submission_id),
+    )
+    result = recorded["result"]
     log_event(
         "judge.graded",
         session_id=session_id,
         question_id=qid,
-        grade=parsed["grade"],
-        used_stored_answer=bool(stored_answer and parsed["grade"] != "easy"),
+        grade=result["grade"],
+        replayed=recorded["replayed"],
+        used_stored_answer=bool(stored_answer and result["grade"] != "easy"),
         duration_ms=_elapsed_ms(started_at),
     )
-    return parsed
+    return result
 
 
-def judge_answer(conn, session_id, qid, user_text, chat_fn=None, root=None):
+def judge_answer(
+    conn,
+    session_id,
+    qid,
+    user_text,
+    chat_fn=None,
+    root=None,
+    submission_id=None,
+):
+    submission_id = _normalize_submission_id(submission_id)
+    cached = _preflight_grade(conn, session_id, qid, submission_id)
+    if cached:
+        return cached
     settings, stored_answer, prompt = _judge_context(
         conn, session_id, qid, user_text, root=root, require_model=chat_fn is None
     )
@@ -1836,7 +2690,9 @@ def judge_answer(conn, session_id, qid, user_text, chat_fn=None, root=None):
         raw = _openai_chat(prompt, settings)
     else:
         raw = chat_fn(prompt)
-    return _finish_judge(conn, session_id, qid, raw, stored_answer)
+    return _finish_judge(
+        conn, session_id, qid, raw, stored_answer, submission_id=submission_id
+    )
 
 
 def stream_answer_events(conn, body, root=None, stream_fn=None):
@@ -1850,6 +2706,12 @@ def stream_answer_events(conn, body, root=None, stream_fn=None):
         qid = int(qid)
     except (TypeError, ValueError) as e:
         raise ValueError("question_id 必须是整数") from e
+    submission_id = _normalize_submission_id(body.get("submission_id"))
+    cached = _preflight_grade(conn, session_id, qid, submission_id)
+    if cached:
+        yield {"type": "start"}
+        yield {"type": "done", "result": cached}
+        return
     settings, stored_answer, prompt = _judge_context(
         conn,
         session_id,
@@ -1868,7 +2730,14 @@ def stream_answer_events(conn, body, root=None, stream_fn=None):
         yield {"type": "delta", "text": chunk}
     if not chunks:
         raise JudgeError("模型未返回内容")
-    result = _finish_judge(conn, session_id, qid, "".join(chunks), stored_answer)
+    result = _finish_judge(
+        conn,
+        session_id,
+        qid,
+        "".join(chunks),
+        stored_answer,
+        submission_id=submission_id,
+    )
     yield {"type": "done", "result": result}
 
 
@@ -1881,6 +2750,24 @@ def _q_public(row, grade_v=None):
         "url": row["url"] or "",
         "times_seen": row["times_seen"],
         "grade": grade_v if grade_v is not None else (row["grade"] if "grade" in keys else None),
+    }
+
+
+def get_submission_payload(conn, submission_id):
+    submission_id = _normalize_submission_id(submission_id)
+    item = _find_submission_item(conn, submission_id)
+    if not item or item["grade"] is None:
+        return None
+    question = conn.execute(
+        "SELECT * FROM questions WHERE id=?", (item["question_id"],)
+    ).fetchone()
+    if not question:
+        raise LookupError(f"题目不存在: id={item['question_id']}")
+    return {
+        "submission_id": submission_id,
+        "session_id": item["session_id"],
+        "question": _q_public(question, item["grade"]),
+        "result": _submission_result_from_item(item),
     }
 
 
@@ -1905,18 +2792,78 @@ def _session_payload(conn):
     }
 
 
-def handle_http(method, path, body, conn, root=None):
+def _public_static_type(path):
+    if path == "/assets/branding/bagu-helper-icon-concept.png":
+        return "image/png"
+    if re.fullmatch(r"/assets/fonts/[A-Za-z0-9_-]+\.(woff2?|ttf|otf)", path):
+        return {
+            ".woff2": "font/woff2", ".woff": "font/woff",
+            ".ttf": "font/ttf", ".otf": "font/otf",
+        }[Path(path).suffix]
+    return None
+
+
+def _require_android_https(settings):
+    try:
+        url = urllib.parse.urlsplit(settings.get("base_url") or "")
+        hostname = url.hostname or ""
+        if ":" in hostname:
+            ipaddress.IPv6Address(hostname)
+            valid_host = True
+        else:
+            hostname = hostname.encode("idna").decode("ascii").rstrip(".")
+            valid_host = len(hostname) <= 253 and all(
+                re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label)
+                for label in hostname.split(".")
+            )
+        valid = (url.scheme == "https" and valid_host
+                 and url.username is None and url.password is None
+                 and (url.port is None or url.port > 0))
+    except (ValueError, UnicodeError):
+        valid = False
+    if not valid:
+        raise ValueError("Android 模型地址必须使用 HTTPS，且不得包含用户名或密码")
+
+
+def handle_http(method, path, body, conn, root=None, *, static_root=None, android=False):
     root = _settings_root(root)
+    static_root = Path(static_root) if static_root is not None else Path(__file__).parent
     body = body or {}
     json_ct = "application/json"
     parsed_url = urllib.parse.urlsplit(path)
     query_args = urllib.parse.parse_qs(parsed_url.query)
     path = parsed_url.path
     if method == "GET" and path in ("/", "/index.html"):
-        html_path = Path(__file__).parent / "web" / "index.html"
+        html_path = static_root / "web" / "index.html"
         if not html_path.is_file():
             return 404, "missing index", "text/plain; charset=utf-8"
         return 200, html_path.read_text(encoding="utf-8"), "text/html; charset=utf-8"
+    static_type = _public_static_type(path)
+    if method == "GET" and static_type:
+        asset_path = (static_root / path.lstrip("/")).resolve()
+        if not asset_path.is_relative_to(static_root.resolve()) or not asset_path.is_file():
+            return 404, "missing asset", "text/plain; charset=utf-8"
+        return 200, asset_path.read_bytes(), static_type
+    model_match = re.fullmatch(r"/api/models/([^/]+)(?:/(activate|copy))?", path)
+    mid, action = None, None
+    if model_match and model_match.group(1) != "test":
+        mid, action = model_match.group(1), model_match.group(2) or ""
+    if android:
+        try:
+            if (method == "POST" and path in {"/api/models", "/api/models/test"}) or (
+                method == "PUT" and mid and action == ""
+            ):
+                _require_android_https(body)
+            elif method == "POST" and path == "/api/answer":
+                settings = load_settings(root)
+                if settings.get("api_key"):
+                    _require_android_https(settings)
+            elif method == "POST" and mid and action in {"activate", "copy"}:
+                model = next((m for m in load_settings(root)["models"] if m["id"] == mid), None)
+                if model:
+                    _require_android_https(model)
+        except ValueError as e:
+            return 400, {"error": str(e)}, json_ct
     if method == "GET" and path == "/api/stats":
         s = stats(conn)
         open_s = get_open_session(conn)
@@ -1924,6 +2871,33 @@ def handle_http(method, path, body, conn, root=None):
         return 200, s, json_ct
     if method == "GET" and path == "/api/session":
         return 200, _session_payload(conn), json_ct
+    if method == "GET" and path == "/api/backup/export":
+        try:
+            return 200, export_backup(conn), "application/zip"
+        except ValueError:
+            return 400, {"error": "导出失败，请检查题目字段和题库大小：最多 10000 题、解压后 50 MiB、压缩文件 20 MiB。原数据未改变。"}, json_ct
+    if method == "POST" and path == "/api/backup/restore":
+        encoded = body.get("archive_base64")
+        if not isinstance(encoded, str):
+            return 400, {"error": "缺少 archive_base64"}, json_ct
+        try:
+            archive = base64.b64decode(encoded.encode("ascii"), validate=True)
+            return 200, restore_backup(conn, archive), json_ct
+        except (UnicodeEncodeError, ValueError) as e:
+            return 400, {"error": str(e) or "备份编码无效"}, json_ct
+        except SessionOpenError as e:
+            return 409, {
+                "error": str(e), "session_id": e.session_id, "pending_ids": e.pending_ids,
+            }, json_ct
+    submission_match = re.fullmatch(r"/api/submissions/([^/]+)", path)
+    if method == "GET" and submission_match:
+        try:
+            payload = get_submission_payload(conn, submission_match.group(1))
+        except (ValueError, LookupError) as e:
+            return 400, {"error": str(e)}, json_ct
+        if payload is None:
+            return 404, {"error": "未找到 submission_id 对应的评判结果"}, json_ct
+        return 200, payload, json_ct
     if method == "GET" and path == "/api/questions":
         try:
             payload = list_questions(
@@ -1985,7 +2959,14 @@ def handle_http(method, path, body, conn, root=None):
         if not sid or qid is None or not text:
             return 400, {"error": "缺少 session_id / question_id / text"}, json_ct
         try:
-            out = judge_answer(conn, sid, int(qid), text, root=root)
+            out = judge_answer(
+                conn,
+                sid,
+                int(qid),
+                text,
+                root=root,
+                submission_id=body.get("submission_id"),
+            )
         except JudgeError as e:
             msg = str(e)
             code = 400 if "未配置" in msg else 502
@@ -2003,7 +2984,13 @@ def handle_http(method, path, body, conn, root=None):
             if path == "/api/reveal":
                 out = reveal_answer(conn, sid, qid)
             else:
-                out = review_question(conn, sid, qid, body.get("result"))
+                out = review_question(
+                    conn,
+                    sid,
+                    qid,
+                    body.get("result"),
+                    submission_id=body.get("submission_id"),
+                )
         except (GradeRejected, ValueError, LookupError) as e:
             return 400, {"error": str(e)}, json_ct
         return 200, out, json_ct
@@ -2038,16 +3025,6 @@ def handle_http(method, path, body, conn, root=None):
             return 502, {"error": str(e)}, json_ct
         return 200, created, json_ct
 
-    def _mid_action(p):
-        if not p.startswith("/api/models/"):
-            return None, None
-        rest = p[len("/api/models/"):]
-        if not rest or rest == "test":
-            return None, None
-        parts = rest.split("/")
-        return parts[0], (parts[1] if len(parts) > 1 else "")
-
-    mid, action = _mid_action(path)
     if mid:
         try:
             if method == "PUT" and action == "":
@@ -2065,12 +3042,59 @@ def handle_http(method, path, body, conn, root=None):
     return 404, {"error": "not found"}, json_ct
 
 
-def make_http_handler(root=None, stream_fn=None):
+def make_http_handler(
+    root=None, stream_fn=None, *, db_path=None, static_root=None, access_token=None, android=False
+):
+    if android and (not isinstance(access_token, str) or not access_token.strip()):
+        raise ValueError("Android HTTP 服务必须配置非空 access_token")
     root = _settings_root(root)
 
     class Handler(BaseHTTPRequestHandler):
+        _access_token = access_token
+
         def log_message(self, fmt, *args):
             return
+
+        def _authorized(self):
+            parsed = urllib.parse.urlsplit(self.path)
+            if not self._access_token or (self.command == "GET" and _public_static_type(parsed.path)):
+                return True
+            tokens = self.headers.get_all("X-Bagu-Token", [])
+            if not tokens and self.command == "GET" and parsed.path in {"/", "/index.html"}:
+                tokens = urllib.parse.parse_qs(parsed.query).get("token", [])
+            provided = tokens[0] if len(tokens) == 1 else ""
+            if secrets.compare_digest(provided.encode("utf-8"), self._access_token.encode("utf-8")):
+                return True
+            self.close_connection = True
+            self._write(403, {"error": "未授权请求"}, "application/json")
+            return False
+
+        def _read_json_body(self):
+            lengths = self.headers.get_all("Content-Length", [])
+            try:
+                if self.headers.get("Transfer-Encoding") or len(lengths) > 1:
+                    raise ValueError
+                length = lengths[0] if lengths else "0"
+                if not re.fullmatch(r"[0-9]+", length):
+                    raise ValueError
+                n = int(length)
+            except ValueError:
+                self.close_connection = True
+                self._write(400, {"error": "无效的请求长度"}, "application/json")
+                return None
+            if n > MAX_REQUEST_BYTES:
+                self.close_connection = True
+                self._write(413, {"error": "请求体不得超过 32 MiB"}, "application/json")
+                return None
+            raw = self.rfile.read(n) if n else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(body, dict):
+                    raise ValueError
+            except (UnicodeDecodeError, ValueError):
+                self._write(400, {"error": "JSON 必须是有效对象"}, "application/json")
+                return None
+            return body
 
         def _begin_request(self):
             self._request_id = "r_" + secrets.token_hex(4)
@@ -2126,18 +3150,22 @@ def make_http_handler(root=None, stream_fn=None):
                 self._complete_request(code)
 
         def _dispatch(self, method, body):
-            conn = get_conn()
+            conn = None
             try:
-                init_db(conn)
+                if urllib.parse.urlsplit(self.path).path.startswith("/api/"):
+                    conn = get_conn(db_path)
+                    init_db(conn)
                 code, payload, ctype = handle_http(
-                    method, self.path, body, conn, root=root
+                    method, self.path, body, conn, root=root,
+                    static_root=static_root, android=android,
                 )
             except Exception as e:  # noqa: BLE001
                 self._request_error(e, "dispatch")
                 self._complete_request(500, "error")
                 raise
             finally:
-                conn.close()
+                if conn is not None:
+                    conn.close()
             self._write(code, payload, ctype)
 
         def _write_sse(self, payload):
@@ -2152,7 +3180,15 @@ def make_http_handler(root=None, stream_fn=None):
             return True
 
         def _stream_answer(self, body):
-            conn = get_conn()
+            if android:
+                try:
+                    settings = load_settings(root)
+                    if settings.get("api_key"):
+                        _require_android_https(settings)
+                except ValueError as e:
+                    self._write(400, {"error": str(e)}, "application/json")
+                    return
+            conn = get_conn(db_path)
             outcome = "ok"
             try:
                 init_db(conn)
@@ -2185,16 +3221,15 @@ def make_http_handler(root=None, stream_fn=None):
 
         def do_GET(self):
             self._begin_request()
-            self._dispatch("GET", None)
+            if self._authorized():
+                self._dispatch("GET", None)
 
         def do_POST(self):
             self._begin_request()
-            n = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(n) if n else b"{}"
-            try:
-                body = json.loads(raw.decode("utf-8") or "{}")
-            except json.JSONDecodeError:
-                self._write(400, {"error": "JSON 无法解析"}, "application/json")
+            if not self._authorized():
+                return
+            body = self._read_json_body()
+            if body is None:
                 return
             if urllib.parse.urlsplit(self.path).path == "/api/answer/stream":
                 self._stream_answer(body)
@@ -2203,18 +3238,17 @@ def make_http_handler(root=None, stream_fn=None):
 
         def do_PUT(self):
             self._begin_request()
-            n = int(self.headers.get("Content-Length") or 0)
-            raw = self.rfile.read(n) if n else b"{}"
-            try:
-                body = json.loads(raw.decode("utf-8") or "{}")
-            except json.JSONDecodeError:
-                self._write(400, {"error": "JSON 无法解析"}, "application/json")
+            if not self._authorized():
+                return
+            body = self._read_json_body()
+            if body is None:
                 return
             self._dispatch("PUT", body)
 
         def do_DELETE(self):
             self._begin_request()
-            self._dispatch("DELETE", None)
+            if self._authorized():
+                self._dispatch("DELETE", None)
 
     return Handler
 
@@ -2254,6 +3288,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init")
     p_imp = sub.add_parser("import")
+    p_imp.add_argument("--code-only", action="store_true", help="备份后仅恢复旧答案的代码块格式")
     p_draw = sub.add_parser("draw")
     p_draw.add_argument("-n", type=int, default=5)
     p_draw.add_argument("--cat", default=None)
@@ -2280,7 +3315,7 @@ def main(argv=None):
             print("数据库已初始化")
         elif args.cmd == "import":
             init_db(conn)
-            n = import_all(conn)
+            n = import_all(conn, code_only=args.code_only)
             print(f"导入完成，新题 {n} 道")
         elif args.cmd == "draw":
             try:
