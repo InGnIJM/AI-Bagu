@@ -857,6 +857,30 @@
       color: #92400E;
     }
     .verdict.easy .badge { background: #A7F3D0; color: #065F46; }
+    .judge-feedback { margin-top: 16px; }
+    .judge-feedback h3 { font-size: 15px; font-weight: 800; }
+    .judge-feedback-copy { margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
+    .judge-answer {
+      margin-top: 16px;
+      border: 1.5px solid var(--color-border);
+      border-radius: var(--radius-btn);
+      background: var(--color-card);
+    }
+    .judge-answer summary {
+      min-height: 44px;
+      padding: 10px 14px;
+      border-radius: var(--radius-btn);
+      color: var(--color-foreground);
+      font-weight: 800;
+      cursor: pointer;
+      overflow-wrap: anywhere;
+      touch-action: manipulation;
+    }
+    .judge-answer summary:hover { background: var(--color-muted); }
+    .judge-answer summary:focus-visible { outline: 3px solid var(--color-ring); outline-offset: 2px; }
+    .judge-answer[open] summary { border-bottom: 1px solid var(--color-border-subtle); border-radius: var(--radius-btn) var(--radius-btn) 0 0; }
+    .judge-answer .markdown-body { padding: 14px; }
+    .judge-answer-empty { margin-top: 16px; }
 
     .error {
       margin-top: 12px;
@@ -2307,6 +2331,22 @@
       }
       return html;
     }
+    function judgeResultMarkup(out) {
+      const meanings = { again: "需要重学", hard: "掌握不全", good: "基本掌握", easy: "掌握充分" };
+      const meaning = meanings[out.grade] || "未知评级";
+      let html = `<span class="badge">最终评级 · ${escapeHtml(out.grade)} · ${escapeHtml(meaning)}</span>` +
+        `<section class="judge-feedback"><h3>学习反馈</h3><p class="judge-feedback-copy">${escapeHtml(out.comment || "")}</p></section>`;
+      if (out.full_answer) {
+        const label = out.answer_source === "stored" ? "标准答案 · 题库" :
+          out.answer_source === "model" ? "模型参考答案" : "参考答案 · 历史记录";
+        const answer = out.full_answer_html || `<p class="judge-feedback-copy">${escapeHtml(out.full_answer)}</p>`;
+        html += `<details class="judge-answer"${out.grade === "easy" ? "" : " open"}>` +
+          `<summary>${label}</summary><div class="markdown-body">${answer}</div></details>`;
+      } else {
+        html += `<p class="help judge-answer-empty">该历史评卷未保存标准答案</p>`;
+      }
+      return html;
+    }
     function setReviewButtonsDisabled(disabled) {
       document.querySelectorAll("[data-review]").forEach((button) => { button.disabled = disabled; });
     }
@@ -2352,11 +2392,7 @@
               url: q.url || ""
             })}</div>`;
         } else {
-          html = `<span class="badge">模型判定 · ${escapeHtml(out.grade)}</span>` +
-            `<p style="margin-top:10px; font-weight:600;">${escapeHtml(out.comment || "")}</p>`;
-          if (out.grade !== "easy" && out.full_answer) {
-            html += `<div class="markdown-body" style="margin-top:10px">${out.full_answer_html || escapeHtml(out.full_answer)}</div>`;
-          }
+          html = judgeResultMarkup(out);
         }
         box.innerHTML = html;
         $("answer-flow").classList.remove("hidden");
@@ -2971,11 +3007,7 @@
         clearDraft(session.session_id, q.id);
         const box = $("verdict");
         box.className = "verdict " + out.grade;
-        let html = `<span class="badge">模型判定 · ${escapeHtml(out.grade)}</span><p style="margin-top:10px; font-weight:600;">${escapeHtml(out.comment || "")}</p>`;
-        if (out.grade !== "easy" && out.full_answer) {
-          html += `<div class="markdown-body" style="margin-top:10px">${out.full_answer_html || escapeHtml(out.full_answer)}</div>`;
-        }
-        box.innerHTML = html;
+        box.innerHTML = judgeResultMarkup(out);
         bindAnswerImageFallbacks(box);
         box.classList.remove("hidden");
         $("btn-dont-know").classList.add("hidden");

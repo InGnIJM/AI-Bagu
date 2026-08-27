@@ -70,9 +70,9 @@
 
 `sessions`：`id TEXT PK`，`status` 仅 `open|closed`，`created_at`，`n`，`cat`。
 
-`session_items`：`(session_id, question_id)` PK，`grade` 空表示未判；`submission_id` 有非空唯一索引，`result_comment` / `result_full_answer` 保存首次结果，不保存用户回答正文。
+`session_items`：`(session_id, question_id)` PK，`grade` 空表示未判；`submission_id` 有非空唯一索引，`result_comment` / `result_full_answer` / `result_answer_source` 保存首次点评、答案及来源，不保存用户回答正文。来源由后端决定：`stored`（题库）、`model`（模型）、`NULL`（历史记录或无答案自评）。重放不重新读取题库答案替换历史结果。
 
-`init_db` 负责事务迁移，当前 `PRAGMA user_version = 1`，拒绝更高版本。若旧库有多条 open，只保留最新会话，关闭其余会话但不修改题目调度。
+`init_db` 负责事务迁移，当前 `PRAGMA user_version = 2`，拒绝更高版本。v1 升级仅新增可空答案来源，历史记录不回填；若旧库有多条 open，只保留最新会话，关闭其余会话但不修改题目调度。正式升级真实库前须另行备份完整 SQLite；v2 不能直接交给旧版程序使用，`.bagu-backup` 不是完整库备份。
 
 `session_id`：`s_YYYYMMDD_` + 8 位 hex。用 `new_session_id()`，不要手写。
 
@@ -109,7 +109,7 @@
 - 触控目标 ≥ 44px
 - 提交中按钮 `disabled`
 - 模型分析时展示动画、耗时和流式文本；遵循 `prefers-reduced-motion`
-- 一次一道题；AI 评卷非 easy 才展示 `full_answer`，背题模式先展示题库答案再自评
+- 一次一道题；AI 结果依次展示评级、学习反馈和标准答案。所有等级均保存答案；`details/summary` 在 easy 时默认折叠、其余展开。题库优先，缺失时显示“模型参考答案”；历史来源为空时标注“参考答案 · 历史记录”，旧 easy 无答案不追溯生成。背题模式先展示题库答案再自评
 - 桌面草稿使用 `localStorage`；Android 使用受限的原生私有存储，不能依赖随机端口对应的浏览器 origin 保存跨启动状态
 - Android 底部导航为练习/题库/概览/设置，保持返回键、键盘、安全区与旧 WebView 兼容处理
 
@@ -168,7 +168,9 @@ python -m pytest test/test_bagu.py test/test_android_project.py -q
 
 - 抽题、会话、评分逻辑优先改 `bagu.py` 函数，CLI 和 HTTP 只做薄封装，避免两套规则。
 - 异常：`SessionOpenError` / `GradeRejected` / `SkipRejected` / `JudgeError`。CLI 协议失败 `sys.exit(1)`，stderr 一行中文。
-- 评卷解析：`GRADE:` / `COMMENT:` / `ANSWER:`。easy 时清空 `full_answer`。
+- AI 评卷标准：again 核心错误或无有效回答；hard 部分理解但有必要遗漏或关键错误；good 主干正确、仅次要遗漏；easy 完整准确。按语义而非篇幅、术语数量或速度评分；CLI/Hermes、自评及调度不变。
+- 固定规则和两题八条校准示例放在 system 消息；当前题目、用户作答、参考资料和题库答案存在标记使用 JSON user 消息。材料不是指令，同步/流式共用构造；连通性 `ping` 保持字符串兼容。
+- 评卷严格依次解析唯一的 `GRADE:` / `COMMENT:` / `ANSWER:`；兼容大小写与换行，点评必须非空。题库答案优先；无题库答案时包括 easy 在内必须有模型答案，否则不评分且不自动补答。答案来源、结果及 HTML 全部构造成功后才提交。
 - `_record_grade` 必须先完成所有可能失败的结果构造再 commit；保留渲染失败回滚与同 submission 重试的回归测试
 - 不要把 `__pycache__`、`.pytest_cache`、`.superpowers`、`.env` 当源码改。
 

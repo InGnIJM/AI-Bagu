@@ -20,7 +20,10 @@
 submission_id TEXT
 result_comment TEXT
 result_full_answer TEXT
+result_answer_source TEXT
 ```
+
+2026-08-28 补充：`result_answer_source` 随 SQLite `user_version = 2` 事务迁移新增，值为 `stored` / `model` / `NULL`；旧记录保持 `NULL`，不推断或回填，不重写进度和历史评分。正式升级真实库前备份完整 SQLite；升级后的库不能直接交给旧版程序使用。题目与进度的 `.bagu-backup` 格式不变，不能替代完整库备份。
 
 数据库建立两个部分唯一索引：
 
@@ -46,13 +49,15 @@ ON session_items(submission_id) WHERE submission_id IS NOT NULL;
 
 网页为 `/api/answer`、`/api/answer/stream` 和 `/api/review` 发送 `submission_id`，格式为 `sub_<UUID>`。字段对旧客户端可选。
 
-- 相同 ID、相同会话和题目已完成：直接返回第一次持久化结果，不再次评分或调用模型。
+- 相同 ID、相同会话和题目已完成：直接返回第一次持久化的评级、点评、答案和来源，不再次评分或调用模型；题库后续修改不替换历史答案或来源。
 - 相同 ID 用于另一题：400。
 - 不同 ID 提交已评分题：失败且不改库。
 - `GET /api/submissions/<submission_id>` 可在会话关闭后读取题目公开字段和持久化结果；未知结果返回 404。
 - SSE 命中已完成结果时只发 `start`、`done`。
 
-只在评分成功的同一事务内保存 submission、评级、点评和完整答案。用户原始回答不写入 SQLite；模型 HTTP、断流、空响应或解析失败也不写 submission 结果。
+只在评分成功的同一事务内保存 submission、评级、点评、完整答案和来源；来源与 HTML 等返回字段在提交前构造完成。用户原始回答不写入 SQLite；模型 HTTP、断流、空响应或解析失败也不写 submission 结果。无题库答案时，所有 AI 评级（含 easy）都必须提供非空模型答案，否则不落库、不额外补答。
+
+评分接口、SSE `done.result` 和 submission 查询均返回 `answer_source`。页面首次提交与恢复共用结果渲染：先评级、再学习反馈、最后标准答案；easy 默认折叠、其他展开。来源为 `NULL` 的旧记录显示历史来源标签；旧 easy 无答案时显示“该历史评卷未保存标准答案”，不追溯生成。
 
 本设计采用“提交完成后幂等”，不建立 processing/租约状态。极少数同时在途重试可能调用模型两次，但数据库只接受并返回第一次成功提交。
 
