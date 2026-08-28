@@ -24,16 +24,19 @@ final class UpdateIO {
         private volatile boolean cancelled;
         private Runnable disconnect;
         synchronized void cancel() { cancelled=true; if(disconnect!=null) disconnect.run(); }
-        void check() throws IOException { if(cancelled) throw new IOException("Update cancelled"); }
-        synchronized void connection(Runnable value) throws IOException { disconnect=value; if(cancelled) { if(value!=null)value.run(); check(); } }
+        void check() throws Cancelled { if(cancelled) throw new Cancelled(); }
+        synchronized void connection(Runnable value) throws Cancelled { disconnect=value; if(cancelled && value!=null) { value.run(); check(); } }
         boolean cancelled() { return cancelled; }
+    }
+    static final class Cancelled extends IOException {
+        Cancelled() { super("Update cancelled"); }
     }
     private final Transport transport;
     UpdateIO(Transport transport) { this.transport=transport; }
     static UpdateIO https() {
         return new UpdateIO(url -> {
             URL target=new URL(url);
-            if(!"https".equals(target.getProtocol())) throw new IOException("HTTPS required");
+            if(!"https".equals(target.getProtocol())) throw new UpdateFailure(UpdateFailure.REDIRECT);
             HttpsURLConnection connection=(HttpsURLConnection)target.openConnection();
             connection.setInstanceFollowRedirects(false);
             connection.setConnectTimeout(15000); connection.setReadTimeout(20000);
@@ -42,70 +45,97 @@ final class UpdateIO {
                 int status=connection.getResponseCode();
                 InputStream input=status==200?connection.getInputStream():new ByteArrayInputStream(new byte[0]);
                 return new Response(status,connection.getHeaderField("Location"),connection.getContentLengthLong(),input,connection::disconnect);
-            } catch(IOException error) { connection.disconnect(); throw new IOException("Update connection failed"); }
+            } catch(IOException error) { connection.disconnect(); throw error; }
         });
     }
-    private Response open(String initial, boolean feed, Cancellation cancellation) throws Exception {
+    private Response open(String initial, boolean feed, Cancellation cancellation) throws IOException {
         String url=initial;
         for(int hop=0;hop<=5;hop++) {
             cancellation.check();
-            if(feed) {
-                if(!url.equals(initial)) throw new IOException("Feed redirects disabled");
-            } else UpdatePolicy.validateRedirect(url);
-            Response response=transport.open(url);
+            if(!feed) validateRedirect(url, null);
+            Response response;
+            try { response=transport.open(url); }
+            catch(IOException error) { throw UpdateFailure.network(error); }
             try { cancellation.connection(response.disconnect); }
-            catch(Exception error) { response.close(); throw error; }
+            catch(Cancelled error) { try { response.close(); } catch(IOException ignored) {} throw error; }
             if(response.status==200)return response;
-            try {
-                if(feed || !Arrays.asList(301,302,303,307,308).contains(response.status) || response.location==null || hop==5)
-                    throw new IOException("Update HTTP response rejected");
-                url=new URI(url).resolve(response.location).toString();
-                UpdatePolicy.validateRedirect(url);
-            } finally { response.close(); }
+            try(Response rejected=response) {
+                if(!Arrays.asList(301,302,303,307,308).contains(response.status))
+                    throw new UpdateFailure(UpdateFailure.HTTP, httpStatus(response.status), null);
+                if(feed || response.location==null || hop==5)
+                    throw new UpdateFailure(UpdateFailure.REDIRECT, httpStatus(response.status), null);
+                try { url=new URI(url).resolve(response.location).toString(); }
+                catch(URISyntaxException | IllegalArgumentException error) { throw new UpdateFailure(UpdateFailure.REDIRECT, httpStatus(response.status), error); }
+                validateRedirect(url, httpStatus(response.status));
+            } catch(IOException error) { throw UpdateFailure.network(error); }
         }
-        throw new IOException("Too many update redirects");
+        throw new UpdateFailure(UpdateFailure.REDIRECT);
+    }
+    private static Integer httpStatus(int status) { return status>=100 && status<=599 ? status : null; }
+    private static void validateRedirect(String url, Integer status) throws UpdateFailure {
+        try { UpdatePolicy.validateRedirect(url); }
+        catch(IllegalArgumentException error) { throw new UpdateFailure(UpdateFailure.REDIRECT, status, error); }
     }
     UpdatePolicy.Release feed(String channel, Cancellation cancellation) throws Exception {
         if(!Arrays.asList("stable","beta").contains(channel)) throw new IllegalArgumentException("Unknown channel");
         try(Response response=open(UpdatePolicy.FEED_ROOT+channel+".json",true,cancellation)) {
-            if(response.length>UpdatePolicy.MAX_FEED)throw new IOException("Feed too large");
+            if(response.length>UpdatePolicy.MAX_FEED)throw new UpdateFailure(UpdateFailure.LIMIT);
             byte[] bytes=readBounded(response.body,UpdatePolicy.MAX_FEED,cancellation);
-            String body=StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
-            return UpdatePolicy.parseFeed(parse(body),channel);
+            Map<String,Object> envelope;
+            try {
+                String body=StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
+                envelope=parse(body);
+            } catch(CharacterCodingException | IllegalArgumentException error) { throw UpdateFailure.at(UpdateFailure.JSON, error); }
+            try { return UpdatePolicy.parseFeed(envelope,channel); }
+            catch(IllegalArgumentException error) { throw UpdateFailure.at(UpdateFailure.MANIFEST, error); }
+        } catch(IOException error) { throw UpdateFailure.network(error);
         } finally { cancellation.connection(null); }
     }
     static byte[] readBounded(InputStream input, int maximum, Cancellation cancellation) throws IOException {
         ByteArrayOutputStream out=new ByteArrayOutputStream(); byte[] buffer=new byte[8192]; int count;
         while((count=input.read(buffer))!=-1) {
-            cancellation.check(); if(out.size()+count>maximum)throw new IOException("Update data too large");
+            cancellation.check(); if(out.size()+count>maximum)throw new UpdateFailure(UpdateFailure.LIMIT);
             out.write(buffer,0,count);
         }
         cancellation.check(); return out.toByteArray();
     }
     void download(UpdatePolicy.Release candidate, File part, Cancellation cancellation, LongConsumer progress) throws Exception {
         try(Response response=open(candidate.apkUrl,false,cancellation)) {
-            if(response.length!=-1 && response.length!=candidate.size)throw new IOException("APK size mismatch");
+            if(response.length>UpdatePolicy.MAX_APK)throw new UpdateFailure(UpdateFailure.LIMIT);
+            if(response.length!=-1 && response.length!=candidate.size)throw new UpdateFailure(UpdateFailure.LENGTH);
             MessageDigest digest=MessageDigest.getInstance("SHA-256"); long received=0;
             long deadline=System.nanoTime()+15L*60*1000000000L;
             try(FileOutputStream output=new FileOutputStream(part)) {
                 byte[] buffer=new byte[32768]; int count;
-                while((count=response.body.read(buffer))!=-1) {
+                while((count=readNetwork(response.body,buffer))!=-1) {
                     cancellation.check();
-                    if(System.nanoTime()>deadline || received+count>candidate.size || received+count>UpdatePolicy.MAX_APK)
-                        throw new IOException("APK download limit exceeded");
+                    if(System.nanoTime()>deadline)throw new UpdateFailure(UpdateFailure.TIMEOUT);
+                    if(received+count>UpdatePolicy.MAX_APK)throw new UpdateFailure(UpdateFailure.LIMIT);
+                    if(received+count>candidate.size)throw new UpdateFailure(UpdateFailure.LENGTH);
                     output.write(buffer,0,count);digest.update(buffer,0,count);received+=count;progress.accept(received);
                 }
                 cancellation.check(); output.getFD().sync();
-            }
-            if(received!=candidate.size || !hex(digest.digest()).equals(candidate.sha256))throw new IOException("APK integrity mismatch");
+            } catch(Cancelled error) { throw error;
+            } catch(IOException | SecurityException error) { throw UpdateFailure.at(UpdateFailure.STORAGE, error); }
+            if(received!=candidate.size)throw new UpdateFailure(UpdateFailure.LENGTH);
+            if(!hex(digest.digest()).equals(candidate.sha256))throw new UpdateFailure(UpdateFailure.HASH);
+        } catch(IOException error) { throw UpdateFailure.network(error);
         } finally { cancellation.connection(null); }
     }
+    private static int readNetwork(InputStream input, byte[] buffer) throws IOException {
+        try { return input.read(buffer); }
+        catch(IOException error) { throw UpdateFailure.network(error); }
+    }
     static void verifyBytes(File file, UpdatePolicy.Release candidate) throws Exception {
-        if(!file.isFile() || file.length()!=candidate.size || file.length()>UpdatePolicy.MAX_APK)throw new IOException("APK missing or size mismatch");
-        MessageDigest digest=MessageDigest.getInstance("SHA-256");
-        try(InputStream input=new FileInputStream(file)) { byte[] b=new byte[32768];int n;while((n=input.read(b))!=-1)digest.update(b,0,n); }
-        if(!hex(digest.digest()).equals(candidate.sha256))throw new IOException("APK integrity mismatch");
+        try {
+            if(!file.isFile())throw new UpdateFailure(UpdateFailure.STORAGE);
+            if(file.length()>UpdatePolicy.MAX_APK)throw new UpdateFailure(UpdateFailure.LIMIT);
+            if(file.length()!=candidate.size)throw new UpdateFailure(UpdateFailure.LENGTH);
+            MessageDigest digest=MessageDigest.getInstance("SHA-256");
+            try(InputStream input=new FileInputStream(file)) { byte[] b=new byte[32768];int n;while((n=input.read(b))!=-1)digest.update(b,0,n); }
+            if(!hex(digest.digest()).equals(candidate.sha256))throw new UpdateFailure(UpdateFailure.HASH);
+        } catch(IOException | SecurityException error) { throw UpdateFailure.at(UpdateFailure.STORAGE, error); }
     }
     static String sha256(byte[] bytes) {
         try { return hex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
