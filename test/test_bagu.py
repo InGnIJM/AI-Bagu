@@ -2750,6 +2750,86 @@ async function streamAnswer() { return result; }
     assert result["disabled"] and result["next"] == "next"
 
 
+def test_judge_failure_dialog_distinguishes_unconfigured_model_and_preserves_retry_state():
+    html = (Path(__file__).parents[1] / "web/index.html").read_text(encoding="utf-8")
+    helpers = html[html.index("    function isModelConfigurationError"):
+                   html.index("    function renderModelBar")]
+    submit = html[html.index('    $("btn-submit").addEventListener("click", async () => {'):
+                  html.index('    $("ans").addEventListener("input", saveDraft)')]
+    script = r'''
+const nodes = {}, handlers = {};
+let focused = '', drafts = 0, currentView = '', libraryRenders = 0;
+function makeClassList() {
+  const values = new Set(['hidden']);
+  return { add(v) { values.add(v); }, remove(v) { values.delete(v); },
+    contains(v) { return values.has(v); }, toggle(v, force) {
+      const next = force === undefined ? !values.has(v) : force;
+      if (next) values.add(v); else values.delete(v); return next;
+    } };
+}
+function $(id) { return nodes[id] || (nodes[id] = {
+  value: '回答', innerHTML: '', textContent: '', disabled: false, dataset: {},
+  classList: makeClassList(),
+  focus() { focused = id; },
+  addEventListener(event, callback) { handlers[id + ':' + event] = callback; }
+}); }
+const document = {activeElement:null};
+let session = {session_id:'s_test'}, speechInput = null;
+const question = {id:7};
+function currentQuestion() { return question; }
+function prepareSubmission() { return {submission_id:'sub_test'}; }
+function saveDraft() { drafts += 1; return true; }
+function clearDraft() {} function updateSpeechControls() {}
+function startJudgeProgress() {} function stopJudgeProgress() {} function appendJudgeDelta() {}
+function bindAnswerImageFallbacks() {} function judgeResultMarkup() { return ''; }
+function showView(view) { currentView = view; }
+async function renderLibrary() { libraryRenders += 1; }
+async function streamAnswer() { throw new Error('未配置模型'); }
+''' + helpers + submit + r'''
+(async () => {
+  document.activeElement = $('btn-submit');
+  await handlers['btn-submit:click']();
+  const configured = {
+    title:$('judge-failure-title').textContent,
+    message:$('judge-failure-message').textContent,
+    dialogHidden:$('judge-failure-dialog').classList.contains('hidden'),
+    configHidden:$('btn-judge-failure-config').classList.contains('hidden'),
+    retry:$('btn-submit').textContent, error:$('q-err').textContent,
+    drafts, focused
+  };
+  await openJudgeFailureModelConfig();
+  const routed = {view:currentView, libraryRenders,
+    dialogHidden:$('judge-failure-dialog').classList.contains('hidden'), focused};
+  showJudgeFailure('服务暂时不可用');
+  const generic = {title:$('judge-failure-title').textContent,
+    message:$('judge-failure-message').textContent,
+    configHidden:$('btn-judge-failure-config').classList.contains('hidden')};
+  closeJudgeFailure();
+  process.stdout.write(JSON.stringify({configured, routed, generic, returnedFocus:focused}));
+})().catch((error) => { console.error(error); process.exit(1); });
+'''
+    completed = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8")
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["configured"] == {
+        "title": "未配置评卷模型",
+        "message": "模型未配置。请前往模型配置库补充模型或 API Key 后重试。",
+        "dialogHidden": False,
+        "configHidden": False,
+        "retry": "重新评判",
+        "error": "未配置模型",
+        "drafts": 2,
+        "focused": "btn-judge-failure-config",
+    }
+    assert result["routed"] == {
+        "view": "lib", "libraryRenders": 1, "dialogHidden": True, "focused": "btn-submit"
+    }
+    assert result["generic"] == {
+        "title": "模型评判失败", "message": "服务暂时不可用", "configHidden": True
+    }
+    assert result["returnedFocus"] == "btn-submit"
+
+
 def test_api_models_crud(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(bagu, "_openai_chat_stream", lambda *a, **k: iter(["pong"]))
     code, listed, _ = bagu.handle_http("GET", "/api/models", None, conn, tmp_path)
