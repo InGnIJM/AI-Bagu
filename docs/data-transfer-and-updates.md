@@ -2,7 +2,21 @@
 
 [项目首页](../README.md) · [Android 指南](android-beta.md) · [历史验收记录](validation.md)
 
-本文说明 `version.json` 对应的迁移／更新实现与维护者发布流程。当前候选为 `0.1.0-beta.2`、versionCode `2`、`beta` 通道；候选版本、源码功能和下面的命令示例都不是“APK 已交付、设备已验收、Release／Pages 已上线”的证明。历史文档若仍按 `71fbbfd` 描述旧备份入口，应结合所用安装包阅读。
+本文说明已发布 beta.3 的迁移／更新实现与维护者发布流程。公开版本来自 Tag `v0.1.0-beta.3`、提交 `8cc586f`，不包含开发工作区后续未提交的格式恢复改动。发布、构建、设备检查的证据及限制见[beta.3 验收记录](validation.md#beta3-公开发布)；下面的命令说明本身不构成再次执行的授权。
+
+## 已上线的版本与更新清单
+
+截至 2026-08-28，[beta.3 Release](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.3) 已公开为预发布版，code 为 `3`，提供 [public ARM64 空题库 APK](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.3/bagu-0.1.0-beta.3-public-arm64-v8a.apk)，下载不需要登录。
+
+更新清单是应用读取的“小型版本目录”，不是 APK 或题库。它告诉应用版本编号、兼容要求、下载地址、大小及 SHA-256；APK 本体仍从 GitHub Releases 下载。
+
+| 入口 | 当前内容 |
+| --- | --- |
+| [源码 Tag](https://github.com/InGnIJM/AI-Bagu/tree/v0.1.0-beta.3) | 精确发布源码 `8cc586f` |
+| [Beta 清单](https://ingnijm.github.io/AI-Bagu/updates/beta.json) | `0.1.0-beta.3` / versionCode `3`，指向具体 Tag 的 APK |
+| [Stable 清单](https://ingnijm.github.io/AI-Bagu/updates/stable.json) | `release:null`，暂无稳定版；是检查成功，不是 HTTP 404 |
+
+Release 网页和两份清单已匿名核验为 HTTP 200。beta 安装检查两个通道，所以 Stable 文件仍须存在。已有更新入口的 beta.2 可手动检查并升级；安装 beta.3 后，两通道都成功且无更高兼容版本时显示“当前没有兼容的新版本”。
 
 ## 电脑与手机之间迁移
 
@@ -26,7 +40,7 @@
 4. 选择「导入题库／备份」，核对类型、题数、创建时间、来源版本和覆盖规则，再确认。Android 使用原生确认框，不把文件正文传给网页脚本。
 5. 完成后核对新增／更新题数、几道同名题的答案和复习进度。
 
-预览与实际导入使用同一份已读取字节；确认前更换原文件，不会悄悄改变已预览的内容。取消选择或确认不会改库。Android Activity 重建后仍须明确确认；进程死亡不会自动重放导入。若提示“是否完成未知”或网页未收到结果，先重新打开并核对数据，**不要直接重复导入**；含进度备份可能覆盖后来产生的进度。
+预览与实际导入使用同一份已读取字节；确认前更换原文件，不会悄悄改变已预览的内容。取消选择或确认不会执行备份合并。Android Activity 重建后仍须明确确认；进程死亡不会自动重放导入。若提示“是否完成未知”或网页未收到结果，先重新打开并核对数据，**不要直接重复导入**；含进度备份可能覆盖后来产生的进度。
 
 ### 格式、兼容与失败处理
 
@@ -36,7 +50,7 @@
 - 校验成员名、路径、重复成员／JSON 字段、加密标记、数据类型、题目字段、重复题、题数与 SHA-256；不通过则整批拒绝。恢复在事务内检查会话锁，失败回滚，不只导入前半部分。
 - CSV 是另一种导入：UTF-8、最多 2 MiB／5000 题，重复题跳过、不覆盖，不携带进度。不要把 CSV 和 `.bagu-backup` 的合并规则混用。
 
-程序接入：`GET /api/backup/export?mode=questions` 导出纯题库，`?mode=progress` 导出含进度备份，省略 mode 默认 `progress`；空值、非法值或重复 `mode` 返回 400。`POST /api/backup/inspect` 和 `/api/backup/restore` 都只接受 `{ "archive_base64": "…" }`；inspect 完整校验但不写库，restore 遇到 open 会话返回 409。Android API 仍需原有进程令牌，不应绕过原生文件边界。
+程序接入：`GET /api/backup/export?mode=questions` 导出纯题库，`?mode=progress` 导出含进度备份，省略 mode 默认 `progress`；空值、非法值或重复 `mode` 返回 400。`POST /api/backup/inspect` 和 `/api/backup/restore` 都只接受 `{ "archive_base64": "…" }`；inspect 完整校验但不执行备份合并，restore 遇到 open 会话返回 409。HTTP 预览仍会经过公共数据库初始化，可能创建或迁移数据库，不能用于数据库的只读迁移预演；核心／Android 原生预览函数不访问数据库。Android API 仍需原有进程令牌，不应绕过原生文件边界。
 
 ## Android 应用更新
 
@@ -89,7 +103,7 @@ public 交付目录是 `dist/android/<versionName>/public/`，允许且必须仅
 
 ## 维护者：独立初始化更新源
 
-首次使用先准备清单分支，再由维护者配置 Pages。此流程与源码发布解耦：无需工作区干净、版本递增、源码已推送或存在 APK／Release。默认 dry-run 完全离线，不调用 GitHub CLI、不使用凭据或写远端：
+本仓库已完成清单初始化和 Pages 配置，普通使用或检查更新无需重新初始化。下方保留首次部署／维护说明：先准备清单分支，再由维护者配置 Pages。此流程与源码发布解耦，无需工作区干净、版本递增、源码已推送或存在 APK／Release。默认 dry-run 完全离线，不调用 GitHub CLI、不使用凭据或写远端：
 
 ```powershell
 python .\scripts\release_github.py init-feed
@@ -103,7 +117,7 @@ python .\scripts\release_github.py init-feed --execute --confirm-repository InGn
 
 脚本检查固定 origin、仓库公开且未归档、写权限和 Git 数据访问，之后才将目标分支的 404 当作缺失。只操作 `codex/update-feed`，不切换本地工作区；该分支只允许 `.nojekyll`、`updates/beta.json`、`updates/stable.json`。缺失 beta 通道写入 `{"schema_version":1,"channel":"beta","release":null}`，stable 文件对应使用 `"channel":"stable"`；已有合法清单保留原字节。非法清单、额外文件、符号链接或并发冲突都会停止，不覆盖、不强推。
 
-成功仅表示“清单分支就绪”。维护者还须在 GitHub Pages 将来源设为 **Deploy from a branch → `codex/update-feed` → `/ (root)`**，脚本不会修改 Pages 设置。配置方式见 [GitHub 官方说明](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site)。固定清单地址为 [beta.json](https://ingnijm.github.io/AI-Bagu/updates/beta.json) 和 [stable.json](https://ingnijm.github.io/AI-Bagu/updates/stable.json)；列出地址不表示本轮已验证上线。
+`init-feed` 成功本身仅表示“清单分支就绪”。维护者还须在 GitHub Pages 将来源设为 **Deploy from a branch → `codex/update-feed` → `/ (root)`**，脚本不会修改 Pages 设置。配置方式见 [GitHub 官方说明](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site)。本次 beta.3 已另行完成配置及匿名验证，状态见[更新清单](#已上线的版本与更新清单)；后续发布仍要重新检查，不能复用当时的上线结论。
 
 ## 维护者：发布预检、准备与执行
 
@@ -138,7 +152,7 @@ Pages 必须在这些时点就绪，避免先签名或公开 Release 才发现�
 
 GitHub JSON 请求用 [`gh api --include`](https://cli.github.com/manual/gh_api) 读取并保留真实 HTTP 状态，但不输出响应头／正文或工具 stderr；401/403、404、429、5xx 和无响应分别报告，404 不统一解释为未配置。附件校验仍使用纯二进制字节，不混入 HTTP 头。Pages 部署延迟时可稍后重试，不绕过就绪检查。
 
-本轮仍保持 `0.1.0-beta.2 / 2`。下次正式准备候选为 `0.1.0-beta.3 / 3`，须另行授权修改版本；若编号已分发或远端有冲突，停止并确认，不能自动猜新编号或覆盖旧版本。
+`0.1.0-beta.3 / 3` 已公开分发，不再是可重复使用的候选编号。开发工作区的 `version.json` 可能仍为 beta.2/code2，复现本版须使用对应 Tag 的干净发布工作区。下一版编号须由维护者确认，高于已分发的最高 versionCode；若有远端冲突则停止，不能自动猜编号、重建替换或覆盖旧版本。
 
 ### 中断的本地准备
 
@@ -148,23 +162,23 @@ GitHub JSON 请求用 [`gh api --include`](https://cli.github.com/manual/gh_api)
 
 ### 公开发布与 feed 恢复
 
-只有维护者另外明确确认仓库、版本、六个精确附件及验收范围后才执行发布。以下版本只是当前候选示例，必须与 `version.json` 完全一致；确认参数不带 tag 的 `v` 前缀：
+只有维护者另外明确确认仓库、版本、六个精确附件及验收范围后才执行发布。以下记录 beta.3 发布时使用的命令，**本版已经发布，无需再次执行**；以后应替换为另行确认的新版本，并与干净发布工作区的 `version.json` 完全一致。确认参数不带 Tag 的 `v` 前缀：
 
 ```powershell
-python .\scripts\release_github.py publish --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.2
+python .\scripts\release_github.py publish --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.3
 ```
 
 流程为：验证回执与实际 APK、确认 Pages 就绪 → 创建或续用匹配草稿 → 上传允许附件并核验远端字节 → 公开 Release → 匿名验证附件 → 更新 `codex/update-feed` 分支 → 验证实际 Pages 内容。beta 创建 prerelease；不会覆盖冲突 tag／附件、强推或删除 Release，也不会改变当前本地 checkout。只有同 commit、同内容的草稿可续传；已公开但缺少附件的 Release 不会被偷偷补写。
 
-Pages 需要维护者在 GitHub 中另行配置来源 `codex/update-feed`、根目录 `/`；脚本不会自动改该配置。固定清单地址是 `https://ingnijm.github.io/AI-Bagu/updates/beta.json` 和 `stable.json`（同一路径）；这只是客户端配置，不表示现在已经可访问。
+Pages 来源为 `codex/update-feed`、根目录 `/`，由维护者另行配置，脚本不会自动修改。当前 Beta 指向 beta.3、Stable 保持空通道；后续发布仍须逐次验证固定清单的匿名可达性与精确内容。
 
 若输出 `PARTIAL`／退出码 2，表示 Release 已公开，但匿名附件、feed 或 Pages 核验尚未完成。不要重建另一个同版本包，也不要删除已公开 Release。保留精确源码与附件，排查后仅重试：
 
 ```powershell
-python .\scripts\release_github.py feed --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.2
+python .\scripts\release_github.py feed --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.3
 ```
 
-`feed` 只接受精确匹配的已公开 Release，仍检查本地回执与远端附件；它不能把草稿当成已发布版本。更新当前通道时保留另一通道，未发布过的通道用 `release: null`，拒绝通道降级和同版本内容冲突。即使另一通道已有更高版本，也不应阻止修复本通道已发布版本的 feed。最终分别核对 Release、匿名附件和 Pages 的结果，不把其中一项成功当成全部完成。
+`feed` 恢复命令也须在对应发布源码、原始精确附件与 `verification.json` 所在的工作区执行；当前 beta.3 已验证成功，不需要重试。它只接受精确匹配的已公开 Release，仍检查本地回执与远端附件，不能把草稿当成已发布版本。更新当前通道时保留另一通道，未发布过的通道用 `release: null`，拒绝通道降级和同版本内容冲突。即使另一通道已有更高版本，也不应阻止修复本通道已发布版本的 feed。最终分别核对 Release、匿名附件和 Pages 的结果，不把其中一项成功当成全部完成。
 
 ## 许可、隐私与验收记录
 
@@ -172,4 +186,4 @@ python .\scripts\release_github.py feed --execute --confirm-repository InGnIJM/A
 
 第三方字体、图标和 Android／Python／Chaquopy 等运行时或依赖保留各自许可证。已有字体声明位于 [assets/fonts](../assets/fonts/)；发布时应核对随包依赖与所需声明，不用项目 MIT 替代它们。不得提交或上传 `.env`、模型配置、真实数据库、备份、草稿、签名私钥或密码。
 
-最终验收须分别记录源码版本、测试／lint、精确 public APK 与签名／哈希、API 29／36 隔离迁移与两版本安装、Release、Pages，以及失败或未覆盖项。当前候选见 [0.1.0-beta.2 本地验收记录](releases/0.1.0-beta.2-validation.md)；其他基线见[验收记录](validation.md)。未覆盖项不能用本地测试通过代替。
+最终验收须分别记录源码版本、测试／lint、精确 public APK 与签名／哈希、API 29／36 隔离迁移与两版本安装、Release、Pages，以及失败或未覆盖项。当前公开版本见 [beta.3 发布验收](validation.md#beta3-公开发布)；[beta.2 本地验收](releases/0.1.0-beta.2-validation.md)保留为历史对象，不能当作本版或所有真机的通过证明。

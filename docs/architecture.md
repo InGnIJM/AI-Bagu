@@ -1,6 +1,6 @@
 # 架构与数据约束
 
-本文面向维护者，说明共享核心、会话、评分、存储和平台安全边界。内容核对基线为已提交源码 `71fbbfd`（2026-08-28），不代表现有 APK 包含全部源码功能，也不把工作区中的后续开发视为已发布能力。使用方法见[用户指南](user-guide.md)，请求字段见 [HTTP API](api.md)，源码与产物验收分开记录在[验证记录](validation.md)。
+本文面向维护者，说明共享核心、会话、评分、存储和平台安全边界。公开 beta.3 对应源码 `8cc586f`，已包含 SQLite v2、双模式备份、诊断与更新功能；下文 `import --format-only` 等格式恢复说明属于后续本地工作区，不在该发布版中。使用方法见[用户指南](user-guide.md)，请求字段见 [HTTP API](api.md)，源码与产物验收分开记录在[验证记录](validation.md)。
 
 ## 共享核心与入口
 
@@ -110,7 +110,7 @@ AI 按语义区分核心错误（again）、关键缺漏（hard）、次要缺�
 - 新建/修改配置先完整读取流式测试响应，通过后才写盘；单独测试不写盘。激活与复制不重新测试，复制不切换 active。这里不应推断 `settings.json` 与 `.env` 具有 SQLite 式跨文件事务保证。
 - 桌面草稿使用 `localStorage`；当前提交状态只存 submission、session、question 和 flow，不重复存作答正文。恢复时先查会话和 submission；查询网络失败不能清除本地状态。成功 skip 清除该会话草稿；确认结果或确认失效后清理相应状态。
 - Android 通过 `appStorage` 使用受限原生私有存储，跨随机端口重启保留草稿；不能依靠 WebView origin 的 `localStorage` 实现跨启动恢复。
-- `.bagu-backup` v1 仅含 `manifest.json`、`questions.json`，保存题目和进度，不含会话、评分分析、配置、Key 或草稿。整批校验后事务合并，同分类同题干由备份覆盖内容与进度，目标独有题保留；open 会话时禁止恢复。格式上限与接口见 [HTTP API](api.md)。
+- `.bagu-backup` 新导出为 v2，仍读取 v1（按 progress 处理），格式版本与 SQLite 版本独立。只含 `manifest.json`、`questions.json`：questions 保存题目内容、不带进度，progress 另存调度；均不含会话、评分分析、配置、Key 或草稿。两模式按分类＋题干覆盖内容（包括空答案／URL）；questions 保留已有进度、新题零／null，progress 覆盖进度且日期不重算，目标独有题保留。核心档案预览不访问数据库，但 HTTP 入口仍执行公共数据库初始化，可能创建／迁移数据库，不能当作数据库只读预演。恢复在写事务内再次检查 open 会话，异常整批回滚。格式上限与接口见 [HTTP API](api.md#备份与恢复)。
 
 ## 平台与内容安全
 

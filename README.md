@@ -2,7 +2,7 @@
 
 一个在电脑和 Android 手机上使用的面试复习工具。抽一轮题，用自己的话回答，查看反馈，再按掌握程度安排下一次复习。
 
-[快速开始](#快速开始) · [使用指南](docs/user-guide.md) · [数据迁移与更新](docs/data-transfer-and-updates.md) · [Android 安装与更新](docs/android-beta.md) · [全部文档](docs/README.md)
+[快速开始](#快速开始) · [下载 Android beta.3](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.3) · [使用指南](docs/user-guide.md) · [数据迁移与更新](docs/data-transfer-and-updates.md) · [全部文档](docs/README.md)
 
 ![桌面版作答与评分反馈：输入回答后查看模型点评](docs/images/desktop-practice.png)
 
@@ -43,7 +43,7 @@ python bagu.py import
 
 ### 在 Android 上使用
 
-准备 Android 10 及以上的 64 位 ARM 手机，以及可信来源提供的兼容 APK。在手机文件管理器中打开安装包，按系统提示安装，之后直接打开「八股助手」即可，不需要另装 Python。
+当前公开版本为 **0.1.0-beta.3（预发布，versionCode 3）**，面向 Android 10 及以上的 64 位 ARM 手机。[直接下载 APK](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.3/bagu-0.1.0-beta.3-public-arm64-v8a.apk) 或查看 [Release 与校验文件](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.3)，无需登录 GitHub。在手机文件管理器中打开安装包，按系统提示安装，之后直接打开「八股助手」即可，不需要另装 Python。
 
 底部的「练习 / 题库 / 概览 / 设置」分别用于答题、管理题目、查看进度和管理配置。
 
@@ -53,11 +53,11 @@ python bagu.py import
 
 *Android 实际使用截图，由用户提供；未据此认定安装包版本或设备验收范围。*
 
-仓库源码不附带本地 APK。内部 Beta 的历史构建带有种子题，public 构建为空题库；不要把截图中的 408 题理解为所有安装包都自带。安装、覆盖更新和构建方式见 [Android 指南](docs/android-beta.md)，已记录的版本与测试范围见[验收记录](docs/validation.md)。
+APK 放在 GitHub Releases，不提交到源码目录。公开包首次安装为空题库，可导入自己的 CSV 或 `.bagu-backup`；不要把截图中的 408 题理解为默认附带。**更新不要先卸载**，同包名、同签名覆盖升级保留原有本地数据。安装与构建方式见 [Android 指南](docs/android-beta.md)，本版的精确产物与验证范围见[beta.3 验收记录](docs/validation.md#beta3-公开发布)。
 
-包含更新功能的新 Android 包可在设置中检查、下载并手动安装更新；自动检查不等于自动下载或安装。旧 internal 包可能需要先手动覆盖升级一次。候选版本源码已包含的功能不代表旧 APK 已更新，详见[更新与发布边界](docs/data-transfer-and-updates.md)。
+已有更新入口的 beta.2 可在「设置 → 应用更新 → 检查更新」发现 beta.3，点击下载、校验后再确认安装；自动检查不等于自动下载或安装。旧 internal 包没有更新入口时，先手动下载本版覆盖安装。Beta 清单已提供 beta.3，Stable 清单暂为空通道，空通道不是错误，详见[更新清单与当前版本](docs/data-transfer-and-updates.md#已上线的版本与更新清单)。
 
-更新诊断扩展会显示逐通道原因与反馈编号，失败时可在设置导出诊断日志；自动检查失败不会打断练习。维护者可先独立初始化更新清单分支，再配置 Pages 和准备发布，见[更新源初始化](docs/data-transfer-and-updates.md#维护者独立初始化更新源)。
+beta.3 会显示逐通道失败原因与反馈编号，可在设置导出诊断日志；自动检查失败不会打断练习。本版来自提交 `8cc586f`，不包含开发工作区后续的答案格式恢复改动。源码、已发布功能与未验证范围见[版本与文档范围](docs/README.md#版本与文档范围)。
 
 ## 完成第一次练习
 

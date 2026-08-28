@@ -2,7 +2,7 @@
 
 [文档导航](README.md) · [架构与数据](architecture.md) · [HTTP API](api.md) · [Android Beta](android-beta.md) · [验收记录](validation.md)
 
-本文按已提交源码基线 `71fbbfd` 描述开发入口与验证方法。具体源码、构建产物和设备的验收结论分开记录；测试通过不意味着 APK 已更新或发布。
+本文描述公开 beta.3（源码 `8cc586f`）及后续开发使用的入口与验证方法。beta.3 已发布；本地未提交的格式恢复不属于该版本，范围见[版本与文档范围](README.md#版本与文档范围)。具体源码、构建产物和设备的验收结论分开记录，某次测试通过不自动证明其他工作树或 APK 可发布。
 
 ## 环境分层
 
@@ -45,7 +45,7 @@ Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面�
 
 本地生成且禁止提交：`.env`、`settings.json`、`bagu.db`、`.signing/`、`.toolchains/`、`.android-sdk/`、Gradle/Android 缓存、`dist/`。桌面服务日志默认位于 `.superpowers/bagu-server.log`，Android 日志位于私有 `logs/`；日志不是源码，不应携带 Key、令牌或作答正文。
 
-## 诊断日志（当前工作区新增）
+## 诊断日志
 
 桌面由 `bagu.py` 的白名单过滤、轮转日志和独立于数据库的诊断接口负责；网页在主脚本之前注册错误监听，通过专用请求头批量写入。Android 由 `BaguApplication` 提前初始化 `AndroidDiagnostics`，`DiagnosticPolicy` / `DiagnosticStore` 校验并重过滤历史记录；导出使用独立执行器和系统文件选择器，不调用 Python 启动或工作队列。
 
@@ -55,7 +55,7 @@ Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面�
 
 `DiagnosticAcceptanceTest` 用于隔离设备上的启动、导出及隐私验证；仅编译它不能证明设备行为。API 29 与较新 Android 上的真实文件选择器、写入失败、旋转、进程终止及 WebView/Python 启动失败需单独验收。设备安装与签名交付遵循原有授权流程，结果记录在 [验收记录](validation.md)，不能用历史 APK 的通过结果代替。
 
-更新诊断复用该存储：`UpdateFailure` 负责固定错误码，`UpdateDiagnostic` 是操作上下文绑定的不可变事件，`UpdateCheckSummary` 负责最多 4 KiB 的检查历史与中断恢复。新增字段仅开放给 `native.update`，同时验证落盘与 ZIP 重过滤；`getUpdateState()`／`bagu-update` 不变，扩展契约见 [API 文档](api.md#android-更新状态与诊断当前源码扩展)。不要将最近检查编号、当前下载／安装编号与桥接 operationId 混为一谈。
+更新诊断复用该存储：`UpdateFailure` 负责固定错误码，`UpdateDiagnostic` 是操作上下文绑定的不可变事件，`UpdateCheckSummary` 负责最多 4 KiB 的检查历史与中断恢复。新增字段仅开放给 `native.update`，同时验证落盘与 ZIP 重过滤；`getUpdateState()`／`bagu-update` 不变，扩展契约见 [API 文档](api.md#android-更新状态与诊断)。不要将最近检查编号、当前下载／安装编号与桥接 operationId 混为一谈。
 
 更新／发布重点回归可运行 `python -m pytest test/test_update_policy.py test/test_update_web.py test/test_github_release.py test/test_release.py -q`。Java 测试同时需通过 Android Gradle 编译面，单独 JDK 编译可用的库方法不一定在 Android SDK 编译面存在。未获准读取正式签名配置时，使用[隔离源码与假签名配置](android-beta.md#源码与设备检查)运行单测与 lint；禁止复制真实题库或密钥。
 

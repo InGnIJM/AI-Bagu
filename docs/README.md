@@ -9,6 +9,7 @@
 | 在电脑启动，完成第一轮练习 | [快速开始](../README.md#快速开始) |
 | 配模型、用语音、管理题库、导入 CSV、处理报错 | [使用指南](user-guide.md) |
 | 在 Android 安装、更新或保留数据 | [Android 指南](android-beta.md#安装更新与备份) |
+| 下载公开 APK、查看更新清单 | [beta.3 Release](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.3)、[更新源状态](data-transfer-and-updates.md#已上线的版本与更新清单) |
 | 了解备份包含什么、恢复会覆盖什么 | [备份与恢复](user-guide.md#备份与恢复) |
 | 查看界面及配图来源 | [README 界面示例](../README.md)、[图片说明](images/README.md) |
 
@@ -21,15 +22,20 @@
 | [架构与数据约定](architecture.md) | 会话、调度、SQLite、模型评卷与移动安全边界 |
 | [开发与测试](development.md) | 环境、源码目录、测试矩阵及隔离检查 |
 | [Android 构建与交付](android-beta.md) | 工具链、签名、构建校验与设备验证限制 |
+| [数据迁移、更新与发布](data-transfer-and-updates.md) | 双模式备份、更新诊断、GitHub Release／Pages 发布与失败恢复 |
 | [项目协作规则](../AGENTS.md) | 维护者与 Agent 的项目约束；AGENT.md 仅作兼容指向 |
 
 ## 版本与文档范围
 
-基础使用、CLI、API 和架构说明以已核对的提交 `71fbbfd`（2026-08-28）为基线，包含语音输入和评分反馈改进。源码支持的功能不等于任一旧 APK 都包含这些功能。
+截至 2026-08-28，公开预发布版为 [v0.1.0-beta.3](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.3)，versionCode 为 `3`，来自精确提交 `8cc586febdb94a24185e93a5c33d979f2f0ee645`。已提供免登录 APK 下载及 Beta 更新清单，Stable 清单为成功的空通道。普通用户不需要配置 GitHub CLI 或 Pages。
 
-文档整理期间，工作区另有进行中的迁移、Android 更新与发布流程改动；相关实施计划和 `0.1.0-beta.2` 发布说明仍是未随本次文档提交收录的草稿，不构成已发布或已验收证明。基础指南中的旧备份行为与桌面入口范围应结合所用版本阅读；新功能验收完成后，需同步更新指南和 API，而不是只修改版本号。
+该版本包含原 `71fbbfd` 的语音、评分答案来源及 SQLite v2，以及双端两种导出／确认导入、诊断日志、Android 更新诊断与发布工具。以下范围须区分：
 
-[历史验收记录](validation.md)集中保存已有的测试次数、APK 哈希、模拟器结果和未覆盖项。Android 指南单独说明正在版本化调整的构建脚本，不能拿旧脚本参数替代新产物校验。
+- **公开 APK**：以该 Tag、附件及[beta.3 验收记录](validation.md#beta3-公开发布)为准；源码合入或文档更新不等于手机已安装新版。
+- **本地开发工作区**：另有未提交的答案 Markdown／表格格式恢复及 `import --format-only` 改动，不包含在 beta.3。相关说明保留为本地功能，不据此承诺已发布 APK 支持。
+- **版本配置**：本次文档同步所在工作区的 `version.json` 仍为 beta.2/code2；公开 beta.3 来自独立发布工作区。本轮不改版本或合并源码，复现发布应使用对应 Tag，不能直接把当前开发树当作公开版本。
+
+[历史验收记录](validation.md)集中保存每个阶段的测试、APK 哈希、模拟器与未覆盖项。beta.3 已验证隔离环境中的实际应用内升级，但未完成物理 ARM64／真实 16 KiB 设备验收。较早章节中的“未发布／未验收”只描述当时的对象，不撤销，也不套用到新版本。
 
 ## 设计依据与历史计划
 

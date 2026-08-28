@@ -2,12 +2,14 @@
 
 [文档导航](README.md) · [开发与测试](development.md) · [Android 构建与交付](android-beta.md)
 
-本页按功能与产物记录验收证据，包括从原 README 和 Android Beta 文档迁移的历史记录。**数字、哈希和设备结果仅适用于各节明确注明的源码或产物，不能代表所有后续版本。** 最新的本地体验 APK 与此前更新诊断源码实施检查分别记录；通用日志导出的旧验收单独保留。
+本页按功能与产物记录验收证据，包括从原 README 和 Android Beta 文档迁移的历史记录。**数字、哈希和设备结果仅适用于各节明确注明的源码或产物，不能代表所有后续版本。** 最新公开版本为下方的 [beta.3](#beta3-公开发布)；本地格式恢复、较早体验包及源码实施阶段分别保留，不把后来的发布结果回填为当时已验收。
 
 ## 如何阅读
 
 | 记录 | 对象 | 不能据此推断 |
 | --- | --- | --- |
+| 2026-08-28 beta.3 公开发布 | `8cc586f`、精确 public ARM64 APK、隔离设备及真实 Release／Pages／应用内升级 | 所有真机通过、后续未提交格式恢复已打包、原仪器测试夹具问题已修复 |
+| 2026-08-28 答案格式恢复 | 后续本地工作区、合成自动化与单独授权的本地数据恢复 | beta.3 包含这些改动、手机题库自动同步 |
 | 2026-08-28 更新诊断体验 APK | 明确哈希的 public ARM64 同版本体验包、实际构建/签名/内容校验 | 已安装手机、API29/API36 设备通过、正式版本递增或 GitHub/Pages 上线 |
 | 2026-08-28 更新诊断／发布升级 | `11da156` 后的工作区、模拟网络测试、隔离源码 Android 单测/lint | 手机已升级、真实 Pages/Release 可用、已使用正式签名构建 |
 | 2026-08-28 诊断日志 | 本次未提交工作区、自动化测试和桌面页面检查 | API29/较新系统已完成设备验收、已有 APK 包含日志导出 |
@@ -16,9 +18,75 @@
 | 2026-08-28 事务修复 | 源码基线 `997fe91` | 原 `0.1.0-beta.1` 安装包包含修复 |
 | 2026-08-27 Android Beta | 明确哈希的历史 APK 与当时测试 | 之后的源码或新包已经完成同等验收 |
 
-文档整理时已提交的共享源码基线为 `71fbbfd`，包含语音提交 `5ab4140` 和后续评分更新。原文中“当前工作树未提交语音”和“main 基线 997fe91”的说法已不适合作为当前状态，相关测试证据保留如下。
+早期基础文档核对的源码为 `71fbbfd`，包含语音提交 `5ab4140` 和后续评分更新；公开 beta.3 对应的精确源码则为 `8cc586f`。较早章节中的“本轮未发布／未验收”仅描述各自当时的对象，相关失败与限制不删除。
 
 后续迁移、自动更新和发布工作应在完成后另外记录源码、精确产物、测试环境及结果；不能用开发计划的勾选项或用户截图替代验收证据。
+
+## beta.3 公开发布
+
+日期：2026-08-28。以下为实际发布阶段的记录，不是本轮文档修改重新执行全套测试的结果。
+
+### 源码、版本与附件
+
+- [Release / Tag：v0.1.0-beta.3](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.3)，公开预发布版（`draft=false`、`prerelease=true`），versionCode `3`，beta 通道。
+- 精确提交：`8cc586febdb94a24185e93a5c33d979f2f0ee645`，发布分支 `codex/release-beta3-public`。使用独立干净工作区，未合并 main；原工作区未提交的答案格式恢复及无关 Windows 设计草稿未纳入。
+- [APK](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.3/bagu-0.1.0-beta.3-public-arm64-v8a.apk)：`bagu-0.1.0-beta.3-public-arm64-v8a.apk`，**29,936,357 字节**。包名 `io.github.ingnijm.baguhelper`，minSdk 29、targetSdk 36，仅 arm64-v8a，public 空题库。
+- APK SHA-256：`8a177050afc4eaf5132bd0186292787ab3c5aacc30b7ba40836dd575af9734b3`。
+- 稳定签名证书 SHA-256：`ac92a24f30a5e6c10c4ced0d0db89124f39f36e00778fef6ca3ba4973bdf0ee3`；复用已有身份，未复制、重新生成或发布私钥。
+- Release 恰好六项附件：上述 APK、`SHA256SUMS`、`certificate-sha256.txt`、`update.json`、`INSTALL.md`、`RELEASE_NOTES.md`。本地 `verification.json` 将精确提交绑定到全部附件哈希；回执、QA 包、数据库、备份、日志及配置不属于公开附件。
+
+### 正式构建与自动化
+
+| 检查 | 发布时结果 |
+| --- | --- |
+| `python -m pytest -q` | **630 passed**，126.84 秒，退出码 0 |
+| `node --test test/speech_input.test.cjs` | **27 passed**，零失败 |
+| Gradle `assemblePublicRelease` / `testPublicDebugUnitTest` / `lintPublicRelease` | BUILD SUCCESSFUL，2 分 21 秒；9 份 JUnit XML 共 **90 项，零失败／错误／跳过** |
+| release lint | **0 错误、4 警告**：UnusedAttribute、ObsoleteSdkInt、StaticFieldLeak、MonochromeLauncherIcon |
+| 精确 APK | 版本／包名／ABI、稳定签名、ZIP／ELF 16 KiB 对齐、原生库与资源允许列表、SHA-256 校验通过 |
+| 内容隔离 | 种子 questions／sessions／session_items 均为 0；8 项静态资源匹配发布源码，DEX 包含更新诊断类 |
+| 独立附件复核 | 六项附件与回执全部匹配，QA 构建后正式 APK 哈希未变化 |
+
+先前源码准备回归曾发生一次既有超长诊断请求用例的 Windows `10053` 连接中止；同用例复跑及随后的完整回归通过，未修改 HTTP 安全边界或测试来掩盖。原因仍未确定，不能将重跑通过描述为已修复产品问题。保留 SDK XML 与弃用 API 提示，不宣称零告警。
+
+### 隔离设备与真实升级
+
+仅使用本次新建的 API29／API36 模拟器和合成题目、假模型配置，未安装到或清除个人设备。API29 运行 x86_64 QA 包；API36 通过 native translation 运行**与 Release 哈希完全一致的最终 ARM64 APK**，不等同于物理 ARM 手机。
+
+- 两平台完成 code2 → code3 同签名覆盖与保留断言，核对合成题库、调度、会话／评分历史、配置及 5 项原生状态。API36 的最终 APK 验证通过，不仅检查版本名。
+- 文件选择验证覆盖导出写入失败／重试、有效备份保存和有 open 会话时拒绝导入；APK Provider 只读边界通过。API36 启动时的 System UI ANR 曾遮挡文件选择器，处理测试系统弹窗后，原文件测试不改断言即通过；保留首轮失败事实。
+- 原 `DiagnosticAcceptanceTest` 的监视器缺少 MIME／OPENABLE 匹配，API29 文件测试的宽泛 Downloads 文本选择器可能点到工具栏标题。先复现失败，再仅在忽略目录的 QA 镜像夹具修正；两平台诊断镜像各 **8 项通过**，API29 文件导出／导入拒绝／保留复核各 1 项通过，原行为断言保留。**已跟踪的两处测试辅助逻辑未修复，不能写成原仪器测试全部通过。**
+- 诊断验证覆盖 Python 工作队列阻塞、页面失败／空 WebView、保存失败／关闭输出、重复／取消、Activity 与保存状态恢复、过滤及符号链接边界。模拟回调和状态恢复不代表所有系统级启动故障或杀进程路径均已实测。
+- Release 上线后，API36 恢复到原 beta.2 测试状态，由**实际应用界面**完成：手动检查 beta.3 → 从 GitHub 下载 → 完整性检查 → 有练习时安装被阻止 → 主动结束合成练习 → 原生说明与系统来源授权 → 返回后再次点击安装 → 系统确认 Update → 新版启动确认成功。该链路没有使用 `adb install` 代替安装器。
+- 系统最终安装的 code 为 3、版本名为 beta.3，实际安装文件 SHA-256 与公开 APK 一致。升级前后经真实文件选择器分别导出 2 题含进度备份，`questions.json` 哈希均为 `f899b096d7ec7b99d85cdd9e7092007b4d7b93f644c405f6cb7bdca86ab296e3`，内容、次数和日期完全一致。
+
+测试结束已关闭本次两台隔离模拟器；QA 证据保留于发布工作区的忽略目录，未作为附件上传。
+
+### Release、匿名下载与 Pages
+
+正式发布命令退出码为 **0**，分别返回 `Release=verified; anonymous assets=verified; Pages=verified`。独立读回确认 Tag 指向精确 `8cc586f`、六项附件齐全，匿名下载字节与本地回执一致。
+
+`codex/update-feed` 发布后提交为 `0f3aab41b91325ccbc8c9f424dfe000ab40457aa`，Pages 从该分支根目录部署。[Beta 清单](https://ingnijm.github.io/AI-Bagu/updates/beta.json)指向 beta.3/code3，[Stable 清单](https://ingnijm.github.io/AI-Bagu/updates/stable.json)保持 `release:null`，未覆盖另一通道。
+
+本轮文档同步又匿名复核 Release 网页及两份清单，均 HTTP 200；Beta 的版本、大小、哈希与公开产物相符。匿名 GitHub REST 查询另返回 403，未将它误判为 Release／Pages 不存在，也未为文档检查使用登录凭据或改动远端。
+
+文档同步验证：`python -m pytest test/test_transfer.py test/test_transfer_web.py test/test_release.py test/test_github_release.py -q -p no:cacheprovider` 为 **216 passed**（8.97 秒，退出码 0）；9 份现行文档的 141 个本地链接、39 个锚点检查通过，`git diff --check` 通过。本轮未编辑业务代码或版本配置；收尾保护快照另检出 `test/test_bagu.py`、`web/index.html` 的并行变动，未覆盖或重置，因此 216 项结果仅对应当次运行，不代表并行改动后整树已重新验收。本轮未再次构建、签名、安装、提交、推送或发布。
+
+### 本版仍未覆盖
+
+- 物理 ARM64 手机、真实 16 KiB 页设备、不同厂商系统；转译模拟器和静态对齐检查不能替代真机。
+- 真实模型评分质量、厂商语音识别质量、远程答案图片在目标手机的连通性。
+- 最终 ARM64 APK 上所有安装取消／安装中进程死亡／缓存与网络故障组合，以及两种模式全套跨端迁移的重新验收；较早 beta.2 的跨端结果保留在[原记录](releases/0.1.0-beta.2-validation.md)，不能扩写为本版全部路径已通过。
+- 上述两处已跟踪仪器测试夹具的源码修复；本地 QA 修正不属于本次发布或本轮文档更新。
+
+## 2026-08-28：答案特殊格式与旧数据恢复（本地工作区）
+
+- 修复 HTML 抓取与 Markdown 渲染中的多段/嵌套引用、列表段落及续行、代码语言和长围栏、行内反引号、表格反斜杠/管道符、转义强调符与实体二次解码；表格保留对齐，表头不拆字，窄屏在表格容器内横向滚动。
+- 新增 `import --format-only`、只读 `--dry-run` 和显式 `--include-history`。旧答案必须与同一来源的旧解析结果整篇匹配；拒绝缺失/非当前版本数据库，不触发自动迁移。实际写入前完整备份，事务内复核题目身份和原答案，冲突整批回滚。
+- 自动化：`python -m pytest test/test_bagu.py test/test_android_project.py -q -p no:cacheprovider` 曾完整通过 **410 项**（61.22 秒，退出码 0）。最终 CSS 调整后的整跑为 **409 passed / 1 failed**：原有鉴权用例收到 Windows `ConnectionAbortedError / 10053`，无格式断言失败；该鉴权组随后单独复跑 **8 passed**。先前另一次整跑在该组另一用例也出现同样连接中止。未修改鉴权或测试来掩盖偶发错误；不能称最后一次整跑全部通过。测试进程使用临时 `PYTHONUTF8=1` 保持子进程输出编码一致。
+- 本地执行前生成 `*.before-answer-format-*.sqlite3` 完整备份，实际恢复 **316 道题、20 条 stored 历史答案**。对备份逐字段比对：只有 `questions.answer`、`session_items.result_full_answer` 变化，全部点评、评级、submission、来源、会话及调度不变；schema 不变，SQLite `integrity_check=ok`。
+- 浏览器实测原问题表格恢复为 **5 列、8 个数据行**。390px 窄屏下页面内容宽度与视口同为 375px（扣除滚动条），表格容器 243px、内容 571px，横向滚动可到末端 328px，页面没有横向溢出。桌面/窄屏截图在本地忽略目录 `dist/format-repair/`，不加入应用资源。
+- 未中断用户正在进行的练习，既有桌面服务进程未重启；真实页面的表格数据和新 CSS 已验证，新增 Python 渲染行为由自动化测试验证，服务重启后加载。未构建/安装/发布 APK，手机私有库不会随桌面恢复自动同步。
 
 ## 2026-08-28：更新诊断本地体验 APK（同版本、未公开发布）
 

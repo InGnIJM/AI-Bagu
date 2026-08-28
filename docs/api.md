@@ -2,7 +2,7 @@
 
 [文档导航](README.md) · [CLI](cli.md) · [用户指南](user-guide.md) · [架构与数据](architecture.md)
 
-本文基础 HTTP 说明沿用源码基线 `71fbbfd`；诊断和原生更新章节另行说明当前源码扩展，新的双模式备份契约见[数据迁移与更新](data-transfer-and-updates.md)。桌面默认地址为 `http://127.0.0.1:8765`，可用 `python bagu.py serve --port 8765` 启动；Android 使用独立私有数据库和随机本机端口。这不是账号服务或公网 API。
+本文包含公开 beta.3（源码 `8cc586f`）的 HTTP、双模式备份、诊断和原生更新契约，迁移操作见[数据迁移与更新](data-transfer-and-updates.md)。桌面默认地址为 `http://127.0.0.1:8765`，可用 `python bagu.py serve --port 8765` 启动；Android 使用独立私有数据库和随机本机端口。这不是账号服务或公网 API。
 
 ## 通用约定与安全
 
@@ -32,8 +32,9 @@
 | POST | `/api/reveal` | `{session_id, question_id}`，只看题库答案、不评分 |
 | POST | `/api/review` | `{session_id, question_id, result, submission_id?}`，自评并保存答案 |
 | GET | `/api/submissions/:id` | 查询已完成的 submission，关闭会话后仍可恢复 |
-| GET | `/api/backup/export` | ZIP 字节，保存为 `.bagu-backup` |
-| POST | `/api/backup/restore` | `{archive_base64}`，校验后合并题目与进度 |
+| GET | `/api/backup/export` | `mode=questions` 或 `mode=progress`，默认 progress；返回 ZIP 字节 |
+| POST | `/api/backup/inspect` | `{archive_base64}`，校验档案并返回类型、题数、时间、版本，不执行恢复 |
+| POST | `/api/backup/restore` | `{archive_base64}`，按文件模式事务合并题目及可选进度 |
 | POST | `/api/skip` | `{session_id?}`，关闭指定或当前会话 |
 | GET | `/api/models` | 模型列表、`active_id`、掩码 Key 和预设 |
 | POST | `/api/models` | 新建模型，先完整测试再写入 |
@@ -139,15 +140,19 @@ CSV 请求为 `{"content":"category,question,answer,url\n..."}`，不是 multipa
 
 ## 备份与恢复
 
-`GET /api/backup/export` 返回 `application/zip` 的二进制内容，由调用方保存为 `.bagu-backup`；不是 JSON/base64 响应。有 open 会话仍可导出，但会话本身不在档案中。
+`GET /api/backup/export?mode=questions` 导出纯题库，`?mode=progress` 导出含进度备份，省略 mode 默认 progress；空值、非法值或重复 mode 返回 400。成功返回 `application/zip` 二进制，由调用方保存为 `.bagu-backup`，不是 JSON/base64 响应。有 open 会话仍可导出，但会话本身不在档案中。
 
-`POST /api/backup/restore` 接受 `{"archive_base64":"<完整 ZIP 的 base64>"}`，成功返回 `{added, updated, total}`。档案仅含 `manifest.json` 和 `questions.json`，保存题干、答案、来源及复习进度，不含模型配置、Key、草稿、会话和评分分析。
+`POST /api/backup/inspect` 与 `/api/backup/restore` 都只接受 `{"archive_base64":"<完整 ZIP 的 base64>"}`。inspect 完整校验所有成员和题目后返回 `{schema_version, mode, question_count, created_at, app_version}`，不执行备份合并或改写题目进度，也不取得恢复资格的锁。restore 在写事务中重新检查 open 会话，成功返回 `{added, updated, total}`。
 
-限制为 10000 题、压缩文件 20 MiB、两份 JSON 解压后合计 50 MiB。校验成员名、重复项、字段和 SHA-256；损坏、超限、非法 base64 等返回 400，整批不写入。有 open 会话时返回 409 和 `{error, session_id, pending_ids}`。
+核心 `inspect_backup(data)` 和 Android 原生档案预览不访问数据库；但 HTTP inspect 沿用普通 API 的公共入口，处理前会调用 `get_conn`／`init_db`，缺失的数据库可能被创建、旧库可能被迁移。因此 HTTP 预览不是“绝对不写库”的数据库迁移预演，也不具备下方诊断接口的数据库故障隔离保证。
 
-恢复按 `category + question` 合并：新题新增，已有题的答案、URL 和进度被备份覆盖，不删除其他题，也不修改已有会话/分析历史。恢复是覆盖性操作，先备份再执行；`.bagu-backup` 不能替代数据库升级前的完整 SQLite 备份。用户操作说明见 [用户指南](user-guide.md) 和 [Android Beta](android-beta.md)。
+档案只含 `manifest.json` 和 `questions.json`。新导出使用备份格式 v2：questions 只含分类、题干、答案和来源，不包含进度字段；progress 另含调度字段。仍兼容 v1，按 progress 处理；旧应用不支持 v2 时须先更新。两种模式均不含模型配置、Key、草稿、会话和评分分析，备份格式与 SQLite user_version 独立。
 
-## 诊断接口（当前工作区新增）
+限制为 10000 题、压缩文件 20 MiB、两份 JSON 解压后合计 50 MiB。校验成员名、重复项、字段和 SHA-256；损坏、超限、非法 base64 等返回 400，整批不写入。restore 遇到 open 会话时返回 409 和 `{error, session_id, pending_ids}`；inspect 不因有会话而拒绝预览。
+
+恢复按 `category + question` 合并：两种模式都覆盖已有题的答案与 URL，包括空值。questions 保留已有进度，新题使用零等级、零次数和空复习日期；progress 按文件覆盖进度，日期不重算。不删除本机独有题，也不修改已有会话/分析历史。恢复是覆盖性操作，先备份再执行；`.bagu-backup` 不能替代数据库升级前的完整 SQLite 备份。用户操作说明见 [用户指南](user-guide.md) 和 [Android Beta](android-beta.md)。
+
+## 诊断接口
 
 以下接口仅用于桌面页面，Android 对 `/api/diagnostics/*` 返回 404，改走受限原生桥接。接口在数据库连接之前分流，不读取题库、配置或密钥，不执行数据库初始化/迁移。
 
@@ -162,7 +167,7 @@ CSV 请求为 `{"content":"category,question,answer,url\n..."}`，不是 multipa
 
 ZIP 固定包含 `manifest.json`、`server.jsonl`、`web.jsonl`、`native.jsonl`、`README.txt`；不可用来源为空并在 manifest 标记。历史日志同样重新过滤，不提供原始目录或任意文件下载。格式版本为 1，与 SQLite/题库备份版本无关。
 
-## Android 更新状态与诊断（当前源码扩展）
+## Android 更新状态与诊断
 
 沿用受限桥接 `getUpdateState()` 与 `bagu-update` 事件，不新增下载 URL、路径或日志读取方法。既有 `operationId` 用于请求与过期回调控制，`revision` 用于状态顺序；它们不等于供反馈的诊断编号。旧字段保留，新增 `lastCheck`：
 
