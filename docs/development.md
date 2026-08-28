@@ -55,6 +55,12 @@ Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面�
 
 `DiagnosticAcceptanceTest` 用于隔离设备上的启动、导出及隐私验证；仅编译它不能证明设备行为。API 29 与较新 Android 上的真实文件选择器、写入失败、旋转、进程终止及 WebView/Python 启动失败需单独验收。设备安装与签名交付遵循原有授权流程，结果记录在 [验收记录](validation.md)，不能用历史 APK 的通过结果代替。
 
+更新诊断复用该存储：`UpdateFailure` 负责固定错误码，`UpdateDiagnostic` 是操作上下文绑定的不可变事件，`UpdateCheckSummary` 负责最多 4 KiB 的检查历史与中断恢复。新增字段仅开放给 `native.update`，同时验证落盘与 ZIP 重过滤；`getUpdateState()`／`bagu-update` 不变，扩展契约见 [API 文档](api.md#android-更新状态与诊断当前源码扩展)。不要将最近检查编号、当前下载／安装编号与桥接 operationId 混为一谈。
+
+更新／发布重点回归可运行 `python -m pytest test/test_update_policy.py test/test_update_web.py test/test_github_release.py test/test_release.py -q`。Java 测试同时需通过 Android Gradle 编译面，单独 JDK 编译可用的库方法不一定在 Android SDK 编译面存在。未获准读取正式签名配置时，使用[隔离源码与假签名配置](android-beta.md#源码与设备检查)运行单测与 lint；禁止复制真实题库或密钥。
+
+发布工具测试必须 mock GitHub CLI、匿名下载、构建和签名边界；`test_github_release.py` 的 socket/DNS 禁止外网夹具不能移除。`init-feed` 离线 dry-run 可在当前脏工作区运行；真实执行、Pages 配置和发布仍需另外授权，详见[发布指南](data-transfer-and-updates.md#维护者独立初始化更新源)。
+
 ## 修改前的边界检查
 
 1. 读取根目录 [AGENTS.md](../AGENTS.md) 及目标子目录规则，检查工作树，保留用户和其他任务的未提交改动。
@@ -85,7 +91,7 @@ python -m pytest test/test_bagu.py test/test_android_project.py -q
 | 核心与网页 | `python -m pytest test/test_bagu.py -q` | SQLite、会话、评卷、HTTP、网页脚本回归；不证明真实模型或浏览器服务连通 |
 | Android 项目契约 | 加上 `test/test_android_project.py` | 项目配置、隔离运行时、桥接和打包策略；包含 PowerShell/JDK/离线 Gradle 检查，不是全部 APK/设备验收 |
 | 语音脚本 | `node --test test/speech_input.test.cjs` | 实际页面脚本配合模拟浏览器/原生识别边界；也由核心 pytest 调用，不采集真实音频 |
-| Java 单元测试 | `android/app/src/test/` 的 Gradle 单元测试任务 | `HostPolicyTest`、`SpeechInputTest` 的宿主策略和状态机；不替代 WebView 真正运行 |
+| Java 单元测试 | `android/app/src/test/` 的 Gradle 单元测试任务 | 宿主、语音、更新状态机／网络分类、诊断过滤与 ZIP；不替代 WebView 或系统安装器真正运行 |
 | Android lint | 对目标 variant 运行 release lint | Android 静态问题；零错误不等于设备兼容性或无警告 |
 | APK 校验 | `scripts/android.ps1 -Mode Verify` 及 APK 校验脚本 | 指定产物的签名、内容、原生库及哈希；不会重建，也不能单独证明产物对应最新源码 |
 | 设备仪器与手动验收 | `android/app/src/androidTest/` 和隔离设备 | 该 APK 在该系统、WebView、ABI、页面大小和服务环境中的表现；不能泛化为所有手机 |

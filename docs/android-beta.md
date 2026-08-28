@@ -34,6 +34,8 @@ public 构建首次启动为空题库，可新增题目、导入自己的 CSV，
 
 包含更新功能的新包在「设置」提供自动检查开关和手动检查。自动检查默认开启，前台通常每 24 小时尝试一次，但不自动下载／安装；下载须点击，应用进入后台会取消下载。安装前须结束练习、评卷、语音和文件工作，来源权限授权返回后也要再次点击安装。只有后续启动核对实际安装版本才报告成功。
 
+更新诊断扩展按通道显示 HTTP／网络／清单校验等短原因和反馈编号，自动失败只在设置页显示。进程中断后的旧检查不会重放，缺失摘要按未知状态；可复用「问题诊断」导出日志。源码具备这些功能不表示已安装包也具备，操作和发布准备见[专项指南](data-transfer-and-updates.md)。
+
 旧 internal 包若没有该入口，需要先手动取得同包名、同签名且版本号更高的可信 APK，覆盖升级一次，不要先卸载。稳定／测试通道选择、取消、缓存恢复和验收限制见[Android 应用更新](data-transfer-and-updates.md#android-应用更新)。
 
 开发调试可用 ADB：`adb install <APK路径>` 为首次安装，`adb install -r <APK路径>` 为覆盖安装。尖括号是待替换的路径，不应原样执行；覆盖安装命令不会自动生成更高版本，也不表示已完成升级验收。
@@ -123,7 +125,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\android.ps1 -Mode 
 
 Java 策略测试在 `android/app/src/test/`，仪器测试在 `android/app/src/androidTest/`。pytest 不替代 Java、release lint、精确 APK 校验、设备启动或同签名升级验收。
 
-`android.ps1 -Mode Check` 只运行 public Java 单元测试和 release lint，不生成已签名交付物。新迁移／更新验收还须覆盖 API 29／36 上的文件确认与中断、权限、缓存损坏、安装取消和两版本覆盖升级；只能使用隔离的模拟数据，不能触碰个人应用数据。
+`android.ps1 -Mode Check` 只运行 public Java 单元测试和 release lint，不生成已签名交付物。但现有 Gradle 配置阶段也会读取 `.signing/keystore.properties`，运行前仍须确认凭据使用权限。未授权读取正式签名时，可将当前 Android 源码、`bagu.py`、`version.json`、空种子构建脚本和允许的静态资源复制到隔离目录，配置仅供测试的假签名属性，使用已有 SDK／Gradle 缓存运行 `:app:testPublicDebugUnitTest :app:lintPublicRelease`；不得复制真实 `.signing/`、数据库或配置，不得在此副本执行打包／安装任务。需核对副本源码与工作区一致，并在验收记录中说明隔离环境，不能将它当作精确交付 APK 验证。
+
+新迁移／更新验收还须覆盖 API 29／36 上的文件确认与中断、权限、缓存损坏、安装取消和两版本覆盖升级；只能使用隔离的模拟数据，不能触碰个人应用数据。
 
 每次交付应分别记录：源码提交、构建版本与 flavor、APK 哈希/签名、测试结果、设备环境、是否发生发布，以及未通过或未覆盖项。模拟器成功不能等同于物理 ARM 手机、真实 16 KiB 页设备、厂商语音服务或远程网络全部通过；历史限制见[验收记录](validation.md#上述设备验收未覆盖的范围)。
 

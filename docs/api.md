@@ -2,7 +2,7 @@
 
 [文档导航](README.md) · [CLI](cli.md) · [用户指南](user-guide.md) · [架构与数据](architecture.md)
 
-本文依据已提交源码基线 `71fbbfd` 的 `bagu.py`，不包含开发中的接口。桌面默认地址为 `http://127.0.0.1:8765`，可用 `python bagu.py serve --port 8765` 启动；Android 使用独立私有数据库和随机本机端口。这不是账号服务或公网 API。
+本文基础 HTTP 说明沿用源码基线 `71fbbfd`；诊断和原生更新章节另行说明当前源码扩展，新的双模式备份契约见[数据迁移与更新](data-transfer-and-updates.md)。桌面默认地址为 `http://127.0.0.1:8765`，可用 `python bagu.py serve --port 8765` 启动；Android 使用独立私有数据库和随机本机端口。这不是账号服务或公网 API。
 
 ## 通用约定与安全
 
@@ -161,6 +161,40 @@ CSV 请求为 `{"content":"category,question,answer,url\n..."}`，不是 multipa
 事件请求最多 32 KiB、每批最多 20 条、单事件最多 2 KiB；每分钟最多接收 120 条，超限或非法单条计入 dropped。请求体超限返回 413，批次格式错误返回 400，访问校验失败返回 403。仅接收已定义的 `web.*` 事件及白名单字段，自由文本不会被保存。
 
 ZIP 固定包含 `manifest.json`、`server.jsonl`、`web.jsonl`、`native.jsonl`、`README.txt`；不可用来源为空并在 manifest 标记。历史日志同样重新过滤，不提供原始目录或任意文件下载。格式版本为 1，与 SQLite/题库备份版本无关。
+
+## Android 更新状态与诊断（当前源码扩展）
+
+沿用受限桥接 `getUpdateState()` 与 `bagu-update` 事件，不新增下载 URL、路径或日志读取方法。既有 `operationId` 用于请求与过期回调控制，`revision` 用于状态顺序；它们不等于供反馈的诊断编号。旧字段保留，新增 `lastCheck`：
+
+| 字段 | 含义 |
+| --- | --- |
+| `diagnosticId` | 真正接受检查后生成的 `n_` 加 32 位小写十六进制；未知为 null，两通道共用 |
+| `startedAt` / `completedAt` | 毫秒时间戳，未完成为 0；中断保留开始时间、完成时间为 0 |
+| `status` | `unknown`、`checking`、`latest`、`available`、`partial-error`、`error`、`interrupted` |
+| `errorCode` | 总体固定错误码，无错误为 0 |
+| `channels` | 以 `beta`／`stable` 为键的对象；stable 安装只包含 stable，未知摘要为空对象 |
+| `channels.<通道>.status` | `pending`、`checking`、`empty`、`available`、`no-update`、`incompatible`、`error`、`interrupted`、`not-checked` |
+| `channels.<通道>.errorCode` | 通道错误码，无错误为 0 |
+| `channels.<通道>.httpStatus` | 已获知的实际 HTTP 状态，未获知或该阶段不适用为 null，不用应用错误码冒充 |
+| `channels.<通道>.durationMs` | 该通道的耗时，非负毫秒 |
+
+`latest` 仅表示所有应检查通道均成功且“当前没有兼容的新版本”；空通道 `empty` 也是成功。部分失败可同时保留旧字段中的已验证候选，因此页面必须分别呈现当前下载／安装状态和 `lastCheck`，不能用某个通道成功推断不存在更高版本。
+
+最近摘要以单条、最多 4096 UTF-8 字节持久化，不含 URL、清单正文、更新说明或异常消息。开始检查先记 `checking`；进程重启把残留 checking 恢复为 interrupted，不重放旧请求。摘要缺失／非法按 unknown，写入失败仅降级为内存状态，不放宽安装交接的持久化要求。无新字段的旧宿主继续显示原有消息。
+
+错误码在发生位置按异常类型或校验边界生成，不匹配异常消息：
+
+| 类别 | 固定错误码 |
+| --- | --- |
+| HTTP / DNS / 超时 / TLS / 其他连接 | 1001 / 1002 / 1003 / 1004 / 1005 |
+| JSON 或 UTF-8 / 清单校验 / 大小超限 / 重定向拒绝 | 1101 / 1102 / 1103 / 1104 |
+| 本地存储 / 长度 / SHA-256 / APK 身份、签名或兼容性 | 1201 / 1202 / 1203 / 1204 |
+| 安装来源权限 / 安装器启动 | 1301 / 1302 |
+| 未分类错误 | 1999 |
+
+主动取消是 `cancelled` 结果，不生成网络错误。操作只有被接受才分配新诊断编号，取消沿用原编号；节流跳过、忙时拒绝或重复点击不清除已有失败编号。工作线程与回调捕获所属操作上下文，过期结果不改变新操作的编号或状态。
+
+`AndroidDiagnostics` 接收不可变 `UpdateDiagnostic`，通过已有 `native.update` 写入 `operation_id`（诊断编号）、`stage`、`outcome`、可选 `channel`、`error_code`、可选 `status`（HTTP）及 `duration_ms`。只对 native.update 开放通道与结果白名单，落盘和导出使用同一过滤器；不记录每块下载进度或任意异常消息，日志失败不改变更新结果。自动检查失败只在设置页显示，网页不重复上报原生错误；用户可通过原有诊断导出入口反馈。
 
 ## 模型配置
 

@@ -2,12 +2,14 @@
 
 [文档导航](README.md) · [开发与测试](development.md) · [Android 构建与交付](android-beta.md)
 
-本页按功能与产物记录验收证据，包括从原 README 和 Android Beta 文档迁移的历史记录。**数字、哈希和设备结果仅适用于各节明确注明的源码或产物，不能代表所有后续版本。** 本次重新执行的诊断日志检查见对应章节。
+本页按功能与产物记录验收证据，包括从原 README 和 Android Beta 文档迁移的历史记录。**数字、哈希和设备结果仅适用于各节明确注明的源码或产物，不能代表所有后续版本。** 最新的本地体验 APK 与此前更新诊断源码实施检查分别记录；通用日志导出的旧验收单独保留。
 
 ## 如何阅读
 
 | 记录 | 对象 | 不能据此推断 |
 | --- | --- | --- |
+| 2026-08-28 更新诊断体验 APK | 明确哈希的 public ARM64 同版本体验包、实际构建/签名/内容校验 | 已安装手机、API29/API36 设备通过、正式版本递增或 GitHub/Pages 上线 |
+| 2026-08-28 更新诊断／发布升级 | `11da156` 后的工作区、模拟网络测试、隔离源码 Android 单测/lint | 手机已升级、真实 Pages/Release 可用、已使用正式签名构建 |
 | 2026-08-28 诊断日志 | 本次未提交工作区、自动化测试和桌面页面检查 | API29/较新系统已完成设备验收、已有 APK 包含日志导出 |
 | 2026-08-28 AI 评卷 | 共享源码与模拟模型/浏览器检查 | 已生成包含这些功能的新 APK、真实模型效果通过 |
 | 2026-08-28 语音专项 | 共享源码、独立测试 APK、隔离模拟器 | 所有手机的语音服务可用、已有安装包已更新 |
@@ -18,7 +20,54 @@
 
 后续迁移、自动更新和发布工作应在完成后另外记录源码、精确产物、测试环境及结果；不能用开发计划的勾选项或用户截图替代验收证据。
 
-## 2026-08-28：诊断日志与导出（未提交工作区）
+## 2026-08-28：更新诊断本地体验 APK（同版本、未公开发布）
+
+源码实施完成后，用户单独授权“先打包一份我看看效果”。本次使用已有稳定签名，从包含未提交更新诊断修改的当前工作区离线构建 public ARM64 体验包；保留 `0.1.0-beta.2 / 2 / beta`，不提交、推送或修改正式版本，不配置 Pages、不发布 GitHub、不安装设备。下方源码实施阶段的“未生成 APK”描述是此前阶段的边界，不表示本节体验包未构建。
+
+- 独立产物：`dist/android/qa/update-diagnostics-preview-20260828/bagu-0.1.0-beta.2-public-arm64-v8a-preview-20260828.apk`，**29,936,589 字节**；同目录有安装说明、SHA256SUMS 及公开证书指纹，没有可发布的 update.json 或发布回执。
+- APK SHA-256：`f78eb868d2056ecba6e6773f84438e6f703769a85756008146e2e8b8ba47b88d`。
+- 签名证书 SHA-256：`ac92a24f30a5e6c10c4ced0d0db89124f39f36e00778fef6ca3ba4973bdf0ee3`；复用原有身份，未重新生成或更换密钥。
+- 离线 Gradle 执行 `:app:assemblePublicRelease :app:testPublicDebugUnitTest :app:lintPublicRelease`：**BUILD SUCCESSFUL，64 秒，退出码 0**；9 份实际 JUnit XML 共 **90 项、零失败/错误/跳过**。lint **零错误、4 条既有警告**（UnusedAttribute、ObsoleteSdkInt、StaticFieldLeak、MonochromeLauncherIcon）。
+- 精确 APK 通过 apksigner、aapt badging（包名 `io.github.ingnijm.baguhelper`、versionCode 2 / versionName 0.1.0-beta.2、minSdk 29、targetSdk 36、仅 arm64-v8a）、`zipalign -c -P 16 4`、既有内容允许列表及 SHA-256 校验。public 种子为 **0 题、0 会话、0 session_items**；**68 个原生 ELF** 均通过 16 KiB LOAD 对齐及 GNU_RELRO 检查。
+- 构建前后 40 个源码文件哈希一致；精确 APK 内 **8 个静态文件逐字节匹配**当前源码，两个应用 Python 模块的编译代码匹配源码（仅归一化编译路径）；DEX 中定义了包括 UpdateFailure、UpdateDiagnostic、UpdateCheckSummary 在内的 7 个必要更新/诊断类。
+- 旧正式目录的 beta.2 APK 未覆盖，构建前后 SHA-256 仍为 `befd5b1f3f43029e4d87a55fc3d5077be182d9560fb01aed7f7d1972227e55e2`。未读取或打包工作站题库、配置或 Key；签名材料仅用于已授权的本地签名。
+
+首次构建在沙箱内遇到 Gradle 缓存 `annotations-13.0.jar` 的 `AccessDeniedException`，同时出现符号解析错误；获准后以相同源码、配置和构建命令在沙箱外复验成功，未改应用逻辑或依赖规避问题。保留既有 SDK XML 与 Gradle 弃用提示。
+
+这是**同版本体验包**，应用内更新不会把 code 2 判断为更高版本，需从文件管理器手动安装。安装前先导出“题库＋进度”，不要卸载；若系统提示签名冲突或降级，停止并核对，不强制处理。新装为空题库，已有本地数据不由种子覆盖。真实设备是否接受同版本安装、启动效果、日志导出、API29/API36 生命周期、同签名覆盖升级及线上更新链路**本次均未验收**；用户将在手机上体验。
+
+## 2026-08-28：更新诊断与发布流程升级（11da156 后工作区）
+
+本轮只实现本地源码、测试与文档，保持 `0.1.0-beta.2 / 2`，不新增数据库迁移、不修改评分/会话/备份、固定更新地址或签名信任。不提交、推送或发布；与用户未提交的 Windows 打包设计无关，未修改该文件。
+
+| 检查 | 本轮证据 |
+| --- | --- |
+| 完整 pytest | 最终 `python -m pytest -q`：**629 passed**，零失败/跳过，95.56 秒，退出码 0；保留之前一次 Windows 连接中止记录，见下方 |
+| 独立 Node | `node --test test/speech_input.test.cjs`：**27 passed**，零失败/取消/跳过 |
+| 原生策略/宿主源码编译 | `python -m pytest test/test_update_policy.py -q -s`：**84 项 JUnit + 2 项 pytest 通过**；包含实际 Android36 SDK 下宿主源码编译，不使用正式签名 |
+| 网页更新与安装互斥 | `python -m pytest test/test_update_web.py -q`：**22 passed**；包含纯文本逐通道提示、旧宿主兼容、原生错误不重复上报、导出取消/失败/成功后互斥释放、未结束练习仍能导出 |
+| 发布工具 | `test/test_github_release.py` 与 `test/test_release.py` 专项 **164 passed**，也包含在最终全量中；实际 Pages API/匿名读取状态传播经外部边界桩验证 |
+| Android Gradle 单测 | 隔离源码执行 `:app:testPublicDebugUnitTest`：**90 项，零失败/错误/跳过**，读取 9 份实际 JUnit XML 报告 |
+| Android release lint | 同次执行 `:app:lintPublicRelease`：**零错误、4 条既有警告**（UnusedAttribute、ObsoleteSdkInt、StaticFieldLeak、MonochromeLauncherIcon） |
+| 离线 init-feed | 当前脏工作区执行 `python scripts/release_github.py init-feed`：退出码 **0**，仅打印固定分支和三文件计划，不调用 gh、不使用凭据或写远端 |
+| 静态检查 | 修改的 Python 文件 `py_compile` 与 `git diff --check` 通过；仅有既有 LF/CRLF 转换提示 |
+
+Android 检查使用当前源码的 66 个允许文件副本（包含新增 Java 类/用例，逐文件 SHA-256 与工作区相同）、假的未使用签名属性和既有 SDK/Gradle 缓存，副本无 keystore、无 APK。未复制真实 `.signing/`、题库或配置；未执行 assemble/package/install。环境为 Windows、Python 3.11.7、Node 22.16.0、JDK 17.0.10、Gradle 9.1.0、compileSdk 36，`baguAbi=arm64-v8a` 只是编译配置，不是已生成 ARM64 安装包的证明。
+
+回归覆盖 HTTP/DNS/TLS/超时与格式/大小/哈希/身份失败、空通道及部分失败、操作编号/取消/过期回调、检查摘要中断与损坏恢复、日志或摘要写入失败隔离，以及 `native.update` 经真实日志文件与 ZIP 再过滤后保留白名单字段、去除假 Key/签名 URL/私有路径/异常消息。发布测试使用合成附件和模拟 Git 数据，覆盖初始化确认/幂等/并发、Pages 前置顺序、六附件/哈希与已公开 Release 恢复。
+
+保留失败及审查记录：
+
+- 失败测试先验证缺失分类/摘要/日志字段与生命周期问题，再实现；独立审查修复了 Python 接受非 ASCII 版本数字而 Android 拒绝的差异，以及启动缓存故障误用旧检查反馈编号的问题。后者的 hash/APK/missing × 有无租约六种组合已回归。
+- 首次隔离 Gradle 在沙箱中因读取生成的 R.jar 被拒绝而失败，获准在沙箱外运行；随后发现新增测试使用 Android SDK 编译面没有的 `Files.readString/writeString`，改为等价 UTF-8 字节读写后，同一单测/lint 命令成功，退出码 0。保留 SDK XML 与弃用 API 提示，不修改工具链或正式签名配置规避问题。
+- 一轮全量测试中，既有本机 HTTP 认证用例 `test_runtime_auth_precedes_body_parsing_and_database_access[GET-/-None]` 出现 Windows `ConnectionAbortedError / 10053`（595 passed、1 failed）；同组 8 项单独复跑、最终 629 项全量均通过，未修改认证逻辑或放宽断言。这次中止原因未确定，不把重跑通过当作已修复产品缺陷。
+- 主审发现 Pages API 404 被当作缺配置，以及匿名下载失败在重试/PARTIAL 中丢失状态，已按失败测试修正。后续成功或内容不一致不会沿用上一次网络失败的 HTTP 状态；错误正文、URL 和工具 stderr 不进入输出。
+- 最终独立审查发现 Pages 明确使用 workflow 但残留旧 source 时会误过发布门禁；新增 5 项失败测试后限制显式部署模式为 legacy，同时保留缺字段兼容，聚焦复审确认解决。没有修改 Pages 设置或执行真实发布。
+- 发布阶段首次 RED 用例漏 mock 匿名下载，触发一次意外匿名读取尝试，没有保留成功响应证据；没有调用 gh、凭据或远端写入。随后修正 fixture，并加 socket/DNS 禁止外网守卫，后续发布回归在守卫下运行。真实 GitHub 可达性不计为通过。
+
+**本轮未执行：** API29/API36 设备安装与仪器验收、Activity/进程被系统中断的真实恢复、启动失败日志导出、最终 ARM64 APK 签名/校验、同签名覆盖升级、更新源远端初始化、Pages 配置、Release 发布、匿名真实附件与旧包到新包链路。真实设备、安装器和线上可达性需要后续单独授权；本轮代码和自动化通过不能替代这些结果。
+
+## 2026-08-28：诊断日志与导出（当时工作区）
 
 在 `a995e84` 及原有未提交工作区改动之上实现桌面和 Android 日志导出，未自动提交、修改版本或生成正式交付 APK。以下是本次实际执行的源码验证，**不沿用旧 APK 的设备验收结论**。
 
