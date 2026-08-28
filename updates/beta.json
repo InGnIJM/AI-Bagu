@@ -1,5 +1,18 @@
 {
   "schema_version": 1,
   "channel": "beta",
-  "release": null
+  "release": {
+    "versionName": "0.1.0-beta.3",
+    "versionCode": 3,
+    "distribution": "public",
+    "packageName": "io.github.ingnijm.baguhelper",
+    "minSdk": 29,
+    "abi": "arm64-v8a",
+    "apkUrl": "https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.3/bagu-0.1.0-beta.3-public-arm64-v8a.apk",
+    "size": 29936357,
+    "sha256": "8a177050afc4eaf5132bd0186292787ab3c5aacc30b7ba40836dd575af9734b3",
+    "releaseUrl": "https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.3",
+    "publishedAt": "2026-08-28T14:12:39Z",
+    "notes": "本版完善 Android 更新检查的通道专属失败原因与 HTTP 状态展示，并将反馈编号和诊断导出接入更新流程。\n进程重启后的检查状态会给出安全摘要；自动检查失败不会打断练习，手动检查可查看简短原因和反馈编号。\n发布前会检查更新 feed、Pages 配置及两通道匿名访问，避免将不完整或错误来源当作可用更新。\n公开发行包保持空题库。下载和安装均须用户明确确认，仍支持既有题库和进度迁移。"
+  }
 }
