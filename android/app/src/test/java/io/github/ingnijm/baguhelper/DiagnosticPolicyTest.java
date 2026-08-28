@@ -50,4 +50,24 @@ public class DiagnosticPolicyTest {
         assertEquals("r_0123abcd", safe.get("request_id"));
         assertFalse(safe.containsKey("path"));
     }
+
+    @Test public void updateEvidenceSurvivesFilteringOnlyForNativeUpdateEvents() {
+        Map<String,Object> input = record("native.update");
+        input.put("channel", "stable"); input.put("outcome", "error"); input.put("error_code", 1001);
+        input.put("status", 404); input.put("duration_ms", 123L); input.put("operation_id", "n_" + "b".repeat(32));
+        input.put("message", "sk-test"); input.put("url", "https://private/?token=sk-test");
+        Map<String,Object> safe = DiagnosticPolicy.sanitize(input, "native");
+        assertEquals("stable", safe.get("channel")); assertEquals("error", safe.get("outcome"));
+        assertEquals(1001, safe.get("error_code")); assertEquals(404, safe.get("status"));
+        assertEquals(123L, safe.get("duration_ms")); assertEquals(input.get("operation_id"), safe.get("operation_id"));
+        assertFalse(safe.toString().contains("sk-test"));
+        for (String event : List.of("native.file", "web.error")) {
+            input.put("event", event); Map<String,Object> other = DiagnosticPolicy.sanitize(input, event.startsWith("web") ? "web" : "native");
+            assertFalse(other.containsKey("channel")); assertFalse(other.containsKey("outcome"));
+        }
+        input.put("event", "native.update"); input.put("channel", "sk-test"); input.put("outcome", "private error");
+        input.put("error_code", 9000); input.put("status", 0); input.put("operation_id", "w_" + "b".repeat(32));
+        safe = DiagnosticPolicy.sanitize(input, "native");
+        for (String key : List.of("channel", "outcome", "error_code", "status", "operation_id")) assertFalse(key, safe.containsKey(key));
+    }
 }

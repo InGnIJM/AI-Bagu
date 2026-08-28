@@ -7,11 +7,11 @@ import java.util.*;
 /** Privacy boundary for native, web and historical server diagnostic records. */
 final class DiagnosticPolicy {
     static final int EVENT_BYTES = 2048;
-    static final Set<String> FILES = words("bagu.py android_runtime.py index.html MainActivity.java RuntimeHost.java NativeBridge.java AndroidSpeechBackend.java SpeechInput.java UpdateEngine.java UpdateController.java UpdateIO.java BaguApplication.java DiagnosticPolicy.java DiagnosticStore.java AndroidDiagnostics.java");
+    static final Set<String> FILES = words("bagu.py android_runtime.py index.html MainActivity.java RuntimeHost.java NativeBridge.java AndroidSpeechBackend.java SpeechInput.java UpdateEngine.java UpdateController.java UpdateIO.java UpdateFailure.java UpdateDiagnostic.java UpdateCheckSummary.java BaguApplication.java DiagnosticPolicy.java DiagnosticStore.java AndroidDiagnostics.java");
     private static final Set<String> WEB_EVENTS = words("web.error web.unhandledrejection web.api web.stream web.action web.dropped web.speech");
     private static final Set<String> NATIVE_EVENTS = words("native.start native.startup native.page native.speech native.file native.update native.crash");
     private static final Set<String> SERVER_EVENTS = words("server.start server.stop runtime.start runtime.ready runtime.error request.start request.error request.done model.request model.connected model.first_reasoning model.first_content model.done model.error reference.request reference.done reference.error judge.context_ready judge.graded db.repair_multiple_open_sessions diagnostic.ready runtime.test");
-    private static final Set<String> ERRORS = words("Error TypeError SyntaxError RangeError ReferenceError URIError EvalError AbortError NetworkError TimeoutError ValueError LookupError RuntimeError OSError IOError PermissionError FileNotFoundError FileExistsError IsADirectoryError NotADirectoryError ConnectionError ConnectionResetError ConnectionRefusedError BrokenPipeError HTTPError URLError JSONDecodeError ResponseParseError JudgeError GradeRejected SkipRejected SessionOpenError DatabaseError OperationalError IntegrityError IOException RuntimeException IllegalStateException IllegalArgumentException SecurityException NullPointerException ActivityNotFoundException JSONException PyException Exception OutOfMemoryError");
+    private static final Set<String> ERRORS = words("Error TypeError SyntaxError RangeError ReferenceError URIError EvalError AbortError NetworkError TimeoutError ValueError LookupError RuntimeError OSError IOError PermissionError FileNotFoundError FileExistsError IsADirectoryError NotADirectoryError ConnectionError ConnectionResetError ConnectionRefusedError BrokenPipeError HTTPError URLError JSONDecodeError ResponseParseError JudgeError GradeRejected SkipRejected SessionOpenError DatabaseError OperationalError IntegrityError IOException RuntimeException IllegalStateException IllegalArgumentException SecurityException NullPointerException ActivityNotFoundException JSONException PyException Exception OutOfMemoryError UpdateFailure UnknownHostException SocketTimeoutException SSLException SSLHandshakeException SSLPeerUnverifiedException ConnectException");
     private static final Set<String> STAGES = words("start ready error done cancelled busy permission load initialize dispatch stream connect parse write read export import check download verify install timeout");
     private static final Set<String> ROUTES = words("/ /index.html /api/stats /api/session /api/draw /api/skip /api/answer /api/answer/stream /api/reveal /api/review /api/settings /api/models /api/models/test /api/questions /api/questions/import /api/backup/export /api/backup/inspect /api/backup/restore /api/diagnostics/export /api/diagnostics/events other");
 
@@ -31,6 +31,18 @@ final class DiagnosticPolicy {
         if (duration instanceof Number && Double.isFinite(((Number) duration).doubleValue()) && ((Number) duration).doubleValue() >= 0 && ((Number) duration).doubleValue() <= 9007199254740991L) out.put("duration_ms", duration);
         String route = route(input.get("route"));
         if (route != null) out.put("route", route);
+        if ("native".equals(source) && "native.update".equals(input.get("event"))) {
+            copyEnum(input, out, "channel", words("beta stable"));
+            copyEnum(input, out, "outcome", UpdateDiagnostic.OUTCOMES);
+            // These fields have stronger contracts for updater events than legacy logs.
+            out.remove("error_code"); out.remove("status"); out.remove("operation_id");
+            if (integer(input.get("error_code"), 0, Integer.MAX_VALUE)) {
+                int code = ((Number) input.get("error_code")).intValue();
+                if (code == 0 || UpdateFailure.validCode(code)) out.put("error_code", code);
+            }
+            copyInteger(input, out, "status", 100, 599);
+            copyPattern(input, out, "operation_id", "n_[a-f0-9]{32}");
+        }
         if ("server".equals(source)) {
             copyPattern(input, out, "session_id", "s_[0-9]{8}_[a-f0-9]{8}");
             copyPattern(input, out, "kept_session_id", "s_[0-9]{8}_[a-f0-9]{8}");

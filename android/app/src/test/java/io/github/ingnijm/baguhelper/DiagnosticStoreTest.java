@@ -96,4 +96,26 @@ public class DiagnosticStoreTest {
         assertEquals("", files.get("web.jsonl"));
         assertTrue(files.get("manifest.json").contains("\"unreadable\":true"));
     }
+
+    @Test public void updateChannelCodeAndFeedbackSurviveDiskAndZipWithoutSecrets() throws Exception {
+        Path root = Files.createTempDirectory("bagu-update-diagnostics-test");
+        DiagnosticStore store = new DiagnosticStore(root.toFile(), codec);
+        String id = "n_" + "c".repeat(32);
+        String poison = "sk-test signed-url-token answer speech-text C:/private/key";
+        UpdateDiagnostic event = new UpdateDiagnostic("check", "error", "beta", id, 1000, 25,
+            new UpdateFailure(1001, 403, new IOException(poison)));
+        Map<String,Object> record = event.toRecord();
+        record.put("message", poison); record.put("url", "https://private/?token=sk-test"); record.put("path", "C:/private/key");
+        store.append("native", record);
+        String persisted = new String(Files.readAllBytes(root.resolve("bagu-native.log")), StandardCharsets.UTF_8);
+        assertFalse(persisted.contains("sk-test")); assertFalse(persisted.contains("private"));
+        // Old raw log records are independently filtered again at export.
+        Files.write(root.resolve("bagu-native.log.1"), (codec.json(record) + "\n").getBytes(StandardCharsets.UTF_8));
+        Map<String,String> files = unzip(store.export(Collections.emptyMap()));
+        String output = files.get("native.jsonl");
+        assertTrue(output.contains("\"channel\":\"beta\"")); assertTrue(output.contains("\"outcome\":\"error\""));
+        assertTrue(output.contains("\"error_code\":1001")); assertTrue(output.contains("\"status\":403"));
+        assertTrue(output.contains(id)); assertTrue(output.contains("\"duration_ms\":25"));
+        for (String secret : List.of("sk-test", "signed-url", "answer", "speech-text", "C:/private", "https://")) assertFalse(secret, files.toString().contains(secret));
+    }
 }

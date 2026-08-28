@@ -56,19 +56,29 @@ final class AndroidDiagnostics {
             value.put("level", failure != null || "error".equals(stage) ? "ERROR" : "INFO");
             if (operationId != null) value.put("operation_id", operationId);
             if (code != null) value.put("error_code", code);
-            if (failure != null) {
-                value.put("error_type", DiagnosticPolicy.errorType(failure.getClass().getSimpleName()));
-                List<Map<String, Object>> frames = new ArrayList<>();
-                for (StackTraceElement frame : failure.getStackTrace()) {
-                    if (frames.size() >= 16) break;
-                    if (!DiagnosticPolicy.FILES.contains(frame.getFileName()) || frame.getLineNumber() <= 0) continue;
-                    Map<String, Object> location = new LinkedHashMap<>();
-                    location.put("file", frame.getFileName()); location.put("line", frame.getLineNumber()); frames.add(location);
-                }
-                value.put("frames", frames);
-            }
+            failureFields(value, failure);
             write("native", value);
         } catch (Throwable ignored) { /* Never log the logger failure recursively. */ }
+    }
+    static void update(UpdateDiagnostic event) {
+        try {
+            Map<String,Object> value = event.toRecord();
+            failureFields(value, event.failure);
+            write("native", value); // Same DiagnosticPolicy is used here and at ZIP export.
+        } catch (Throwable ignored) { /* Logger failure cannot alter an update result. */ }
+    }
+    private static void failureFields(Map<String,Object> value, Throwable failure) {
+        if (failure == null) return;
+        Throwable detail = failure instanceof UpdateFailure && failure.getCause() != null ? failure.getCause() : failure;
+        value.put("error_type", DiagnosticPolicy.errorType(detail.getClass().getSimpleName()));
+        List<Map<String,Object>> frames = new ArrayList<>();
+        for (StackTraceElement frame : detail.getStackTrace()) {
+            if (frames.size() >= 16) break;
+            if (!DiagnosticPolicy.FILES.contains(frame.getFileName()) || frame.getLineNumber() <= 0) continue;
+            Map<String,Object> location = new LinkedHashMap<>();
+            location.put("file", frame.getFileName()); location.put("line", frame.getLineNumber()); frames.add(location);
+        }
+        value.put("frames", frames);
     }
     private static synchronized void write(String source, Map<String, Object> value) {
         try { if (store == null) { writeFailures++; return; } store.append(source, value); }
