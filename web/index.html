@@ -1342,6 +1342,7 @@
     .update-toggle { display: flex; align-items: center; min-height: 44px; cursor: pointer; }
     .update-toggle input { width: 22px; height: 22px; margin-right: 10px; accent-color: var(--color-accent); }
     .update-notes { white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0; }
+    .update-check-detail { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 8px; }
     .update-progress { width: 100%; margin-top: 12px; accent-color: var(--color-accent); }
     #update-notice { border-color: var(--color-ink, #0F172A); background: var(--color-accent, #FDE047); }
     body.android-app #view-overview .sidebar-cats-card { margin-top: 14px; }
@@ -1639,6 +1640,7 @@
               <p class="help">仅在前台检查，自动检查间隔至少 24 小时；不会自动下载或安装。下载切到后台会取消，请保持此应用在前台。</p>
               <p class="help" id="update-last-check"></p>
               <p id="update-status" class="help" role="status" aria-live="polite" aria-atomic="true">尚未检查更新。</p>
+              <p class="help update-check-detail" id="update-check-detail" role="status" aria-live="polite"></p>
               <div class="update-actions"><button type="button" class="secondary" id="btn-update-check">检查更新</button><button type="button" class="secondary hidden" id="btn-update-recover">恢复更新</button></div>
               <div class="hidden" id="update-candidate">
                 <h3 id="update-candidate-title"></h3>
@@ -1982,6 +1984,53 @@
     function updateNoticeKey() { return updateState.candidate ? (updateState.noticeId || "legacy") + ":" + updateState.candidate.id : ""; }
     function updateOperationId() { return "update_" + Date.now() + "_" + (++updateSequence); }
     function updateBytes(value) { return (Number(value || 0) / 1048576).toFixed(1) + " MiB"; }
+    const UPDATE_CHECK_STATUSES = new Set(["unknown", "checking", "latest", "available", "partial-error", "error", "interrupted"]);
+    const UPDATE_CHANNEL_STATUSES = new Set(["pending", "checking", "empty", "available", "no-update", "incompatible", "error", "interrupted", "not-checked"]);
+    const UPDATE_ERROR_REASONS = {
+      1001: "HTTP 错误", 1002: "DNS 解析失败", 1003: "连接超时", 1004: "TLS 连接失败", 1005: "连接失败",
+      1101: "更新清单格式无效", 1102: "更新清单校验失败", 1103: "内容超过大小限制", 1104: "重定向被拒绝",
+      1201: "本地存储失败", 1202: "文件长度校验失败", 1203: "SHA-256 校验失败", 1204: "安装包身份、签名或兼容性校验失败",
+      1301: "缺少安装权限", 1302: "无法启动安装器", 1999: "未分类更新错误"
+    };
+    function updateSafeTime(value) { return Number.isSafeInteger(value) && value > 0 ? value : 0; }
+    function updateSafeHttpStatus(value) { return Number.isInteger(value) && value >= 100 && value <= 599 ? value : 0; }
+    function updateSafeDiagnosticId(value) { return typeof value === "string" && /^n_[a-f0-9]{32}$/.test(value) ? value : ""; }
+    function updateErrorReason(code, httpStatus) {
+      const reason = UPDATE_ERROR_REASONS[code] || "更新检查发生未知错误";
+      return code === 1001 && updateSafeHttpStatus(httpStatus) ? reason + "（HTTP " + httpStatus + "）" : reason;
+    }
+    function updateChannelReason(channel) {
+      const status = channel && UPDATE_CHANNEL_STATUSES.has(channel.status) ? channel.status : "not-checked";
+      const labels = { pending: "等待检查", checking: "正在检查", empty: "未提供版本", available: "发现兼容新版本", "no-update": "无兼容新版本", incompatible: "最新版本与本机不兼容", interrupted: "检查中断", "not-checked": "尚未检查" };
+      return status === "error" ? updateErrorReason(channel && channel.errorCode, channel && channel.httpStatus) : labels[status];
+    }
+    function updateCheckSummary(check) {
+      const statuses = { unknown: "未知／尚未检查", checking: "正在检查", latest: "当前没有兼容的新版本", available: "发现兼容新版本", "partial-error": "部分频道检查失败，结果不代表当前已是最新", error: "检查失败", interrupted: "上次检查中断，请重试" };
+      return statuses[check && check.status] || statuses.unknown;
+    }
+    function updateLegacyLastCheck(data) {
+      const statuses = { never: "尚未检查", available: "发现新版本", latest: "无兼容新版本", error: "检查失败", "partial-error": "部分频道检查失败" };
+      return "上次检查：" + (updateSafeTime(data.lastAttempt) ? new Date(data.lastAttempt).toLocaleString() : "尚未检查") + " · " + (statuses[data.lastStatus] || "尚未检查");
+    }
+    function renderUpdateCheck(data) {
+      const check = data && data.lastCheck;
+      if (!check || typeof check !== "object" || !UPDATE_CHECK_STATUSES.has(check.status)) {
+        $("update-last-check").textContent = updateLegacyLastCheck(data || {});
+        $("update-check-detail").textContent = "";
+        return;
+      }
+      const checkedAt = updateSafeTime(check.completedAt) || updateSafeTime(check.startedAt);
+      $("update-last-check").textContent = "上次检查：" + (checkedAt ? new Date(checkedAt).toLocaleString() : "尚未检查") + " · " + updateCheckSummary(check);
+      const channels = check.channels && typeof check.channels === "object" ? check.channels : {};
+      const details = [];
+      [["beta", "Beta"], ["stable", "Stable"]].forEach(([key, name]) => {
+        if (channels[key] && typeof channels[key] === "object") details.push(name + "：" + updateChannelReason(channels[key]));
+      });
+      const id = updateSafeDiagnosticId(check.diagnosticId);
+      if (id) details.push("反馈编号：" + id);
+      if (details.length) details.push("如需协助，请使用上方“导出诊断日志”。");
+      $("update-check-detail").textContent = details.join("；");
+    }
     function renderUpdateState() {
       if (!isAndroidApp) return;
       const data = updateState, candidate = data.candidate;
@@ -1991,8 +2040,7 @@
       $("update-automatic").checked = data.enabled !== false;
       $("update-automatic").disabled = busy;
       $("update-status").textContent = data.message || "可手动检查更新。";
-      const statuses = { never: "尚未检查", available: "发现新版本", latest: "无兼容新版本", error: "检查失败", "partial-error": "部分频道检查失败" };
-      $("update-last-check").textContent = "上次检查：" + (data.lastAttempt ? new Date(data.lastAttempt).toLocaleString() : "尚未检查") + " · " + (statuses[data.lastStatus] || "尚未检查");
+      renderUpdateCheck(data);
       $("btn-update-check").disabled = busy;
       $("btn-update-recover").classList.toggle("hidden", !data.recovery);
       $("btn-update-recover").disabled = busy;

@@ -37,6 +37,48 @@ process.stdout.write(JSON.stringify({{calls,disabled:$('btn-update-download').di
     assert result["calls"][0][1].startswith("update_") and result["disabled"]
 
 
+def test_update_check_details_show_partial_channel_reason_feedback_and_keep_current_operation_message():
+    result = run_web_js(WEB_DOM + f"""
+const nativeStore={{}},isAndroidApp=true;let session={{session_id:null}},judgeTimer=null,nativeBusy='',speechInput=null;
+{update_source()}
+handleUpdateResult({{detail:{{revision:1,operationId:'update_download',status:'downloading',message:'正在下载更新…',candidate:{{id:'2:hash',versionName:'v2',size:1}},lastCheck:{{diagnosticId:'n_0123456789abcdef0123456789abcdef',startedAt:1000,completedAt:2000,status:'partial-error',errorCode:1001,channels:{{beta:{{status:'error',errorCode:1001,httpStatus:503,durationMs:8}},stable:{{status:'available',errorCode:0,httpStatus:200,durationMs:9}}}}}}}}}});
+process.stdout.write(JSON.stringify({{status:$('update-status').textContent,last:$('update-last-check').textContent,detail:$('update-check-detail').textContent}}));
+""")
+    assert result["status"] == "正在下载更新…"
+    assert "部分频道检查失败" in result["last"]
+    assert "Beta：HTTP 错误（HTTP 503）" in result["detail"]
+    assert "Stable：发现兼容新版本" in result["detail"]
+    assert "反馈编号：n_0123456789abcdef0123456789abcdef" in result["detail"]
+
+
+def test_update_check_unknown_interrupted_and_legacy_hosts_have_safe_fallbacks():
+    result = run_web_js(WEB_DOM + f"""
+const nativeStore={{}},isAndroidApp=true;let session={{session_id:null}},judgeTimer=null,nativeBusy='',speechInput=null;
+{update_source()}
+handleUpdateResult({{detail:{{revision:1,status:'idle',lastAttempt:0,lastStatus:'latest',message:'旧宿主仍可用'}}}});
+const legacy=$('update-last-check').textContent;
+handleUpdateResult({{detail:{{revision:2,status:'idle',lastCheck:{{diagnosticId:'n_abcdefabcdefabcdefabcdefabcdefab',startedAt:1000,completedAt:0,status:'interrupted',errorCode:0,channels:{{beta:{{status:'interrupted',errorCode:0,durationMs:0}}}}}}}}}});
+process.stdout.write(JSON.stringify({{legacy,last:$('update-last-check').textContent,detail:$('update-check-detail').textContent}}));
+""")
+    assert "尚未检查" in result["legacy"]
+    assert "上次检查中断，请重试" in result["last"]
+    assert "Beta：检查中断" in result["detail"]
+
+
+def test_update_check_renders_only_known_text_safe_fields_and_does_not_log_native_failures_to_web():
+    result = run_web_js(WEB_DOM + f"""
+    let webRecords=0;window.baguDiagnostics={{record:()=>webRecords++}};
+const nativeStore={{}},isAndroidApp=true;let session={{session_id:null}},judgeTimer=null,nativeBusy='',speechInput=null;
+{update_source()}
+handleUpdateResult({{detail:{{revision:1,operationId:'auto_123',status:'error',message:'自动检查未完成',lastCheck:{{diagnosticId:'n_0123456789abcdef0123456789abcdef',startedAt:1,completedAt:2,status:'error',errorCode:1001,channels:{{beta:{{status:'error',errorCode:1001,httpStatus:503,durationMs:1,url:'https://untrusted.example/',message:'<script>bad</script>'}},evil:{{status:'available',message:'shown-never'}}}}}}}}}});
+process.stdout.write(JSON.stringify({{card:$('update-card').classList.contains('hidden'),notice:$('update-notice').classList.contains('hidden'),detail:$('update-check-detail').textContent,records:webRecords}}));
+""")
+    assert result["card"] is False and result["notice"] is True
+    assert "HTTP 错误（HTTP 503）" in result["detail"]
+    assert "untrusted" not in result["detail"] and "bad" not in result["detail"] and "shown-never" not in result["detail"]
+    assert result["records"] == 0
+
+
 @pytest.mark.parametrize("busy", ["session", "grade", "file", "speech"])
 def test_update_shared_install_guard_refuses_each_busy_domain(busy):
     result = run_web_js(WEB_DOM + f"""
@@ -152,3 +194,41 @@ process.stdout.write(JSON.stringify({{acquired,calls,speech:$('speech-error').te
 """)
     assert result["acquired"] and result["calls"] == []
     assert "安装" in result["speech"] and "安装" in result["file"]
+
+
+@pytest.mark.parametrize("terminal", ["ok", "cancelled", "error"])
+def test_diagnostics_export_and_install_reservation_remain_mutually_exclusive(terminal):
+    result = run_web_js(WEB_DOM + f"""
+const calls=[];const nativeStore={{exportDiagnostics:()=>calls.push('diagnostics')}},isAndroidApp=true;
+let session={{session_id:null}},judgeTimer=null,nativeBusy='',speechInput=null;
+{update_source()}
+{web_section('function setNativeMessage(', 'function encodeArchiveBytes')}
+(async()=>{{
+const reserved=window.baguReserveUpdateInstallation('before-export');await exportDiagnostics();
+const deniedDuringInstall=calls.length===0&&$('diagnostics-message').textContent.includes('安装');
+window.baguReleaseUpdateInstallation('before-export');await exportDiagnostics();await exportDiagnostics();
+const busyDuringExport=nativeBusy,deniedDuringExport=!window.baguReserveUpdateInstallation('during-export');
+await handleNativeResult({{detail:{{operation:'diagnostics',status:'{terminal}',message:'synthetic result'}}}});
+const after=window.baguReserveUpdateInstallation('after-export');window.baguReleaseUpdateInstallation('after-export');
+process.stdout.write(JSON.stringify({{reserved,deniedDuringInstall,calls,busyDuringExport,deniedDuringExport,after,busy:nativeBusy}}));
+}})();
+""")
+    assert result == {
+        "reserved": True, "deniedDuringInstall": True, "calls": ["diagnostics"],
+        "busyDuringExport": "diagnostics", "deniedDuringExport": True, "after": True, "busy": "",
+    }
+
+
+def test_diagnostics_export_preserves_open_practice_and_does_not_refresh_or_end_it():
+    result = run_web_js(WEB_DOM + f"""
+const calls=[];const nativeStore={{exportDiagnostics:()=>calls.push('diagnostics')}},isAndroidApp=true;
+let session={{session_id:'synthetic-open',items:[{{id:1,grade:null}}],pending:[1]}},judgeTimer=null,nativeBusy='',speechInput=null;
+{update_source()}
+{web_section('function setNativeMessage(', 'function encodeArchiveBytes')}
+function refresh(){{throw Error('diagnostics must not mutate practice');}}
+(async()=>{{const before=JSON.stringify(session);await exportDiagnostics();
+await handleNativeResult({{detail:{{operation:'diagnostics',status:'ok',message:'synthetic result'}}}});
+process.stdout.write(JSON.stringify({{calls,unchanged:before===JSON.stringify(session),busy:nativeBusy,canInstall:window.baguReserveUpdateInstallation('open-session')}}));
+}})();
+""")
+    assert result == {"calls": ["diagnostics"], "unchanged": True, "busy": "", "canInstall": False}
