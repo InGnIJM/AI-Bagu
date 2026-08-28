@@ -2495,6 +2495,97 @@ def test_web_has_memorize_mode_and_dont_know_action(conn, tmp_path):
     assert 'api("POST", "/api/review"' in html
 
 
+@pytest.mark.parametrize("mode", ["answer", "memorize"])
+@pytest.mark.parametrize("category", ["", "MySQL", '网络 & <协议> "基础"'])
+def test_practice_category_is_sent_in_both_study_modes(mode, category):
+    html = (Path(__file__).parents[1] / "web/index.html").read_text(encoding="utf-8")
+    mode_source = html[html.index("    function setStudyMode"):html.index("    function escapeHtml")]
+    draw_source = html[html.index("    async function draw("):html.index("    async function advanceQuestion")]
+    handlers = html[html.index('    $("mode-answer").addEventListener'):html.index('    $("btn-skip").addEventListener')]
+    script = r'''
+const nodes = {}, handlers = {}, requests = [], storage = new Map();
+function $(id) { return nodes[id] || (nodes[id] = {
+  value: '', textContent: '', setAttribute() {},
+  addEventListener(event, handler) { handlers[id + ':' + event] = handler; }
+}); }
+const appStorage = {setItem(key, value) { storage.set(key, value); }};
+let selectedMode = 'answer';
+async function api(method, path, body) {
+  requests.push({method, path, body});
+  return {session_id: 's_test', questions: []};
+}
+function rememberSessionMode(sid, mode) { storage.set(sid, mode); }
+function showView() {} async function refresh() {}
+function alert(message) { throw new Error(message); }
+''' + mode_source + draw_source + handlers + f'''
+(async () => {{
+  $('practice-cat').value = {json.dumps(category)};
+  await handlers['mode-memorize:click']();
+  await handlers['mode-answer:click']();
+  await handlers['mode-{mode}:click']();
+  await handlers['btn-draw:click']();
+  process.stdout.write(JSON.stringify({{requests, mode: storage.get('s_test'), category: $('practice-cat').value}}));
+}})().catch(e => {{console.error(e); process.exitCode = 1;}});
+'''
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["requests"] == [{"method": "POST", "path": "/api/draw", "body": {"n": 5, "cat": category or None}}]
+    assert data["mode"] == mode
+    assert data["category"] == category
+
+
+def test_practice_category_options_follow_stats_and_preserve_valid_selection():
+    html = (Path(__file__).parents[1] / "web/index.html").read_text(encoding="utf-8")
+    escape_source = html[html.index("    function escapeHtml"):html.index("    function safeHttpUrl")]
+    cats_source = html[html.index("    function renderCats"):html.index("    function currentQuestion")]
+    script = r'''
+const nodes = {};
+function $(id) { return nodes[id] || (nodes[id] = {
+  value: '', innerHTML: '', textContent: '', disabled: false, querySelectorAll() { return []; }
+}); }
+''' + escape_source + cats_source + r'''
+const snapshots = [];
+const select = $('practice-cat');
+function snapshot() { snapshots.push({value: select.value, html: select.innerHTML, disabled: select.disabled}); }
+const stats = {by_cat: [{category: 'MySQL', total: 3, seen: 1}, {category: '网络 & <协议> "基础"', total: 2, seen: 0}]};
+renderCats(stats); snapshot();
+select.value = 'MySQL'; renderCats(stats); snapshot();
+renderCats({by_cat: [stats.by_cat[1]]}); snapshot();
+select.value = stats.by_cat[1].category; renderCats({by_cat: []}); snapshot();
+renderCats(stats); snapshot();
+process.stdout.write(JSON.stringify(snapshots));
+'''
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+    initial, kept, removed, empty, refilled = json.loads(result.stdout)
+    from html.parser import HTMLParser
+
+    class Options(HTMLParser):
+        def __init__(self, markup):
+            super().__init__()
+            self.values = []
+            self.tags = []
+            self.feed(markup)
+
+        def handle_starttag(self, tag, attrs):
+            self.tags.append(tag)
+            if tag == "option":
+                self.values.append(dict(attrs).get("value"))
+
+    options = Options(initial["html"])
+    assert options.values == ["", "MySQL", '网络 & <协议> "基础"']
+    assert options.tags == ["option", "option", "option"]
+    assert initial["value"] == "" and not initial["disabled"]
+    assert kept["value"] == "MySQL"
+    assert removed["value"] == ""
+    assert Options(removed["html"]).values == ["", '网络 & <协议> "基础"']
+    assert empty["value"] == "" and empty["disabled"]
+    assert Options(empty["html"]).values == [""]
+    assert not refilled["disabled"]
+    assert Options(refilled["html"]).values == options.values
+
+
 def test_web_draft_functions_persist_in_local_storage():
     html = (Path(__file__).parents[1] / "web" / "index.html").read_text(
         encoding="utf-8"

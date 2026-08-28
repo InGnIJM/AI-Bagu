@@ -946,6 +946,8 @@
     .idle-hero { text-align: center; }
     .idle-hero h2 { font-size: 26px; margin: 8px 0; letter-spacing: -.03em; font-weight: 800; }
     .idle-hero p { color: var(--color-muted-fg); margin-bottom: 20px; font-weight: 600; }
+    .practice-category { max-width: 360px; margin: 20px auto; text-align: left; }
+    .practice-category select { min-height: 48px; }
 
     /* 模型配置库 */
     .back {
@@ -1552,6 +1554,10 @@
                 </button>
               </div>
               <p class="mode-note" id="mode-help">先用自己的话回答，再交给模型评判。</p>
+              <div class="practice-category">
+                <label for="practice-cat">练习分类</label>
+                <select id="practice-cat"><option value="">全部分类</option></select>
+              </div>
               <p id="session-scope-note">到期复习优先。Hermes 客户端和本页面共用同一把会话锁。</p>
               <button class="cta" type="button" id="btn-draw">
                 <span class="material-symbols-rounded filled">play_arrow</span>
@@ -3150,6 +3156,13 @@
     function renderCats(s) {
       const box = $("cats");
       const list = s.by_cat || [];
+      const select = $("practice-cat");
+      const current = select.value;
+      select.innerHTML = '<option value="">全部分类</option>' + list.map((c) => (
+        `<option value="${escapeHtml(c.category)}">${escapeHtml(c.category)}</option>`
+      )).join("");
+      select.value = list.some((c) => c.category === current) ? current : "";
+      select.disabled = list.length === 0;
       const countEl = $("cats-count-badge");
       if (countEl) countEl.textContent = `${list.length}`;
       if (!list.length) { box.innerHTML = "<p class='help'>暂无分类</p>"; return; }
@@ -3581,7 +3594,7 @@
     // 事件绑定与键盘快捷键
     $("mode-answer").addEventListener("click", () => setStudyMode("answer"));
     $("mode-memorize").addEventListener("click", () => setStudyMode("memorize"));
-    $("btn-draw").addEventListener("click", () => draw(5));
+    $("btn-draw").addEventListener("click", () => draw(5, $("practice-cat").value));
     
     $("btn-skip").addEventListener("click", async () => {
       cancelSpeechInput();
