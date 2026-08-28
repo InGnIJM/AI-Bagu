@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import secrets
+import sqlite3
 import threading
 import urllib.error
 import urllib.parse
@@ -16,6 +17,7 @@ _thread = None
 _paths = None
 _identity = None
 _info = None
+_app_version = None
 
 
 def _origin(url):
@@ -38,32 +40,41 @@ class SecureRedirectHandler(urllib.request.HTTPRedirectHandler):
         return redirected
 
 
-def start(files_dir: str, static_root: str, seed_path: str, variant: str) -> str:
+def start(files_dir: str, static_root: str, seed_path: str, variant: str, app_version=None) -> str:
+    try:
+        return _start(files_dir, static_root, seed_path, variant, app_version)
+    except Exception as error:
+        bagu.log_event("runtime.error", level="ERROR", **bagu.diagnostic_exception(error))
+        raise
+
+
+def _start(files_dir: str, static_root: str, seed_path: str, variant: str, app_version=None) -> str:
     """Start once per process, keeping the port/token stable through Activity recreation."""
-    global _server, _thread, _paths, _identity, _info
+    global _server, _thread, _paths, _identity, _info, _app_version
     if variant not in ("internal", "public"):
         raise ValueError("Unknown Android distribution variant")
     private = Path(files_dir).resolve()
     static = Path(static_root).resolve()
     seed = Path(seed_path).resolve()
-    identity = (private, static, seed, variant)
+    identity = (private, static, seed, variant, app_version)
     with _lock:
         if _server is not None:
             if identity != _identity:
                 raise ValueError("Android process runtime already belongs to another directory")
             return json.dumps(_info)
+        paths = bagu.AppPaths(private / "data", private / "config", static, private / "logs")
+        bagu.configure_logging(log_dir=paths.log_dir)
+        bagu.log_event("runtime.start", stage="initialize")
         if not (static / "web/index.html").is_file():
             raise ValueError("Missing bundled application page")
-        paths = bagu.AppPaths(private / "data", private / "config", static, private / "logs")
-        for directory in (paths.data_dir, paths.config_dir, paths.log_dir):
+        for directory in (paths.data_dir, paths.config_dir):
             directory.mkdir(parents=True, exist_ok=True)
         bagu.prepare_mobile_database(paths.db_path, seed)
-        bagu.configure_logging(log_dir=paths.log_dir)
         urllib.request.install_opener(urllib.request.build_opener(SecureRedirectHandler()))
         token = secrets.token_urlsafe(32)
         handler = bagu.make_http_handler(
             root=paths.config_dir, db_path=paths.db_path, static_root=paths.static_dir,
-            access_token=token, android=True,
+            access_token=token, android=True, app_version=app_version,
         )
 
         class AndroidHandler(handler):
@@ -92,6 +103,8 @@ def start(files_dir: str, static_root: str, seed_path: str, variant: str) -> str
             server.server_close()
             raise
         _server, _thread, _paths, _identity, _info = server, thread, paths, identity, info
+        _app_version = app_version
+        bagu.log_event("runtime.ready", stage="ready")
         return json.dumps(info)
 
 
@@ -101,12 +114,36 @@ def _connection():
     return bagu.get_conn(_paths.db_path)
 
 
-def export_archive() -> bytes:
-    conn = _connection()
+def has_open_session() -> bool:
+    """Fail closed before installation; never initialize/migrate/create a database."""
+    if _paths is None:
+        raise RuntimeError("Android runtime has not started")
+    conn = sqlite3.connect(_paths.db_path.resolve().as_uri() + "?mode=ro", uri=True)
     try:
-        return bagu.export_backup(conn)
+        conn.execute("PRAGMA query_only = ON")
+        return conn.execute("SELECT 1 FROM sessions WHERE status = 'open' LIMIT 1").fetchone() is not None
     finally:
         conn.close()
+
+
+def export_archive(mode="progress") -> bytes:
+    conn = _connection()
+    try:
+        return bagu.export_backup(conn, app_version=_app_version, mode=mode)
+    finally:
+        conn.close()
+
+
+def inspect_archive(data) -> str:
+    summary = bagu.inspect_backup(bytes(data))
+    conn = _connection()
+    try:
+        blocked = bagu._backup_open_session_error(conn)
+        if blocked:
+            raise blocked
+    finally:
+        conn.close()
+    return json.dumps(summary)
 
 
 def restore_archive(data) -> str:

@@ -19,7 +19,11 @@
 | `scripts/` | Android 构建/校验与清洁题库种子生成 |
 | `test/test_bagu.py` | 单元测试，必须用临时目录，禁止写真实 `bagu.db` |
 | `test/test_android_project.py` | Android 项目、运行时、原生桥接和发布契约测试 |
-| `docs/android-beta.md` | 构建、备份迁移、源码与 APK 验收范围 |
+| `docs/README.md`、`docs/user-guide.md` | 文档导航与详细使用说明；根 README 面向首次使用 |
+| `docs/cli.md`、`docs/api.md`、`docs/architecture.md` | 命令、接口与当前架构/数据约束 |
+| `docs/development.md`、`docs/android-beta.md` | 开发测试、Android 构建与安装更新 |
+| `docs/data-transfer-and-updates.md` | 双端迁移、Android 更新、版本化构建与明确授权的 GitHub 发布／恢复 |
+| `docs/validation.md`、`docs/images/` | 历史验收证据与文档截图；截图不加入应用打包列表 |
 | `docs/superpowers/specs/` | 已定设计。会话网页、多模型条目均已实现 |
 | `docs/superpowers/plans/` | 实现计划 |
 | `.env` | 密钥，禁止提交、禁止写入文档/聊天 |
@@ -62,7 +66,7 @@
 
 会话网页 spec：`docs/superpowers/specs/2026-08-26-session-web-design.md`（已实现）。改会话协议前先读它。
 
-后续补充：`docs/superpowers/specs/2026-08-27-session-fault-recovery-design.md`（数据库并发、submission 与中断恢复）和 `docs/superpowers/specs/2026-08-27-android-beta-design.md`（移动端边界）。早期计划是历史记录；当前操作说明以 README、Android Beta 文档和代码为准。
+后续补充：`docs/superpowers/specs/2026-08-27-session-fault-recovery-design.md`（数据库并发、submission 与中断恢复）和 `docs/superpowers/specs/2026-08-27-android-beta-design.md`（移动端边界）。早期计划是历史记录，部分旧设计已被替代；阅读入口为 `docs/README.md`。当前使用方法见 README / `docs/user-guide.md`，技术说明见 CLI / API / architecture 文档，均需结合各文档注明的源码基线和实际代码核对。测试数字、APK 哈希与未验证范围集中在 `docs/validation.md`，不作为后续版本的自动验收结论。
 
 ## 数据表
 
@@ -94,7 +98,8 @@
 | `POST /api/reveal` | 仅返回本轮未判题的题库答案，不计分 |
 | `POST /api/review` | 自评并保存结果，支持 submission 重放，不调用模型 |
 | `GET /api/submissions/:id` | 查询已完成结果，会话关闭后也可恢复 |
-| `GET /api/backup/export` | 导出题目和进度的 ZIP 字节，允许有 open 会话 |
+| `GET /api/backup/export` | `mode=questions` 或 `mode=progress`，默认 progress；空／非法／重复 mode → 400，允许有 open 会话 |
+| `POST /api/backup/inspect` | `{archive_base64}`；完整校验，只读返回类型、题数、时间、版本与 schema |
 | `POST /api/backup/restore` | `{archive_base64}`；整批校验后合并，有 open 会话时 409 |
 | `POST /api/models` | 服务端先测再写；测挂 502 且不写盘 |
 | `POST /api/models/:id/activate` | 只改 `active_id` |
@@ -142,13 +147,30 @@
 
 ## 备份与 Android 交付
 
-- `.bagu-backup` 仅含 `manifest.json` / `questions.json`，保存题目、答案、URL 和调度；不含配置、Key、草稿、会话或评分分析
+- `.bagu-backup` v2 仅含 `manifest.json` / `questions.json`；`questions` 仅含分类、题干、答案、URL，不含任何调度字段；`progress` 额外保存调度，且为默认导出模式。v1 按 progress 读取；备份 schema 与 SQLite user_version 无关。不含配置、Key、草稿、会话或评分分析
 - 上限为 10000 题、压缩 20 MiB、解压 JSON 合计 50 MiB；检查成员名、重复项、字段及 SHA-256，失败整批不写库
-- 恢复按分类+题干合并，已有题的答案、URL 和调度会被备份覆盖；不删除其他题，不修改已有会话/分析历史，有 open 会话时禁止恢复
+- 恢复按分类+题干合并，两种模式都覆盖答案与 URL（包括空内容）；questions 保留已有进度，新题默认零／null，progress 覆盖调度。不删除其他题，不修改会话／分析历史；BEGIN IMMEDIATE 事务内检查 open 会话，异常回滚
+- 桌面与 Android 均先完整校验、预览，再明确确认同一份字节。Android 文件正文不进 JS，Activity 重建不得隐式确认，进程死亡不重放；恢复完成未知时要求先核对数据，不自动重试。真实 `*.bagu-backup` 禁止提交
 - Android 通过 `AppPaths` 分离 data/config/static/logs；首次安装复制清洁种子，已有数据不被种子覆盖
 - `internal` 使用经授权的只读源题库生成清洁种子；`public` 为空种子。不得把工作站数据库、进度、配置或密钥直接打包
 - 发布脚本使用项目本地工具链和稳定签名，不自动上传；不要重新生成已有签名身份或更改机器级环境变量
 - 源码合入不代表 APK 更新。重新构建/发布时重新校验精确 APK、签名、清单、原生库和哈希，更新对应验收记录
+
+## Android 更新与发布约束
+
+- `version.json` 是 versionName/versionCode/channel 来源；默认 public 空题库构建，internal 必须显式指定且不可公开。自有源码 MIT 不重新授权题库、第三方字体、素材或运行时
+- 更新默认仅自动检查，前台／页面就绪且通常距上次尝试 24 小时；手动可绕过间隔。stable 读 stable，beta 读两通道取最高兼容整数 code；部分失败不得报告已最新
+- 更新失败在发生位置生成 `UpdateFailure` 固定码与可选真实 HTTP 状态，不匹配异常消息。不可变 `UpdateDiagnostic` 通过 `AndroidDiagnostics` 的 `native.update` 白名单落盘／导出，不记录正文、完整 URL、路径或异常消息；日志失败不影响更新结果
+- 接受操作后才生成 `n_` +32 hex 诊断编号，两通道共用、取消沿用；节流／忙拒绝不抹掉旧编号，回调捕获所属操作。保留 getUpdateState/bagu-update 旧字段，lastCheck 是最多4KiB安全摘要；checking 重启变 interrupted，缺失/非法为 unknown，摘要写失败仅内存降级，不放宽安装状态持久化
+- 自动检查失败仅设置页显示，不弹窗／切页；手动检查显示通道短原因及编号。网页不重复记录原生错误，诊断导出与安装互斥，未结束练习仍可导出
+- 下载须用户操作，可取消，进入后台取消；不承诺断点续传。固定 feed／仓库、有限 HTTPS 重定向、64 KiB 清单／128 MiB APK、完整 hash/size/版本/包名/ABI/证书检查不得放宽
+- 安装前再次验证缓存与本机状态；open 会话、评卷、语音、文件操作和待确认导入都阻止安装。不自动结束会话；来源权限须明确打开设置，返回后再次点击安装。只用专用只读临时 URI；安装器返回不等于成功，后续启动核对实际版本才确认
+- 「稍后」只关闭当前通知，不永久忽略版本或关闭自动检查。缓存损坏恢复不得绕过校验，也不能替换仍交给安装器使用的文件；必须纳入隔离设备验收
+- `scripts/release_github.py` 的 init-feed/preflight/prepare/publish/feed 默认离线 dry-run。init-feed 独立于脏工作区、版本递增、源码已推送及 APK/Release；执行仍须 `--execute --confirm-repository InGnIJM/AI-Bagu`，先确认仓库与 Git 数据可访问，再将分支404视作缺失；只补固定清单文件，保留合法原字节，拒绝额外文件/链接/冲突，不强推
+- 所有 `--execute` 使用维护者已登录的 gh，prepare 也不是离线模式。仅发布阶段要求干净、已推送的精确源码；脚本不自动登录、提交／推送源码、改可见性/Pages配置或重建签名。init-feed 成功仅代表分支就绪，Pages 由维护者配置为 codex/update-feed 根目录
+- Pages 就绪检查须在 preflight 成功、prepare 构建签名、publish 远端写入之前通过；验证来源配置与两通道匿名字节。显式 build_type 仅接受 legacy，缺字段兼容，不能因 workflow 残留旧 source 而放行；feed 恢复则先修复再验证。保留脱敏 HTTP 状态，不打印头/正文/stderr，二进制附件不能混入头
+- 公开发布仍须单独明确确认仓库、版本和精确附件。只发布六个允许附件，verification.json 必须匹配精确 commit 与附件哈希；拒绝冲突 tag／附件，不强推或删除 Release
+- 有归属的中断 public 输出保留为 `public.interrupted-<UUID>` 后重建，preparation.json 不可冒充验证回执；feed 重试只接受已公开匹配版本并保留另一通道。Release／匿名附件／Pages 状态分别核验，详见 `docs/data-transfer-and-updates.md`
 
 ## 测试
 

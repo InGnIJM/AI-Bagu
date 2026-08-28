@@ -28,17 +28,29 @@ final class RuntimeHost {
         copyAssetTree(app.getAssets(), "seed", new File(bundled, "seed"));
         String result = Python.getInstance().getModule("android_runtime").callAttr("start",
             app.getFilesDir().getAbsolutePath(), new File(bundled, "static").getAbsolutePath(),
-            new File(bundled, "seed/bagu-seed.db").getAbsolutePath(), BuildConfig.FLAVOR).toString();
+            new File(bundled, "seed/bagu-seed.db").getAbsolutePath(), BuildConfig.FLAVOR, BuildConfig.VERSION_NAME).toString();
         started = new JSONObject(result);
         return started;
     }
 
     static byte[] exportArchive() {
-        return Python.getInstance().getModule("android_runtime").callAttr("export_archive").toJava(byte[].class);
+        return exportArchive("progress");
+    }
+
+    static byte[] exportArchive(String mode) {
+        return Python.getInstance().getModule("android_runtime").callAttr("export_archive", mode).toJava(byte[].class);
+    }
+
+    static JSONObject inspectArchive(byte[] data) throws Exception {
+        return new JSONObject(Python.getInstance().getModule("android_runtime").callAttr("inspect_archive", data).toString());
     }
 
     static JSONObject restoreArchive(byte[] data) throws Exception {
         return new JSONObject(Python.getInstance().getModule("android_runtime").callAttr("restore_archive", data).toString());
+    }
+
+    static boolean hasOpenSession() {
+        return Python.getInstance().getModule("android_runtime").callAttr("has_open_session").toBoolean();
     }
 
     private static void copyAssetTree(AssetManager assets, String source, File target) throws IOException {

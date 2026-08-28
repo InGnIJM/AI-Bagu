@@ -103,12 +103,16 @@ def add_pinned_native_payloads(apk):
             archive.writestr(archive_name, payload.getvalue())
 
 
-def make_isolated_release_script_root(tmp_path):
+def make_isolated_release_script_root(tmp_path, version=None):
     root = tmp_path / "isolated-release"
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
     shutil.copy2(ROOT / "scripts/android.ps1", scripts / "android.ps1")
     shutil.copy2(ROOT / "scripts/verify_android_apk.py", scripts / "verify_android_apk.py")
+    if version is None:
+        shutil.copy2(ROOT / "version.json", root / "version.json")
+    else:
+        (root / "version.json").write_text(json.dumps(version), encoding="utf-8")
     return root
 
 
@@ -157,12 +161,18 @@ def test_setup_signing_rejects_an_isolated_partial_identity(tmp_path):
     assert key.read_bytes() == b"partial"
 
 
-def test_verify_rejects_missing_companion_metadata_before_sdk_tools(tmp_path):
+@pytest.mark.parametrize(("version_name", "version_code"), [
+    ("0.1.0-beta.2", 2),
+    ("0.1.0-beta.3", 3),
+])
+def test_verify_rejects_missing_companion_metadata_before_sdk_tools(tmp_path, version_name, version_code):
     """Catches Verify accepting a delivery set that omits the promised certificate/install metadata."""
-    root = make_isolated_release_script_root(tmp_path)
-    delivery = root / "dist/android"
+    root = make_isolated_release_script_root(tmp_path, {
+        "versionName": version_name, "versionCode": version_code, "channel": "beta",
+    })
+    delivery = root / "dist/android" / version_name / "public"
     delivery.mkdir(parents=True)
-    apk = delivery / "八股助手-0.1.0-beta.1-arm64-v8a.apk"
+    apk = delivery / f"bagu-{version_name}-public-arm64-v8a.apk"
     apk.write_bytes(b"test-apk")
     (delivery / "SHA256SUMS").write_text(
         f"{hashlib.sha256(apk.read_bytes()).hexdigest()} *{apk.name}\n", encoding="utf-8"
@@ -309,6 +319,7 @@ def test_release_build_configuration_fails_without_signing_in_an_isolated_copy(t
     """Catches a release config that falls back to an unsigned/debug identity."""
     isolated_root = tmp_path / "isolated-project"
     shutil.copytree(ANDROID, isolated_root / "android", ignore=shutil.ignore_patterns("build", ".gradle"))
+    shutil.copy2(ROOT / "version.json", isolated_root / "version.json")
     gradle = ROOT / ".toolchains/gradle-9.1.0/bin/gradle.bat"
     env = os.environ.copy()
     env.update({
@@ -338,6 +349,85 @@ def run_web_js(source):
     completed = subprocess.run(["node", "-e", source], capture_output=True, text=True, encoding="utf-8")
     assert completed.returncode == 0, completed.stderr
     return json.loads(completed.stdout)
+
+
+def diagnostic_bootstrap_source():
+    html = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    assert '<script id="diagnostics-bootstrap">' in html
+    return html.split('<script id="diagnostics-bootstrap">', 1)[1].split('</script>', 1)[0]
+
+
+def test_web_diagnostics_collects_sanitized_errors_with_bounded_retry():
+    result = run_web_js("""
+const listeners={};const calls=[];let online=false;
+const window={addEventListener:(name,fn)=>listeners[name]=fn,crypto:require('crypto').webcrypto};
+const location={search:'',origin:'http://127.0.0.1:8765'};
+const fetch=async(url,init)=>{calls.push([url,JSON.parse(init.body)]);if(!online)throw Error('PRIVATE_SERVER');return {ok:true};};
+""" + diagnostic_bootstrap_source() + """
+(async()=>{
+ for(let i=0;i<105;i++)listeners.error({error:new TypeError('sk-test-secret PRIVATE_ANSWER'),filename:'http://127.0.0.1/?token=PRIVATE_TOKEN',lineno:42});
+ await window.baguDiagnostics.flush(); const failedCalls=calls.length;
+ online=true; await window.baguDiagnostics.flush();
+ process.stdout.write(JSON.stringify({failedCalls,calls}));
+})();
+""")
+    assert result["failedCalls"] == 1
+    batches = result["calls"][1:]
+    assert len(batches) <= 6
+    events = [e for _, body in batches for e in body["events"]]
+    assert len(events) <= 101 and any(e["event"] == "web.dropped" for e in events)
+    assert sum(e.get("dropped", 0) for e in events) == 5
+    assert all(len(body["events"]) <= 20 for _, body in batches)
+    raw = json.dumps(result)
+    assert all(secret not in raw for secret in ("sk-test-secret", "PRIVATE_ANSWER", "PRIVATE_TOKEN", "PRIVATE_SERVER"))
+
+
+def test_diagnostic_export_flush_includes_errors_queued_during_existing_upload():
+    result = run_web_js("""
+const calls=[];let release;
+const window={addEventListener:()=>{},crypto:require('crypto').webcrypto};
+const location={search:''};
+const fetch=async(url,init)=>{calls.push(JSON.parse(init.body).events);if(calls.length===1)await new Promise(r=>release=r);return {ok:true};};
+""" + diagnostic_bootstrap_source() + """
+(async()=>{
+ window.baguDiagnostics.record({event:'web.action'});
+ const uploading=window.baguDiagnostics.flush();
+ await Promise.resolve();
+ window.baguDiagnostics.record({event:'web.error'});
+ const exporting=window.baguDiagnostics.flush(true);
+ release(); await exporting;
+ process.stdout.write(JSON.stringify(calls.flat().map(e=>e.event)));
+})();
+""")
+    assert result == ["web.action", "web.error"]
+
+
+def test_web_diagnostics_native_route_never_uses_http_or_raw_error_text():
+    result = run_web_js("""
+const listeners={},events=[];
+const window={addEventListener:(n,f)=>listeners[n]=f,crypto:require('crypto').webcrypto,BaguNative:{reportDiagnostic:s=>events.push(JSON.parse(s))}};
+const location={search:'?platform=android&token=PRIVATE_TOKEN'};
+const fetch=()=>{throw Error('must not use HTTP');};
+""" + diagnostic_bootstrap_source() + """
+listeners.unhandledrejection({reason:new Error('PRIVATE_VOICE sk-test-private')});
+process.stdout.write(JSON.stringify(events));
+""")
+    assert result[0]["event"] == "web.unhandledrejection"
+    assert "PRIVATE" not in json.dumps(result) and "sk-test" not in json.dumps(result)
+
+
+def test_web_diagnostic_api_errors_keep_backend_request_id_out_of_payload():
+    source = web_section("async function api", "function startJudgeProgress")
+    result = run_web_js("""
+const events=[];const window={baguDiagnostics:{record:e=>events.push(e),flush:async()=>{},id:()=> 'w_'+'a'.repeat(32)}};
+const requestHeaders=()=>({});
+const fetch=async()=>({ok:false,status:502,headers:{get:n=>n==='X-Bagu-Request-Id'?'r_1234abcd':'application/json'},json:async()=>({error:'模型调用失败'})});
+""" + source + """
+(async()=>{try{await api('POST','/api/answer',{text:'PRIVATE_ANSWER'});}catch(e){process.stdout.write(JSON.stringify({message:e.message,events}));}})();
+""")
+    assert "r_1234abcd" in result["message"]
+    assert result["events"][-1]["request_id"] == "r_1234abcd"
+    assert "PRIVATE_ANSWER" not in json.dumps(result)
 
 
 WEB_STORAGE = """
@@ -615,7 +705,7 @@ def test_android_manifest_limits_permissions_and_launch_surface():
     assert path.is_file(), "Android manifest not implemented"
     manifest = ET.parse(path).getroot()
     assert {p.get(NS + "name") for p in manifest.findall("uses-permission")} == {
-        "android.permission.INTERNET", "android.permission.RECORD_AUDIO"}
+        "android.permission.INTERNET", "android.permission.RECORD_AUDIO", "android.permission.REQUEST_INSTALL_PACKAGES"}
     assert [action.get(NS + "name") for action in manifest.findall("queries/intent/action")] == [
         "android.speech.RecognitionService"]
     app = manifest.find("application")
@@ -657,12 +747,19 @@ def test_native_bridge_exposes_only_the_agreed_storage_file_and_speech_contract(
     assert {(result, name, args) for result, name, args in methods} == {
         ("String", "getItem", "String key"), ("void", "setItem", "String key, String value"),
         ("void", "removeItem", "String key"), ("String", "keys", ""),
-        ("void", "exportBackup", ""), ("void", "importBackup", ""),
+        ("void", "exportBackup", ""), ("void", "exportQuestionBank", ""), ("void", "importBackup", ""),
         ("void", "saveCsvTemplate", "String csv"),
+        ("void", "exportDiagnostics", ""), ("void", "reportDiagnostic", "String json"),
         ("String", "getAppInfo", ""),
         ("void", "startSpeech", "String requestId"),
         ("void", "stopSpeech", "String requestId"),
         ("void", "cancelSpeech", "String requestId"),
+        ("String", "getUpdateState", ""),
+        ("void", "setAutomaticUpdates", "boolean enabled, String operationId"),
+        ("boolean", "checkForUpdate", "String operationId"),
+        ("boolean", "downloadUpdate", "String candidateId, String operationId"),
+        ("void", "cancelUpdate", "String operationId"),
+        ("boolean", "installUpdate", "String candidateId, String operationId"),
     }
 
 
@@ -700,6 +797,17 @@ def runtime(tmp_path, monkeypatch):
 def launch(runtime):
     module, private, static, seed = runtime
     return json.loads(module.start(str(private), str(static), str(seed), "internal"))
+
+
+def test_runtime_startup_failure_is_logged_before_database_preparation(runtime, monkeypatch):
+    module, private, static, seed = runtime
+    monkeypatch.setattr(bagu, "prepare_mobile_database", lambda *a: (_ for _ in ()).throw(OSError("sk-test-private")))
+    with pytest.raises(OSError):
+        launch(runtime)
+    raw = (private / "logs/bagu-server.log").read_text(encoding="utf-8")
+    events = [json.loads(line) for line in raw.splitlines()]
+    assert events[-1]["event"] == "runtime.error"
+    assert "sk-test-private" not in raw
 
 
 def test_runtime_start_is_singleton_with_authenticated_isolated_server(runtime):
@@ -741,6 +849,39 @@ def test_runtime_backup_round_trip_uses_private_database(runtime):
     with pytest.raises(ValueError):
         module.restore_archive(b"bad zip")
     assert len(bagu.parse_backup(module.export_archive())) == 1
+
+
+def test_runtime_migration_uses_injected_version_and_validates_before_restore(runtime):
+    module, private, static, seed = runtime
+    info = json.loads(module.start(str(private), str(static), str(seed), "public", "synthetic-native-version"))
+    exported = module.export_archive("questions")
+    summary = json.loads(module.inspect_archive(exported))
+    assert summary["mode"] == "questions" and summary["app_version"] == "synthetic-native-version"
+    assert set(bagu.parse_backup(exported)[0]) == {"category", "question", "answer", "url"}
+    assert json.loads(module.restore_archive(exported)) == {"added": 0, "updated": 1, "total": 1}
+    with pytest.raises(ValueError):
+        module.inspect_archive(b"invalid archive")
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(info["url"]).query)
+    request = urllib.request.Request(f"http://127.0.0.1:{info['port']}/api/backup/export?mode=questions",
+                                     headers={"X-Bagu-Token": query["token"][0]})
+    with urllib.request.urlopen(request) as response:
+        assert bagu.inspect_backup(response.read())["app_version"] == "synthetic-native-version"
+
+
+def test_runtime_native_import_preview_rejects_open_session_without_mutation(runtime):
+    module, private, _, _ = runtime
+    launch(runtime)
+    payload = module.export_archive("questions")
+    connection = bagu.get_conn(private / "data/bagu.db")
+    try:
+        sid, _ = bagu.draw(connection, 1)
+        before = list(connection.iterdump())
+        with pytest.raises(bagu.SessionOpenError):
+            module.inspect_archive(payload)
+        assert list(connection.iterdump()) == before
+        assert bagu.get_open_session(connection)["id"] == sid
+    finally:
+        connection.close()
 
 
 def test_runtime_page_policy_blocks_frames_but_preserves_https_answer_images(runtime):

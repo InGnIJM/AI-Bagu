@@ -1335,10 +1335,18 @@
     body.android-app .markdown-body pre, body.android-app .answer-table-wrap { max-width: 100%; }
     body.android-app .markdown-body pre { white-space: pre; overflow-wrap: normal; }
     body.android-app .answer-media img { max-width: 100%; height: auto; }
-    body.android-app .settings-stack { display: grid; gap: 16px; }
-    body.android-app .settings-stack h2 { font-size: 20px; margin-bottom: 8px; }
+    .settings-stack { display: grid; gap: 16px; }
+    .settings-stack h2 { font-size: 20px; margin-bottom: 8px; }
+    .update-actions { display: flex; flex-wrap: wrap; margin-top: 12px; }
+    .update-actions button { min-height: 44px; margin: 0 8px 8px 0; }
+    .update-toggle { display: flex; align-items: center; min-height: 44px; cursor: pointer; }
+    .update-toggle input { width: 22px; height: 22px; margin-right: 10px; accent-color: var(--color-accent); }
+    .update-notes { white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0; }
+    .update-check-detail { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 8px; }
+    .update-progress { width: 100%; margin-top: 12px; accent-color: var(--color-accent); }
+    #update-notice { border-color: var(--color-ink, #0F172A); background: var(--color-accent, #FDE047); }
     body.android-app #view-overview .sidebar-cats-card { margin-top: 14px; }
-    body.android-app .backup-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
+    .backup-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 16px; }
     body.android-app .mobile-nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; padding: 8px 10px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); background: var(--color-background); border-top: 2px solid var(--color-border); }
     body.android-app .mobile-nav button { display: grid; justify-items: center; align-content: center; gap: 3px; border: 2px solid transparent; border-radius: 12px; background: transparent; color: var(--color-foreground); min-height: 56px; font-size: 12px; font-weight: 800; }
     body.android-app .mobile-nav button.active { background: var(--color-accent); border-color: var(--color-border); }
@@ -1408,6 +1416,10 @@
               <span class="material-symbols-rounded">tune</span>
               <span>模型配置库</span>
             </button>
+            <button type="button" class="side-nav-btn" id="btn-nav-settings">
+              <span class="material-symbols-rounded">settings</span>
+              <span>设置与数据迁移</span>
+            </button>
           </nav>
         </div>
 
@@ -1445,6 +1457,13 @@
            右侧主舞台 (MAIN STAGE)
            ========================================================================= -->
       <main class="bento-main">
+        <aside class="card hidden" id="update-notice" aria-label="应用更新通知">
+          <p id="update-notice-title"></p>
+          <div class="update-actions">
+            <button type="button" id="btn-update-details">查看更新</button>
+            <button type="button" class="secondary" id="btn-update-later">稍后</button>
+          </div>
+        </aside>
         
         <!-- 看板数据统计 -->
         <section class="stats" aria-label="学习进度">
@@ -1484,8 +1503,9 @@
                 抽 5 题开始
               </button>
               <div id="empty-bank-help" class="hidden">
-                <p class="help">题库还是空的。导入 UTF-8 CSV，或先新增一道题，就能开始练习。</p>
+                <p class="help">题库还是空的。可导入另一端导出的 .bagu-backup，也可导入 UTF-8 CSV 或新增题目。</p>
                 <div class="actions">
+                  <button type="button" class="secondary" id="btn-empty-transfer">导入题库／备份</button>
                   <button type="button" class="secondary" id="btn-empty-import">导入 CSV</button>
                   <button type="button" class="secondary" id="btn-empty-add">新增题目</button>
                 </div>
@@ -1589,20 +1609,52 @@
               <div id="settings-model" style="margin-top:14px"></div>
             </div>
             <div class="card">
-              <h2>备份与恢复</h2>
-              <p class="help">备份包含题目、答案和复习进度，不包含模型配置、API Key、草稿或进行中的会话。恢复会按分类与题目合并，更新同名题目及其进度。</p>
+              <h2>数据迁移</h2>
+              <p class="help">纯题库只包含题目、答案与链接；含进度备份额外保存复习进度。均不包含模型配置、API Key、草稿、会话或评分记录。电脑与手机可互相导入 .bagu-backup 文件。</p>
+              <p class="help">按分类与题目合并：同名题的答案与链接会被覆盖（包括空内容）。纯题库保留本机进度，含进度备份覆盖进度；不删除本机其他题目。导入前会显示预览并要求确认。</p>
               <p class="help" id="backup-session-warning">恢复前请先结束本轮练习。</p>
               <div class="backup-actions">
-                <button type="button" class="secondary" id="btn-backup-export">导出备份</button>
-                <button type="button" class="secondary" id="btn-backup-import">恢复备份</button>
+                <button type="button" class="secondary" id="btn-question-export">导出纯题库</button>
+                <button type="button" class="secondary" id="btn-backup-export">导出含进度备份</button>
+                <button type="button" class="secondary" id="btn-backup-import">导入题库／备份</button>
               </div>
+              <input type="file" id="backup-file" class="hidden" accept=".bagu-backup,application/zip,application/octet-stream" aria-label="选择题库或备份文件">
               <p id="native-message" class="help" role="status" aria-live="polite"></p>
+            </div>
+            <div class="card">
+              <h2>问题诊断</h2>
+              <p class="help">出现问题后，请尽快导出诊断日志，并提供发生时间、操作步骤和错误编号。日志仅保存在本机，不自动上传，不包含 API Key、题库、作答或语音正文。</p>
+              <div class="backup-actions"><button type="button" class="secondary" id="btn-diagnostics-export">导出诊断日志</button></div>
+              <p class="help" id="diagnostics-message" role="status" aria-live="polite">导出最近的诊断记录；缺失或截断情况会在日志包中说明。</p>
             </div>
             <div class="card">
               <h2>关于八股助手</h2>
               <p id="app-version" class="help"></p>
               <p id="app-distribution" class="help"></p>
               <p class="help">练习数据保存在本机。模型评卷会将题目和你的回答发送给所选服务，请勿提交敏感信息。</p>
+            </div>
+            <div class="card hidden" id="update-card">
+              <h2>应用更新</h2>
+              <p class="help" id="update-current-version"></p>
+              <label class="update-toggle"><input type="checkbox" id="update-automatic" checked>自动检查更新</label>
+              <p class="help">仅在前台检查，自动检查间隔至少 24 小时；不会自动下载或安装。下载切到后台会取消，请保持此应用在前台。</p>
+              <p class="help" id="update-last-check"></p>
+              <p id="update-status" class="help" role="status" aria-live="polite" aria-atomic="true">尚未检查更新。</p>
+              <p class="help update-check-detail" id="update-check-detail" role="status" aria-live="polite"></p>
+              <div class="update-actions"><button type="button" class="secondary" id="btn-update-check">检查更新</button><button type="button" class="secondary hidden" id="btn-update-recover">恢复更新</button></div>
+              <div class="hidden" id="update-candidate">
+                <h3 id="update-candidate-title"></h3>
+                <p id="update-size" class="help"></p>
+                <p id="update-notes" class="update-notes"></p>
+                <progress class="update-progress hidden" id="update-progress" max="100" value="0" aria-label="更新下载进度"></progress>
+                <p id="update-progress-text" class="help"></p>
+                <div class="update-actions">
+                  <button type="button" id="btn-update-download">下载更新</button>
+                  <button type="button" class="secondary hidden" id="btn-update-cancel">取消下载</button>
+                  <button type="button" class="hidden" id="btn-update-install">安装更新</button>
+                </div>
+                <p class="help">请先结束本轮练习、评分、语音及文件操作再安装。系统安装器将进行最终校验；更新成功以下次启动核实的本机版本为准。</p>
+              </div>
             </div>
           </div>
         </section>
@@ -1776,6 +1828,101 @@
     <button type="button" id="mobile-nav-settings" data-mobile-view="settings"><span class="material-symbols-rounded" aria-hidden="true">tune</span><span>设置</span></button>
   </nav>
 
+  <script id="diagnostics-bootstrap">
+    // Independent of the main script: a syntax/bootstrap failure must still be observable.
+    (function () {
+      var queue = [], dropped = 0, timer = null, flight = null;
+      var android = /(?:^|[?&])platform=android(?:&|$)/.test(location.search) && window.BaguNative;
+      var names = ['web.error', 'web.unhandledrejection', 'web.api', 'web.stream', 'web.action', 'web.speech', 'web.dropped'];
+      var stages = 'start ready error done cancelled busy permission load initialize dispatch stream connect parse write read export import check download verify install timeout'.split(' ');
+      var types = 'Error TypeError SyntaxError RangeError ReferenceError URIError EvalError AbortError NetworkError TimeoutError'.split(' ');
+      function id() {
+        try {
+          var bytes = new Uint8Array(16); window.crypto.getRandomValues(bytes);
+          return 'w_' + Array.prototype.map.call(bytes, function (n) { return ('0' + n.toString(16)).slice(-2); }).join('');
+        } catch (_) { return ''; }
+      }
+      function route(value) {
+        if (typeof value !== 'string' || value.length > 4096 || value.charAt(0) !== '/') return 'other';
+        var path = value.split('?')[0].split('#')[0];
+        if (/^\/api\/(stats|session|draw|skip|answer|answer\/stream|reveal|review|settings|models|models\/test|questions|questions\/import|backup\/(export|inspect|restore)|diagnostics\/(events|export))$/.test(path)) return path;
+        var match = path.match(/^\/api\/(models|questions|submissions)\/[^/]+(?:\/(activate|copy))?$/);
+        return match ? '/api/' + match[1] + '/:id' + (match[2] ? '/' + match[2] : '') : 'other';
+      }
+      function clean(value) {
+        if (!value || names.indexOf(value.event) < 0) return null;
+        var event = { event: value.event, time: new Date().toISOString(), level: value.level === 'ERROR' ? 'ERROR' : value.level === 'WARNING' ? 'WARNING' : 'INFO' };
+        if (stages.indexOf(value.stage) >= 0) event.stage = value.stage;
+        if (value.error_type) event.error_type = types.indexOf(value.error_type) >= 0 ? value.error_type : 'Error';
+        if (/^r_[a-f0-9]{8,32}$/.test(value.request_id || '')) event.request_id = value.request_id;
+        if (/^w_[a-f0-9]{32}$/.test(value.operation_id || '')) event.operation_id = value.operation_id;
+        if (value.route) event.route = route(value.route);
+        if (value.file === 'index.html') event.file = 'index.html';
+        ['status', 'line', 'column', 'count', 'dropped'].forEach(function (key) {
+          var n = value[key];
+          if (typeof n === 'number' && isFinite(n) && Math.floor(n) === n && n >= (key === 'line' ? 1 : 0) && n <= (key === 'status' ? 599 : 9007199254740991)) event[key] = n;
+        });
+        if (typeof value.duration_ms === 'number' && isFinite(value.duration_ms) && value.duration_ms >= 0) event.duration_ms = Math.min(value.duration_ms, 9007199254740991);
+        return event;
+      }
+      function record(value) {
+        try {
+          var event = clean(value); if (!event) return;
+          if (android) {
+            if (typeof android.reportDiagnostic === 'function') android.reportDiagnostic(JSON.stringify(event));
+            return;
+          }
+          if (queue.length === 100) { queue.shift(); dropped++; }
+          queue.push(event);
+          if (timer === null && !flight) timer = setTimeout(function () { timer = null; flush(); }, 500);
+        } catch (_) { /* Diagnostics cannot interrupt the page. */ }
+      }
+      function flush(forExport) {
+        if (timer !== null) { clearTimeout(timer); timer = null; }
+        if (android) return Promise.resolve();
+        // Export also waits for records queued during an existing upload. One extra
+        // bounded snapshot only; a failed collector must never cause a retry loop.
+        if (flight) return forExport ? flight.then(function () { return flush(); }) : flight;
+        var batchQueue = queue.splice(0, 100), lost = dropped; dropped = 0;
+        if (lost) batchQueue.unshift(clean({event:'web.dropped', dropped:lost, level:'WARNING'}));
+        if (!batchQueue.length) return Promise.resolve();
+        var sent = 0;
+        function next() {
+          if (sent >= batchQueue.length) return Promise.resolve();
+          var batch = batchQueue.slice(sent, sent + 20);
+          var controller = typeof AbortController === 'function' ? new AbortController() : null;
+          var timeout = null;
+          var request = Promise.resolve().then(function () {
+            return fetch('/api/diagnostics/events', { method:'POST', headers:{'Content-Type':'application/json','X-Bagu-Diagnostics':'1'}, body:JSON.stringify({events:batch}), signal:controller ? controller.signal : undefined });
+          });
+          var deadline = new Promise(function (_, reject) { timeout = setTimeout(function () { if (controller) controller.abort(); reject(new Error('diagnostic timeout')); }, 2000); });
+          return Promise.race([request, deadline]).then(function (response) {
+            clearTimeout(timeout);
+            if (!response.ok) throw new Error('diagnostic unavailable');
+            sent += batch.length; return next();
+          }, function (error) { clearTimeout(timeout); throw error; });
+        }
+        flight = next().catch(function () {
+          // Preserve the newest unsent events for a later explicit flush or normal activity.
+          var remaining = batchQueue.slice(sent);
+          if (lost && sent === 0) { remaining.shift(); dropped += lost; }
+          queue = remaining.concat(queue);
+          if (queue.length > 100) { dropped += queue.length - 100; queue = queue.slice(-100); }
+        }).then(function () {
+          flight = null;
+          if (sent === batchQueue.length && queue.length && timer === null) timer = setTimeout(function () { timer = null; flush(); }, 500);
+        });
+        return flight;
+      }
+      window.baguDiagnostics = {record:record, flush:flush, id:id};
+      window.addEventListener('error', function (event) {
+        try { record({event:'web.error', level:'ERROR', operation_id:id(), error_type:event.error && event.error.name || 'Error', file:'index.html', line:event.lineno, column:event.colno}); } catch (_) {}
+      });
+      window.addEventListener('unhandledrejection', function (event) {
+        try { record({event:'web.unhandledrejection', level:'ERROR', operation_id:id(), error_type:event.reason && event.reason.name || 'Error'}); } catch (_) {}
+      });
+    }());
+  </script>
   <script>
     const $ = (id) => document.getElementById(id);
     const startupParams = new URLSearchParams(location.search);
@@ -1817,6 +1964,164 @@
     let currentView = "quiz";
     let nativeBusy = "";
 
+    // Android updater: no URL/path inputs, and no feed content is interpreted as HTML.
+    let updateState = { revision: -1, status: "idle", enabled: true };
+    let updateDispatch = "";
+    let dismissedUpdate = "";
+    try { if (isAndroidApp) dismissedUpdate = appStorage.getItem("bagu-update-dismissed") || ""; } catch (_) { /* Notice dismissal is optional UI state. */ }
+    let updateSequence = 0;
+    let updateReservation = "", updateReservationTimer = null;
+    let pendingUpdateWork = 0, pendingDraw = 0;
+    const retiredUpdateReservations = new Set();
+    function beginStudyWork(kind) {
+      if (!isAndroidApp) return () => {};
+      if (updateReservation) throw new Error("正在准备安装更新，请稍后再操作。");
+      pendingUpdateWork++;
+      if (kind === "draw") pendingDraw++;
+      let finished = false;
+      return function () { if (finished) return; finished = true; pendingUpdateWork--; if (kind === "draw") pendingDraw--; };
+    }
+    function updateNoticeKey() { return updateState.candidate ? (updateState.noticeId || "legacy") + ":" + updateState.candidate.id : ""; }
+    function updateOperationId() { return "update_" + Date.now() + "_" + (++updateSequence); }
+    function updateBytes(value) { return (Number(value || 0) / 1048576).toFixed(1) + " MiB"; }
+    const UPDATE_CHECK_STATUSES = new Set(["unknown", "checking", "latest", "available", "partial-error", "error", "interrupted"]);
+    const UPDATE_CHANNEL_STATUSES = new Set(["pending", "checking", "empty", "available", "no-update", "incompatible", "error", "interrupted", "not-checked"]);
+    const UPDATE_ERROR_REASONS = {
+      1001: "HTTP 错误", 1002: "DNS 解析失败", 1003: "连接超时", 1004: "TLS 连接失败", 1005: "连接失败",
+      1101: "更新清单格式无效", 1102: "更新清单校验失败", 1103: "内容超过大小限制", 1104: "重定向被拒绝",
+      1201: "本地存储失败", 1202: "文件长度校验失败", 1203: "SHA-256 校验失败", 1204: "安装包身份、签名或兼容性校验失败",
+      1301: "缺少安装权限", 1302: "无法启动安装器", 1999: "未分类更新错误"
+    };
+    function updateSafeTime(value) { return Number.isSafeInteger(value) && value > 0 ? value : 0; }
+    function updateSafeHttpStatus(value) { return Number.isInteger(value) && value >= 100 && value <= 599 ? value : 0; }
+    function updateSafeDiagnosticId(value) { return typeof value === "string" && /^n_[a-f0-9]{32}$/.test(value) ? value : ""; }
+    function updateErrorReason(code, httpStatus) {
+      const reason = UPDATE_ERROR_REASONS[code] || "更新检查发生未知错误";
+      return code === 1001 && updateSafeHttpStatus(httpStatus) ? reason + "（HTTP " + httpStatus + "）" : reason;
+    }
+    function updateChannelReason(channel) {
+      const status = channel && UPDATE_CHANNEL_STATUSES.has(channel.status) ? channel.status : "not-checked";
+      const labels = { pending: "等待检查", checking: "正在检查", empty: "未提供版本", available: "发现兼容新版本", "no-update": "无兼容新版本", incompatible: "最新版本与本机不兼容", interrupted: "检查中断", "not-checked": "尚未检查" };
+      return status === "error" ? updateErrorReason(channel && channel.errorCode, channel && channel.httpStatus) : labels[status];
+    }
+    function updateCheckSummary(check) {
+      const statuses = { unknown: "未知／尚未检查", checking: "正在检查", latest: "当前没有兼容的新版本", available: "发现兼容新版本", "partial-error": "部分频道检查失败，结果不代表当前已是最新", error: "检查失败", interrupted: "上次检查中断，请重试" };
+      return statuses[check && check.status] || statuses.unknown;
+    }
+    function updateLegacyLastCheck(data) {
+      const statuses = { never: "尚未检查", available: "发现新版本", latest: "无兼容新版本", error: "检查失败", "partial-error": "部分频道检查失败" };
+      return "上次检查：" + (updateSafeTime(data.lastAttempt) ? new Date(data.lastAttempt).toLocaleString() : "尚未检查") + " · " + (statuses[data.lastStatus] || "尚未检查");
+    }
+    function renderUpdateCheck(data) {
+      const check = data && data.lastCheck;
+      if (!check || typeof check !== "object" || !UPDATE_CHECK_STATUSES.has(check.status)) {
+        $("update-last-check").textContent = updateLegacyLastCheck(data || {});
+        $("update-check-detail").textContent = "";
+        return;
+      }
+      const checkedAt = updateSafeTime(check.completedAt) || updateSafeTime(check.startedAt);
+      $("update-last-check").textContent = "上次检查：" + (checkedAt ? new Date(checkedAt).toLocaleString() : "尚未检查") + " · " + updateCheckSummary(check);
+      const channels = check.channels && typeof check.channels === "object" ? check.channels : {};
+      const details = [];
+      [["beta", "Beta"], ["stable", "Stable"]].forEach(([key, name]) => {
+        if (channels[key] && typeof channels[key] === "object") details.push(name + "：" + updateChannelReason(channels[key]));
+      });
+      const id = updateSafeDiagnosticId(check.diagnosticId);
+      if (id) details.push("反馈编号：" + id);
+      if (details.length) details.push("如需协助，请使用上方“导出诊断日志”。");
+      $("update-check-detail").textContent = details.join("；");
+    }
+    function renderUpdateState() {
+      if (!isAndroidApp) return;
+      const data = updateState, candidate = data.candidate;
+      const busy = Boolean(data.busy || updateDispatch);
+      const downloading = data.status === "downloading" || data.status === "cancelling";
+      $("update-card").classList.remove("hidden");
+      $("update-automatic").checked = data.enabled !== false;
+      $("update-automatic").disabled = busy;
+      $("update-status").textContent = data.message || "可手动检查更新。";
+      renderUpdateCheck(data);
+      $("btn-update-check").disabled = busy;
+      $("btn-update-recover").classList.toggle("hidden", !data.recovery);
+      $("btn-update-recover").disabled = busy;
+      $("update-candidate").classList.toggle("hidden", !candidate);
+      $("btn-update-download").disabled = busy || !candidate || Boolean(data.ready || data.installerLease);
+      $("btn-update-download").classList.toggle("hidden", Boolean(data.ready));
+      $("btn-update-install").classList.toggle("hidden", !data.ready);
+      $("btn-update-install").disabled = busy || !candidate || !data.ready;
+      $("btn-update-cancel").classList.toggle("hidden", !downloading && data.status !== "install-check");
+      $("btn-update-cancel").textContent = data.status === "install-check" ? "取消安装准备" : "取消下载";
+      $("btn-update-cancel").disabled = data.status === "cancelling" || Boolean(updateDispatch);
+      $("update-progress").classList.toggle("hidden", !downloading);
+      $("update-progress").value = candidate && candidate.size ? Math.min(100, Number(data.received || 0) * 100 / candidate.size) : 0;
+      $("update-progress-text").textContent = downloading && candidate ? updateBytes(data.received) + " / " + updateBytes(candidate.size) : "";
+      if (candidate) {
+        $("update-candidate-title").textContent = "新版本 " + candidate.versionName;
+        $("update-size").textContent = "安装包大小：" + updateBytes(candidate.size);
+        $("update-notes").textContent = candidate.notes || "";
+        $("update-notice-title").textContent = "八股助手 " + candidate.versionName + " 可用，当前练习不受影响。";
+      }
+      $("update-notice").classList.toggle("hidden", !candidate || dismissedUpdate === updateNoticeKey());
+    }
+    function handleUpdateResult(event) {
+      const data = event && event.detail;
+      if (!isAndroidApp || !data || !Number.isSafeInteger(data.revision) || data.revision <= updateState.revision) return;
+      updateState = data;
+      // Native revisions are process-monotonic; older events never restore stale controls.
+      if (!updateDispatch || data.operationId === updateDispatch || !data.busy) updateDispatch = "";
+      renderUpdateState();
+    }
+    function hydrateUpdateState() {
+      if (!isAndroidApp || typeof nativeStore.getUpdateState !== "function") return;
+      try { handleUpdateResult({ detail: JSON.parse(nativeStore.getUpdateState()) }); }
+      catch (_) { $("update-status").textContent = "无法读取更新状态，请稍后重试。"; }
+    }
+    function dismissUpdateNotice() {
+      dismissedUpdate = updateNoticeKey();
+      try { appStorage.setItem("bagu-update-dismissed", dismissedUpdate); } catch (_) { /* Still dismiss this page's notice. */ }
+      renderUpdateState();
+    }
+    function dispatchUpdate(action) {
+      if (!isAndroidApp || updateDispatch || (updateState.busy && action !== "cancel")) return;
+      const op = updateOperationId(), candidate = updateState.candidate;
+      updateDispatch = op;
+      renderUpdateState();
+      try {
+        let accepted = true;
+        if (action === "check") accepted = nativeStore.checkForUpdate(op);
+        else if (action === "automatic") nativeStore.setAutomaticUpdates(!updateState.enabled, op);
+        else if (action === "cancel") nativeStore.cancelUpdate(op);
+        else if (action === "recover") { nativeStore.cancelUpdate(op); updateDispatch = ""; renderUpdateState(); }
+        else if (candidate && action === "download") accepted = nativeStore.downloadUpdate(candidate.id, op);
+        else if (candidate && action === "install") accepted = nativeStore.installUpdate(candidate.id, op);
+        else accepted = false;
+        if (accepted === false) { updateDispatch = ""; hydrateUpdateState(); renderUpdateState(); }
+      } catch (_) {
+        updateDispatch = ""; renderUpdateState();
+        $("update-status").textContent = "更新操作未启动，请稍后再试。";
+      }
+    }
+    window.baguUpdateInstallState = function () {
+      return { session: Boolean(session.session_id), grade: Boolean(judgeTimer), file: Boolean(nativeBusy), speech: Boolean(speechInput), pending: pendingUpdateWork > 0, draw: pendingDraw > 0 };
+    };
+    function updateStudyIdle() {
+      const state = window.baguUpdateInstallState();
+      return !state.session && !state.grade && !state.file && !state.speech && !state.pending && !state.draw;
+    }
+    window.baguReserveUpdateInstallation = function (operation) {
+      if (!isAndroidApp || !/^[A-Za-z0-9_-]{1,80}$/.test(operation) || retiredUpdateReservations.has(operation) || updateReservation || !updateStudyIdle()) return false;
+      updateReservation = operation;
+      updateReservationTimer = setTimeout(() => window.baguReleaseUpdateInstallation(operation), 15000);
+      return true;
+    };
+    window.baguUpdateReservationCurrent = function (operation) { return updateReservation === operation && updateStudyIdle(); };
+    window.baguReleaseUpdateInstallation = function (operation) {
+      retiredUpdateReservations.add(operation);
+      if (updateReservation !== operation) return false;
+      clearTimeout(updateReservationTimer); updateReservationTimer = null; updateReservation = "";
+      return true;
+    };
+
     // Speech stays outside submission/scoring. Each capture belongs to one question.
     let speechInput = null;
     function showSpeechError(message) {
@@ -1840,6 +2145,13 @@
       if (speechInput !== run) return;
       // Invalidate before cancel: some recognizers synchronously emit error/end on abort.
       speechInput = null;
+      run.diagnostic.stage = error ? "error" : abort ? "cancelled" : "done";
+      if (error) {
+        const failure = new Error(error);
+        diagnosticFailure(run.diagnostic, failure);
+        error = failure.message;
+      }
+      diagnosticComplete(run.diagnostic);
       clearTimeout(run.timer);
       if (run.recognizer) {
         run.recognizer.onstart = run.recognizer.onresult = run.recognizer.onerror = run.recognizer.onend = null;
@@ -1901,6 +2213,7 @@
       return messages[code] || "语音识别失败，请重试或使用输入法语音输入。";
     }
     function startSpeechInput() {
+      if (typeof updateReservation !== "undefined" && updateReservation) { showSpeechError("正在准备安装更新，请稍后再使用语音。"); return; }
       const q = currentQuestion();
       if (speechInput || !q || !session.session_id || currentView !== "quiz" || currentSessionMode() !== "answer" ||
           $("ans").disabled || $("btn-submit").disabled || $("btn-submit").dataset.mode === "next") return;
@@ -1911,9 +2224,11 @@
         id: "speech_" + newSubmissionId().slice(4), sid: session.session_id, qid: q.id,
         native: isAndroidApp, original: $("ans").value, finalText: "", stopping: false,
         readOnly: $("ans").readOnly, submitDisabled: $("btn-submit").disabled,
-        revealDisabled: $("btn-dont-know").disabled, recognizer: null, timer: null
+        revealDisabled: $("btn-dont-know").disabled, recognizer: null, timer: null,
+        diagnostic: diagnosticTrace("web.speech", "other")
       };
       speechInput = run;
+      diagnosticComplete({...run.diagnostic, stage:"start"});
       $("ans").readOnly = true;
       $("btn-submit").disabled = true;
       $("btn-dont-know").disabled = true;
@@ -2014,36 +2329,50 @@
     }
     function setNativeBusy(operation) {
       nativeBusy = operation;
-      ["btn-backup-export", "btn-backup-import", "btn-download-template"].forEach((id) => {
+      ["btn-question-export", "btn-backup-export", "btn-backup-import", "btn-empty-transfer", "btn-download-template", "btn-diagnostics-export"].forEach((id) => {
         $(id).disabled = Boolean(operation);
       });
     }
     function startNativeOperation(operation, content) {
+      if (typeof updateReservation !== "undefined" && updateReservation) { setNativeMessage("正在准备安装更新，请稍后再操作文件。", true); return; }
       if (!nativeStore || nativeBusy) return;
       if (operation === "import" && session.session_id) {
         setNativeMessage("请先回到练习页结束本轮，再恢复备份。", true);
         return;
       }
-      if (!["export", "import", "template"].includes(operation)) return;
+      if (!["export", "export-questions", "import", "template", "diagnostics"].includes(operation)) return;
       setNativeBusy(operation);
       setNativeMessage("请在系统文件选择器中完成操作…", false);
       try {
-        if (operation === "export") nativeStore.exportBackup();
+        if (operation === "diagnostics") nativeStore.exportDiagnostics();
+        else if (operation === "export") nativeStore.exportBackup();
+        else if (operation === "export-questions") nativeStore.exportQuestionBank();
         else if (operation === "import") nativeStore.importBackup();
         else nativeStore.saveCsvTemplate(content);
       } catch (_) {
         setNativeBusy("");
+        if (operation === "diagnostics") setDiagnosticMessage("无法打开日志导出，请更新应用或重试。", true);
         setNativeMessage("无法打开文件选择器，请重试。", true);
       }
     }
     async function handleNativeResult(event) {
       const data = event.detail;
-      if (!data || !["export", "import", "template"].includes(data.operation) ||
-          !["ok", "cancelled", "error"].includes(data.status)) return;
+      if (!data || !["export", "export-questions", "import", "template", "diagnostics"].includes(data.operation) ||
+          !["ok", "cancelled", "error", "busy"].includes(data.status)) return;
       // Results can arrive after Activity/process recreation, when JS has no busy flag.
       if (nativeBusy && data.operation !== nativeBusy) return;
+      if (data.status === "busy") {
+        setNativeBusy(data.operation);
+        if (data.operation === "diagnostics") setDiagnosticMessage("诊断日志导出中，请完成系统文件选择。", false);
+        setNativeMessage("文件操作进行中，请完成系统文件选择或导入确认。", false);
+        return;
+      }
       setNativeBusy("");
       let message = typeof data.message === "string" ? data.message : "文件操作已结束。";
+      if (data.operation === "diagnostics") {
+        setDiagnosticMessage(message, data.status === "error");
+        return;
+      }
       if (data.operation === "import" && data.status === "ok") {
         if (!Number.isInteger(data.added) || data.added < 0 || !Number.isInteger(data.updated) || data.updated < 0) {
           setNativeMessage("备份结果无效，请重新打开应用核对题库。", true);
@@ -2057,6 +2386,151 @@
       }
       setNativeMessage(message, data.status === "error");
       if (data.operation === "template") showQuestionMessage(data.status === "error" ? "error" : "success", message);
+    }
+    function setDiagnosticMessage(message, error) {
+      $("diagnostics-message").textContent = message;
+      $("diagnostics-message").classList.toggle("error", Boolean(error));
+    }
+    async function exportDiagnostics() {
+      if (nativeBusy) return;
+      if (typeof updateReservation !== "undefined" && updateReservation) {
+        setDiagnosticMessage("正在准备安装更新，请稍后导出日志。", true); return;
+      }
+      if (nativeStore) {
+        if (typeof nativeStore.exportDiagnostics !== "function") {
+          setDiagnosticMessage("当前宿主不支持日志导出，请更新应用。", true); return;
+        }
+        setDiagnosticMessage("请在系统文件选择器中保存诊断日志。", false);
+        startNativeOperation("diagnostics"); return;
+      }
+      setNativeBusy("diagnostics");
+      setDiagnosticMessage("正在准备诊断日志…", false);
+      let objectUrl = null;
+      const controller = typeof AbortController === "function" ? new AbortController() : null;
+      let timeout = null;
+      try {
+        if (window.baguDiagnostics) await window.baguDiagnostics.flush(true);
+        const request = fetch("/api/diagnostics/export", {headers:{"X-Bagu-Diagnostics":"1"}, signal:controller ? controller.signal : undefined})
+          .then(async (response) => { if (!response.ok) throw new Error("export failed"); return response.blob(); });
+        const deadline = new Promise((_, reject) => { timeout = setTimeout(() => { if (controller) controller.abort(); reject(new Error("export timeout")); }, 15000); });
+        const blob = await Promise.race([request, deadline]);
+        if (blob.size > 8 * 1024 * 1024) throw new Error("export too large");
+        objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = objectUrl; link.download = "bagu-diagnostics-" + new Date().toISOString().replace(/[:.]/g, "-") + ".zip";
+        document.body.appendChild(link);
+        try { link.click(); } finally { link.remove(); }
+        setDiagnosticMessage("已开始下载诊断日志，请检查浏览器下载结果。日志缺失或截断情况见包内说明。", false);
+      } catch (_) {
+        setDiagnosticMessage("日志导出失败，请确认本机服务仍在运行，并检查下载或保存权限后重试。", true);
+      } finally {
+        if (timeout !== null) clearTimeout(timeout);
+        if (objectUrl) { const stale = objectUrl; setTimeout(() => URL.revokeObjectURL(stale), 1000); }
+        setNativeBusy("");
+      }
+    }
+    function encodeArchiveBytes(bytes) {
+      // Bounded chunks avoid argument-count limits on older WebViews/browsers.
+      if (bytes.byteLength > 20 * 1024 * 1024) throw new Error("文件超过 20 MiB");
+      const parts = [];
+      for (let start = 0; start < bytes.length; start += 32768) {
+        let part = "";
+        const end = Math.min(start + 32768, bytes.length);
+        for (let i = start; i < end; i++) part += String.fromCharCode(bytes[i]);
+        parts.push(part);
+      }
+      return btoa(parts.join(""));
+    }
+    function readArchiveFile(file) {
+      return new Promise((resolve, reject) => {
+        if (!file || !Number.isInteger(file.size) || file.size <= 0 || file.size > 20 * 1024 * 1024) {
+          reject(new Error("请选择不超过 20 MiB 的备份文件"));
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+          try { resolve(encodeArchiveBytes(new Uint8Array(reader.result))); }
+          catch (_) { reject(new Error("读取文件失败")); }
+        };
+        reader.onerror = () => reject(new Error("读取文件失败"));
+        reader.onabort = () => {
+          const error = new Error("已取消读取文件");
+          error.name = "AbortError";
+          reject(error);
+        };
+        reader.readAsArrayBuffer(file);
+      });
+    }
+    function archivePreviewMessage(summary) {
+      if (!summary || !["questions", "progress"].includes(summary.mode) ||
+          ![1, 2].includes(summary.schema_version) || !Number.isInteger(summary.question_count) ||
+          summary.question_count < 0 || summary.question_count > 10000 ||
+          typeof summary.created_at !== "string" || typeof summary.app_version !== "string") {
+        throw new Error("备份预览无效");
+      }
+      const mode = summary.mode === "questions" ? "纯题库（保留本机复习进度）" : "含进度备份（覆盖同名题的复习进度）";
+      return `导入确认\n类型：${mode}\n题目：${summary.question_count} 道\n创建时间：${summary.created_at}\n来源版本：${summary.app_version}\n\n同名题答案与链接将被覆盖，包括空内容。本机其他题目及历史记录保留。建议先导出备份。继续导入？`;
+    }
+    async function importDesktopArchive(file) {
+      if (nativeStore || nativeBusy) return;
+      if (session.session_id) { setNativeMessage("请先结束本轮练习，再导入。", true); return; }
+      if (!file || file.size <= 0 || file.size > 20 * 1024 * 1024) {
+        setNativeMessage("请选择有效且不超过 20 MiB 的备份文件。", true); return;
+      }
+      setNativeBusy("import");
+      setNativeMessage("正在读取并校验文件…", false);
+      let submitted = false;
+      try {
+        // The preview and restore use this exact snapshot, never reread the file.
+        const body = { archive_base64: await readArchiveFile(file) };
+        const summary = await api("POST", "/api/backup/inspect", body);
+        if (!window.confirm(archivePreviewMessage(summary))) {
+          setNativeMessage("已取消导入，原数据未改变。", false); return;
+        }
+        submitted = true;
+        const result = await api("POST", "/api/backup/restore", body);
+        await handleNativeResult({ detail: Object.assign({ operation: "import", status: "ok" }, result) });
+      } catch (error) {
+        setNativeMessage(!submitted && error.name === "AbortError" ? "已取消读取文件，原数据未改变。" : submitted
+          ? "未能确认导入结果，请先刷新并核对题库与进度；不要重复导入。"
+          : "文件读取或校验失败，原数据未改变；请检查文件格式和大小。", true);
+      } finally { setNativeBusy(""); }
+    }
+    async function exportDesktopArchive(mode) {
+      if (nativeStore || nativeBusy || !["questions", "progress"].includes(mode)) return;
+      setNativeBusy(mode === "questions" ? "export-questions" : "export");
+      setNativeMessage("正在生成文件…", false);
+      let url = null;
+      let link = null;
+      try {
+        const response = await fetch("/api/backup/export?mode=" + mode, { headers: requestHeaders(false) });
+        if (!response.ok) throw new Error("导出失败");
+        const blob = await response.blob();
+        if (!blob.size || blob.size > 20 * 1024 * 1024) throw new Error("文件大小无效");
+        url = URL.createObjectURL(blob);
+        link = document.createElement("a");
+        link.href = url;
+        link.download = `bagu-${mode}-${new Date().toISOString().slice(0, 10)}.bagu-backup`;
+        document.body.appendChild(link);
+        link.click();
+        setNativeMessage("已生成文件，请查看浏览器下载记录。", false);
+      } catch (_) {
+        setNativeMessage("导出失败，请检查题目字段与大小（最多 10000 题、解压后 50 MiB、文件 20 MiB）。原数据未改变。", true);
+      } finally {
+        if (link) link.remove();
+        if (url) setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setNativeBusy("");
+      }
+    }
+    function chooseImportArchive() {
+      if (nativeBusy) return;
+      if (session.session_id) { setNativeMessage("请先结束本轮练习，再导入。", true); return; }
+      if (nativeStore) startNativeOperation("import");
+      else {
+        setNativeMessage("请选择题库或备份文件；取消选择不会更改数据。", false);
+        $("backup-file").value = "";
+        $("backup-file").click();
+      }
     }
     function renderAppInfo() {
       if (!nativeStore) return;
@@ -2072,23 +2546,31 @@
       }
     }
     function readTextFile(file) {
-      if (typeof file.text === "function") return file.text();
+      const finish = typeof beginStudyWork === "function" ? beginStudyWork("file") : () => {};
+      try {
+      if (typeof file.text === "function") return Promise.resolve(file.text()).finally(finish);
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result || ""));
         reader.onerror = () => reject(new Error("读取文件失败"));
         reader.onabort = () => reject(new Error("已取消读取文件"));
         reader.readAsText(file, "UTF-8");
-      });
+      }).finally(finish);
+      } catch (error) { finish(); throw error; }
     }
 
     async function api(method, path, body) {
+      const finish = method !== "GET" && typeof beginStudyWork === "function" ? beginStudyWork(path === "/api/draw" ? "draw" : "write") : () => {};
+      const trace = diagnosticTrace("web.api", path);
+      try {
       const init = { method, headers: requestHeaders(Boolean(body)) };
       if (body) {
         init.headers["Content-Type"] = "application/json";
         init.body = JSON.stringify(body);
       }
       const r = await fetch(path, init);
+      trace.request_id = diagnosticRequestId(r);
+      trace.status = r.status;
       const ct = r.headers.get("content-type") || "";
       const isJson = ct.includes("application/json");
       const payload = isJson ? await r.json() : await r.text();
@@ -2099,14 +2581,23 @@
         throw error;
       }
       return payload;
+      } catch (error) {
+        diagnosticFailure(trace, error);
+        throw error;
+      } finally { diagnosticComplete(trace); finish(); }
     }
 
     async function streamAnswer(body, onEvent) {
+      const finish = typeof beginStudyWork === "function" ? beginStudyWork("grade") : () => {};
+      const trace = diagnosticTrace("web.stream", "/api/answer/stream");
+      try {
       const response = await fetch("/api/answer/stream", {
         method: "POST",
         headers: requestHeaders(true),
         body: JSON.stringify(body)
       });
+      trace.request_id = diagnosticRequestId(response);
+      trace.status = response.status;
       if (!response.ok) {
         let msg = `${response.status} ${response.statusText}`;
         try {
@@ -2138,7 +2629,7 @@
             try {
               event = JSON.parse(raw);
             } catch (err) {
-              throw new Error("评卷事件解析失败: " + raw);
+              throw new Error("评卷事件解析失败");
             }
             if (event.type === "error") throw new Error(event.error || "评卷失败");
             if (onEvent) onEvent(event);
@@ -2148,6 +2639,37 @@
       }
       if (!finalVerdict) throw new Error("评卷流提前结束，未收到完整评卷结果");
       return finalVerdict;
+      } catch (error) {
+        diagnosticFailure(trace, error);
+        throw error;
+      } finally { diagnosticComplete(trace); finish(); }
+    }
+
+    function diagnosticTrace(event, route) {
+      let operation = "";
+      try { if (typeof window !== "undefined" && window.baguDiagnostics) operation = window.baguDiagnostics.id(); } catch (_) {}
+      return {event, route, operation_id:operation, started:Date.now(), stage:"done"};
+    }
+    function diagnosticRequestId(response) {
+      try {
+        const id = response.headers.get("X-Bagu-Request-Id");
+        return /^r_[a-f0-9]{8,32}$/.test(id || "") ? id : "";
+      } catch (_) { return ""; }
+    }
+    function diagnosticFailure(trace, error) {
+      trace.stage = "error"; trace.level = "ERROR";
+      try {
+        trace.error_type = error && error.name || "Error";
+        const id = trace.request_id || trace.operation_id;
+        if (id && error && typeof error.message === "string") error.message += "（错误编号：" + id + "）";
+      } catch (_) {}
+    }
+    function diagnosticComplete(trace) {
+      try {
+        trace.duration_ms = Math.max(0, Date.now() - trace.started);
+        delete trace.started;
+        if (typeof window !== "undefined" && window.baguDiagnostics) window.baguDiagnostics.record(trace);
+      } catch (_) {}
     }
 
     function startJudgeProgress() {
@@ -2500,6 +3022,7 @@
       $("btn-nav-quiz").classList.toggle("active", name === "quiz");
       $("btn-question-bank").classList.toggle("active", name === "questions");
       $("btn-nav-models").classList.toggle("active", name === "lib" || name === "edit");
+      $("btn-nav-settings").classList.toggle("active", name === "settings");
       $("btn-question-bank").setAttribute("aria-current", name === "questions" ? "page" : "false");
       const tab = name === "question-edit" ? "questions" : (name === "lib" || name === "edit" ? "settings" : name);
       ["quiz", "questions", "overview", "settings"].forEach((view) => {
@@ -2540,7 +3063,7 @@
       $("btn-draw").disabled = s.total === 0;
       $("backup-session-warning").textContent = session.session_id
         ? "本轮练习进行中。恢复前请回到练习页结束本轮。"
-        : "恢复将合并并更新题目与进度；建议先导出一份备份。";
+        : "导入将按文件类型合并题目；建议先导出一份含进度备份。";
     }
 
     function setCatsCollapsed(collapsed) {
@@ -2637,7 +3160,9 @@
     }
 
     async function draw(n, cat) {
+      let finish = () => {};
       try {
+        finish = typeof beginStudyWork === "function" ? beginStudyWork("draw") : () => {};
         const opened = await api("POST", "/api/draw", { n, cat: cat || null });
         rememberSessionMode(opened.session_id, selectedMode);
         showView("quiz");
@@ -2645,7 +3170,7 @@
       } catch (e) {
         alert(e.message);
         await refresh();
-      }
+      } finally { finish(); }
     }
 
     async function advanceQuestion() {
@@ -3249,8 +3774,14 @@
       $("q-import-file").click();
     });
     window.addEventListener("bagu-native-result", handleNativeResult);
-    $("btn-backup-export").addEventListener("click", () => startNativeOperation("export"));
-    $("btn-backup-import").addEventListener("click", () => startNativeOperation("import"));
+    $("btn-nav-settings").addEventListener("click", () => showView("settings"));
+    $("btn-empty-transfer").addEventListener("click", () => { showView("settings"); chooseImportArchive(); });
+    $("btn-question-export").addEventListener("click", () => nativeStore ? startNativeOperation("export-questions") : exportDesktopArchive("questions"));
+    $("btn-backup-export").addEventListener("click", () => nativeStore ? startNativeOperation("export") : exportDesktopArchive("progress"));
+    $("btn-diagnostics-export").addEventListener("click", exportDiagnostics);
+    $("btn-backup-import").addEventListener("click", chooseImportArchive);
+    $("backup-file").addEventListener("change", (event) => importDesktopArchive(event.target.files[0]));
+    $("backup-file").addEventListener("cancel", () => setNativeMessage("已取消选择文件，原数据未改变。", false));
     document.querySelectorAll("[data-mobile-view]").forEach((button) => {
       button.addEventListener("click", async () => {
         showView(button.dataset.mobileView);
@@ -3259,6 +3790,17 @@
     });
     if (isAndroidApp) {
       document.body.classList.add("android-app");
+      window.addEventListener("bagu-update", handleUpdateResult);
+      $("btn-update-check").addEventListener("click", () => dispatchUpdate("check"));
+      $("btn-update-recover").addEventListener("click", () => dispatchUpdate("recover"));
+      $("update-automatic").addEventListener("change", () => dispatchUpdate("automatic"));
+      $("btn-update-download").addEventListener("click", () => dispatchUpdate("download"));
+      $("btn-update-cancel").addEventListener("click", () => dispatchUpdate("cancel"));
+      $("btn-update-install").addEventListener("click", () => dispatchUpdate("install"));
+      $("btn-update-later").addEventListener("click", dismissUpdateNotice);
+      $("btn-update-details").addEventListener("click", () => { showView("settings"); $("update-card").scrollIntoView(); });
+      try { $("update-current-version").textContent = "当前版本：" + JSON.parse(nativeStore.getAppInfo()).versionName; } catch (_) { /* Older host remains usable. */ }
+      hydrateUpdateState();
       $("settings-model").appendChild($("model-bar"));
       $("overview-categories").appendChild($("sidebar-cats-box"));
       $("btn-back-quiz").textContent = "返回设置";

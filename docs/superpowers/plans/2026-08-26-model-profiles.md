@@ -1,5 +1,7 @@
 # 按模型条目配置 Implementation Plan
 
+> 历史实施记录：保留原步骤与勾选状态，不是当前待执行清单。多模型与 Key 分离约束仍有效；“没有 .git”、`sessionStorage` 及同步 `ping` 测试示例不代表现行实现，当前保存前验证完整流式响应。现行行为见[架构与数据约束](../../architecture.md)及 [HTTP API](../../api.md)，开发入口见[开发指南](../../development.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > **状态说明（2026-08-26）：** 本计划对应功能已实现，当前行为以 `2026-08-26-model-profiles-design.md`、代码和测试为准。下方未勾选项保留为原始实施步骤记录，不表示功能尚未落地。

@@ -1,5 +1,7 @@
 # 八股助手 Android Beta Implementation Plan
 
+> 历史实施与验收记录：保留当时步骤、勾选状态及产物结论，不是当前待执行清单或新的操作授权。移动隔离和发布安全约束仍有效；下文 `DATABASE_VERSION = 1` 已由 v2 替代，完成项不证明后续源码已经进入既有 APK。现行架构见[架构与数据约束](../../architecture.md)，构建说明见 [Android Beta](../../android-beta.md)，各基线/产物证据见[验证记录](../../validation.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. User authorization overrides automatic commits: do not commit or push.
 
 **Goal:** Produce a signed, installable 八股助手 Android APK with a dedicated mobile shell, persistent local data, internal seed questions and portable question/progress backups.

@@ -8,6 +8,14 @@ import static org.junit.Assert.*;
 
 /** The engine and clock are external; request ownership and all transitions are real. */
 public class SpeechInputTest {
+    @Test public void installGuardSeesPendingPermissionReplacementAndCompletion() {
+        Fixture f = new Fixture(); f.backend.permission = false;
+        assertFalse(f.input.isActive());
+        f.input.start("first"); assertTrue(f.input.isActive());
+        f.input.start("second"); assertTrue(f.input.isActive());
+        f.backend.reply(true); assertTrue(f.input.isActive());
+        f.backend.engine().listener.result("completed"); assertFalse(f.input.isActive());
+    }
     private static final class Clock implements SpeechInput.Scheduler {
         final List<Runnable> jobs = new ArrayList<>();
         final List<Long> delays = new ArrayList<>();

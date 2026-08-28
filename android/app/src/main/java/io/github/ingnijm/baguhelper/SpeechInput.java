@@ -122,6 +122,8 @@ final class SpeechInput {
         if (active != null) finish(active, "cancelled", null, null);
     }
 
+    boolean isActive() { return active != null; }
+
     void pause() {
         if (active == null) return;
         // The Android permission dialog pauses the Activity. Preserve its decision

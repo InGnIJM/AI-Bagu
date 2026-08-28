@@ -1767,6 +1767,148 @@ def _read_log_events(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def test_diagnostics_filters_new_and_legacy_logs_without_opening_database(tmp_path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    path = bagu.configure_logging(log_dir=log_dir)
+    try:
+        bagu.log_event("request.error", request_id="r_1234abcd", path="/api/models/sk-test-secret?token=private",
+                       error_type="ValueError", message="PRIVATE_ANSWER", model="sk-test-secret")
+        live = path.read_text(encoding="utf-8")
+        assert "sk-test-secret" not in live and "PRIVATE_ANSWER" not in live
+        assert json.loads(live)["path"] == "/api/models/:id"
+        with path.open("a", encoding="utf-8") as target:
+            target.write(json.dumps({"time": "2026-08-28T01:02:03+00:00", "event": "model.error",
+                                    "level": "ERROR", "error_type": "TimeoutError", "model": "sk-test-secret",
+                                    "message": "PRIVATE_VOICE", "log_path": "C:/private/user"}) + "\n")
+            target.write("not-json PRIVATE_ANSWER\n{\"partial\":")
+        monkeypatch.setattr(bagu, "get_conn", lambda *a, **k: pytest.fail("diagnostics opened database"))
+        monkeypatch.setattr(bagu.platform, "release", lambda: "6.8-PRIVATE_VOICE")
+        data = bagu.export_diagnostics(log_dir)
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            assert set(archive.namelist()) == {"manifest.json", "server.jsonl", "web.jsonl", "native.jsonl", "README.txt"}
+            text = "".join(archive.read(name).decode() for name in archive.namelist())
+            assert all(secret not in text for secret in ("sk-test-secret", "PRIVATE_ANSWER", "PRIVATE_VOICE", "C:/private"))
+            manifest = json.loads(archive.read("manifest.json"))
+            assert manifest["platform_version"] == "6.8"
+            assert manifest["sources"]["server"]["dropped"] >= 2
+            assert manifest["sources"]["web"]["missing"]
+            assert b"TimeoutError" in archive.read("server.jsonl")
+    finally:
+        bagu.close_logging()
+
+
+def test_diagnostics_logging_failure_is_not_a_business_failure(tmp_path, monkeypatch):
+    blocked = tmp_path / "not-a-directory"
+    blocked.write_text("occupied")
+    try:
+        bagu.configure_logging(log_dir=blocked)
+        bagu.log_event("model.error", error_type="ValueError", message="sk-test-secret")
+        with zipfile.ZipFile(io.BytesIO(bagu.export_diagnostics(blocked))) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            assert manifest["sources"]["server"]["missing"]
+    finally:
+        bagu.close_logging()
+
+
+def test_diagnostics_http_bypasses_database_and_enforces_origin_and_limits(tmp_path, monkeypatch):
+    monkeypatch.setattr(bagu, "get_conn", lambda *a, **k: pytest.fail("diagnostics opened database"))
+    with _runtime_server(tmp_path) as server:
+        headers = {"X-Bagu-Diagnostics": "1", "Content-Type": "application/json"}
+        status, raw, ctype = _runtime_request(server, "GET", "/api/diagnostics/export", headers=headers)
+        assert status == 200 and ctype == "application/zip"
+        assert zipfile.is_zipfile(io.BytesIO(raw))
+        for bad in ({}, {**headers, "Origin": "https://evil.invalid"}, {**headers, "Host": "evil.invalid"}):
+            assert _runtime_request(server, "GET", "/api/diagnostics/export", headers=bad)[0] == 403
+        event = {"event": "web.error", "operation_id": "w_" + "a" * 32, "error_type": "TypeError", "line": 42}
+        for _ in range(6):
+            response = _runtime_request(server, "POST", "/api/diagnostics/events", json.dumps({"events": [event] * 20}), headers)
+            assert response[0] == 200 and json.loads(response[1])["accepted"] == 20
+        response = _runtime_request(server, "POST", "/api/diagnostics/events", json.dumps({"events": [event]}), headers)
+        assert response[0] == 200 and json.loads(response[1])["dropped"] == 1
+        assert _runtime_request(server, "POST", "/api/diagnostics/events", " " * 32769, headers)[0] == 413
+        assert _runtime_request(server, "POST", "/api/diagnostics/events", json.dumps({"events": [event] * 21}), headers)[0] == 400
+        _, raw, _ = _runtime_request(server, "GET", "/api/diagnostics/export", headers=headers)
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            assert len(archive.read("web.jsonl").splitlines()) == 120
+    assert not (tmp_path / "runtime.db").exists()
+
+
+def test_diagnostics_not_exposed_on_android_and_request_id_header(tmp_path, monkeypatch):
+    monkeypatch.setattr(bagu, "get_conn", lambda *a, **k: pytest.fail("diagnostics opened database"))
+    with _runtime_server(tmp_path, android=True, access_token="test-token") as server:
+        headers = {"X-Bagu-Token": "test-token", "X-Bagu-Diagnostics": "1"}
+        assert _runtime_request(server, "GET", "/api/diagnostics/export", headers=headers)[0] == 404
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
+        connection.request("GET", "/", headers=headers)
+        response = connection.getresponse()
+        assert re.fullmatch(r"r_[a-f0-9]{8,32}", response.getheader("X-Bagu-Request-Id"))
+        response.read()
+        connection.close()
+        for method in ("HEAD", "OPTIONS"):
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
+            connection.request(method, "/api/diagnostics/export", headers=headers)
+            response = connection.getresponse()
+            assert response.status == 404
+            assert re.fullmatch(r"r_[a-f0-9]{8,32}", response.getheader("X-Bagu-Request-Id"))
+            response.read()
+            connection.close()
+
+
+def test_diagnostics_snapshot_limits_rotation_and_rejects_link_targets(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    row = json.dumps({"event": "request.error", "time": "2026-08-28T01:02:03Z", "error_type": "ValueError"}) + "\n"
+    (logs / "bagu-server.log").write_text(row * 25000, encoding="utf-8")
+    (logs / "bagu-server.log.1").write_text(row, encoding="utf-8")
+    (logs / "bagu-native.log").mkdir()
+    with zipfile.ZipFile(io.BytesIO(bagu.export_diagnostics(logs))) as archive:
+        assert len(archive.read("server.jsonl")) <= 2 * 1024 * 1024
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["sources"]["server"]["truncated"]
+        assert manifest["sources"]["native"]["unreadable"]
+
+
+def test_diagnostics_malformed_fields_and_failed_handler_never_expose_text(tmp_path, monkeypatch, capsys):
+    path = bagu.configure_logging(tmp_path)
+    try:
+        bagu.log_event("model.error", model="sk-test-private", error_type="sk-test-private", frames=[{"file": "bagu.py", "line": 24, "locals": "PRIVATE_TEXT"}])
+        event = json.loads(path.read_text(encoding="utf-8"))
+        assert event["error_type"] == "Error" and event["frames"] == [{"file": "bagu.py", "line": 24}]
+        raw = path.read_text(encoding="utf-8") + capsys.readouterr().err
+        assert "sk-test-private" not in raw and "PRIVATE_TEXT" not in raw
+        handler = next(h for h in bagu.EVENT_LOGGER.handlers if isinstance(h, bagu.RotatingFileHandler))
+        monkeypatch.setattr(handler, "emit", lambda _: (_ for _ in ()).throw(OSError("sk-test-private")))
+        bagu.log_event("model.error", error_type="ValueError")
+        assert "sk-test-private" not in capsys.readouterr().err
+        store = bagu.DiagnosticStore(tmp_path / "logs")
+        assert store.accept([{"event": ["web.error"]}, {"event": "model.error"}, {"event": "web.error", "message": "x" * 3000}]) == {"accepted": 0, "dropped": 3}
+        result = bagu.sanitize_diagnostic({"event": "web.error", "status": 1.5, "line": 0, "count": True})
+        assert all(key not in result for key in ("status", "line", "count"))
+    finally:
+        bagu.close_logging()
+
+
+def test_diagnostics_oversized_integer_does_not_break_entire_archive(tmp_path):
+    (tmp_path / "bagu-server.log").write_text(json.dumps({"event": "model.error", "count": 10 ** 400}) + "\n", encoding="utf-8")
+    with zipfile.ZipFile(io.BytesIO(bagu.export_diagnostics(tmp_path))) as archive:
+        event = json.loads(archive.read("server.jsonl"))
+        assert event["event"] == "model.error" and "count" not in event
+
+
+def test_stream_database_failure_has_sanitized_error_and_request_id(tmp_path, monkeypatch, capsys):
+    path = bagu.configure_logging(tmp_path)
+    monkeypatch.setattr(bagu, "get_conn", lambda *a, **k: (_ for _ in ()).throw(OSError("sk-test-private")))
+    try:
+        with _runtime_server(tmp_path) as server:
+            status, body, _ = _runtime_request(server, "POST", "/api/answer/stream", "{}")
+            assert status == 500 and b"sk-test-private" not in body
+        raw = path.read_text(encoding="utf-8") + capsys.readouterr().err
+        assert "sk-test-private" not in raw
+        assert "request.error" in raw
+    finally:
+        bagu.close_logging()
+
+
 def _close_log_handlers():
     for handler in list(bagu.EVENT_LOGGER.handlers):
         bagu.EVENT_LOGGER.removeHandler(handler)
@@ -1776,12 +1918,12 @@ def _close_log_handlers():
 def test_event_logging_writes_json_to_terminal_and_rotating_file(tmp_path, capsys):
     log_path = bagu.configure_logging(tmp_path)
     try:
-        bagu.log_event("diagnostic.ready", request_id="req_test", duration_ms=12.3)
+        bagu.log_event("diagnostic.ready", request_id="r_1234abcd", duration_ms=12.3)
         terminal_event = json.loads(capsys.readouterr().err.strip())
         file_event = _read_log_events(log_path)[-1]
 
         assert terminal_event["event"] == "diagnostic.ready"
-        assert terminal_event["request_id"] == "req_test"
+        assert terminal_event["request_id"] == "r_1234abcd"
         assert terminal_event["duration_ms"] == 12.3
         assert terminal_event["level"] == "INFO"
         assert "time" in terminal_event
@@ -1789,7 +1931,7 @@ def test_event_logging_writes_json_to_terminal_and_rotating_file(tmp_path, capsy
         file_handlers = [
             handler
             for handler in bagu.EVENT_LOGGER.handlers
-            if handler.__class__.__name__ == "RotatingFileHandler"
+            if isinstance(handler, bagu.RotatingFileHandler)
         ]
         assert len(file_handlers) == 1
         assert file_handlers[0].maxBytes == 5 * 1024 * 1024

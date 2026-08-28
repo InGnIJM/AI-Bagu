@@ -1,6 +1,6 @@
 <resources>
     <string name="app_name">八股助手</string>
     <string name="starting">正在准备你的题库…</string>
-    <string name="startup_error">启动失败。请重试；本机题库不会被重置。</string>
+    <string name="startup_error_with_diagnostic">启动失败。请重试；本机题库不会被重置。\n反馈编号：%1$s</string>
     <string name="retry">重试</string>
 </resources>

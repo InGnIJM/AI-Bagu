@@ -99,6 +99,23 @@ test('desktop appends final transcripts exactly once, saves draft, never grades'
   assert.equal(p.requests.filter(([, o]) => o?.method === 'POST').length, 0);
 });
 
+test('speech diagnostics correlate failures without copying speech or provider messages', async () => {
+  const p = page(), events = [];
+  p.window.baguDiagnostics = { id: () => 'w_' + 'a'.repeat(32), record: value => events.push({...value}) };
+  p.nodes.ans.value = 'PRIVATE_ANSWER';
+  await p.start();
+  const r = p.instances[0];
+  r.results([['PRIVATE_VOICE', true]]);
+  r.onerror({error:'PRIVATE_KEY sk-test-provider-message'});
+  assert.equal(events.length, 2);
+  assert.deepEqual(events.map(e => e.event), ['web.speech', 'web.speech']);
+  assert.deepEqual(events.map(e => e.stage), ['start', 'error']);
+  assert.equal(events[0].operation_id, events[1].operation_id);
+  assert.match(p.nodes['speech-error'].textContent, /w_a{32}/);
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE_|sk-test/);
+  assert.equal(p.nodes.ans.readOnly, false);
+});
+
 test('unsupported browser gives visible actionable error and preserves the answer', async () => {
   const p = page({ supported: false }); p.nodes.ans.value = '保留我'; await p.start();
   assert.match(p.nodes['speech-error'].textContent, /不支持|不可用/);

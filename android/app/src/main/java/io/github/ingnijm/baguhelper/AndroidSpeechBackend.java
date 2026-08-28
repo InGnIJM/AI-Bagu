@@ -21,14 +21,20 @@ final class AndroidSpeechBackend implements SpeechInput.Backend {
         this.activity = activity; this.permissions = permissions;
     }
 
-    @Override public boolean available() { return SpeechRecognizer.isRecognitionAvailable(activity); }
+    @Override public boolean available() {
+        try { return SpeechRecognizer.isRecognitionAvailable(activity); }
+        catch (RuntimeException failure) { AndroidDiagnostics.event("native.speech", "initialize", failure, null, null); throw failure; }
+    }
     @Override public boolean hasPermission() {
-        return activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+        try { return activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED; }
+        catch (RuntimeException failure) { AndroidDiagnostics.event("native.speech", "permission", failure, null, null); throw failure; }
     }
     @Override public void requestPermission(Consumer<Boolean> reply) { permissions.request(reply); }
 
     @Override public SpeechInput.Engine create(SpeechInput.Listener listener) {
-        SpeechRecognizer recognizer = SpeechRecognizer.createSpeechRecognizer(activity);
+        SpeechRecognizer recognizer;
+        try { recognizer = SpeechRecognizer.createSpeechRecognizer(activity); }
+        catch (RuntimeException failure) { AndroidDiagnostics.event("native.speech", "initialize", failure, null, null); throw failure; }
         try {
             recognizer.setRecognitionListener(new RecognitionListener() {
                 @Override public void onReadyForSpeech(Bundle params) { listener.ready(); }
@@ -36,12 +42,16 @@ final class AndroidSpeechBackend implements SpeechInput.Backend {
                 @Override public void onRmsChanged(float value) {}
                 @Override public void onBufferReceived(byte[] buffer) {}
                 @Override public void onEndOfSpeech() { listener.ended(); }
-                @Override public void onError(int error) { listener.error(errorMessage(error)); }
+                @Override public void onError(int error) {
+                    AndroidDiagnostics.event("native.speech", "error", null, null, error);
+                    listener.error(errorMessage(error));
+                }
                 @Override public void onResults(Bundle results) { listener.result(firstResult(results)); }
                 @Override public void onPartialResults(Bundle results) { listener.partial(firstResult(results)); }
                 @Override public void onEvent(int eventType, Bundle params) {}
             });
         } catch (RuntimeException failure) {
+            AndroidDiagnostics.event("native.speech", "initialize", failure, null, null);
             recognizer.destroy();
             throw failure;
         }
@@ -52,12 +62,17 @@ final class AndroidSpeechBackend implements SpeechInput.Backend {
                 intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN");
                 intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
                 intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
-                recognizer.startListening(intent);
+                run("start", () -> recognizer.startListening(intent));
             }
-            @Override public void stop() { recognizer.stopListening(); }
-            @Override public void cancel() { recognizer.cancel(); }
-            @Override public void destroy() { recognizer.destroy(); }
+            @Override public void stop() { run("done", recognizer::stopListening); }
+            @Override public void cancel() { run("cancelled", recognizer::cancel); }
+            @Override public void destroy() { run("done", recognizer::destroy); }
         };
+    }
+
+    private static void run(String stage, Runnable action) {
+        try { action.run(); }
+        catch (RuntimeException failure) { AndroidDiagnostics.event("native.speech", stage, failure, null, null); throw failure; }
     }
 
     private static String firstResult(Bundle results) {

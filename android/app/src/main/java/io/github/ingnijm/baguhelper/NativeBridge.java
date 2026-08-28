@@ -15,11 +15,13 @@ public final class NativeBridge {
     private final SharedPreferences preferences;
     private final WeakReference<MainActivity> activity;
     private final String appName;
+    private final UpdateController updater;
 
     NativeBridge(SharedPreferences preferences, MainActivity activity) {
         this.preferences = preferences;
         this.activity = new WeakReference<>(activity);
         this.appName = activity.getString(R.string.app_name);
+        this.updater = UpdateController.get(activity);
     }
 
     @JavascriptInterface public String getAppInfo() {
@@ -55,11 +57,20 @@ public final class NativeBridge {
     }
 
     @JavascriptInterface public void exportBackup() { open("export", null); }
+    @JavascriptInterface public void exportDiagnostics() { open("diagnostics", null); }
+    @JavascriptInterface public void reportDiagnostic(String json) { AndroidDiagnostics.reportWeb(json); }
+    @JavascriptInterface public void exportQuestionBank() { open("export-questions", null); }
     @JavascriptInterface public void importBackup() { open("import", null); }
     @JavascriptInterface public void saveCsvTemplate(String csv) { open("template", csv); }
     @JavascriptInterface public void startSpeech(String requestId) { speech("start", requestId); }
     @JavascriptInterface public void stopSpeech(String requestId) { speech("stop", requestId); }
     @JavascriptInterface public void cancelSpeech(String requestId) { speech("cancel", requestId); }
+    @JavascriptInterface public String getUpdateState() { return updater.state(); }
+    @JavascriptInterface public void setAutomaticUpdates(boolean enabled, String operationId) { updater.automatic(enabled, operationId); }
+    @JavascriptInterface public boolean checkForUpdate(String operationId) { return updater.check(operationId); }
+    @JavascriptInterface public boolean downloadUpdate(String candidateId, String operationId) { return updater.download(candidateId, operationId); }
+    @JavascriptInterface public void cancelUpdate(String operationId) { updater.cancel(operationId); }
+    @JavascriptInterface public boolean installUpdate(String candidateId, String operationId) { return updater.install(candidateId, operationId); }
 
     private void speech(String operation, String requestId) {
         SpeechInput.validateRequestId(requestId);
