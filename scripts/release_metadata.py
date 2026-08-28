@@ -29,7 +29,7 @@ def validate_version(value):
     code, name, channel = value["versionCode"], value["versionName"], value["channel"]
     if type(code) is not int or not 1 <= code <= 2100000000:
         raise ValueError("invalid versionCode")
-    if not isinstance(name, str) or len(name) > 64 or not re.fullmatch(r"\d+\.\d+\.\d+(?:-beta\.\d+)?", name):
+    if not isinstance(name, str) or len(name) > 64 or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-beta\.[0-9]+)?", name):
         raise ValueError("invalid versionName")
     if channel not in ("stable", "beta") or ("-beta." in name) != (channel == "beta"):
         raise ValueError("versionName and channel disagree")
@@ -47,6 +47,63 @@ def file_hash(path):
 
 def json_bytes(value):
     return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def validate_feed(feed, channel):
+    """Validate the complete Android feed contract without trusting a local APK."""
+    if (channel not in ("beta", "stable") or not isinstance(feed, dict)
+            or set(feed) != {"schema_version", "channel", "release"}
+            or type(feed["schema_version"]) is not int or feed["schema_version"] != 1
+            or feed["channel"] != channel):
+        raise ValueError("invalid feed envelope")
+    item = feed["release"]
+    if item is None:
+        return feed
+    if not isinstance(item, dict) or set(item) != {
+            "versionName", "versionCode", "distribution", "packageName", "minSdk", "abi",
+            "apkUrl", "size", "sha256", "releaseUrl", "publishedAt", "notes"}:
+        raise ValueError("invalid feed release fields")
+    version = {"versionName": item["versionName"], "versionCode": item["versionCode"], "channel": channel}
+    validate_version(version)
+    for key, low, high in (("size", 1, MAX_APK), ("minSdk", 29, 10000)):
+        if type(item[key]) is not int or not low <= item[key] <= high:
+            raise ValueError("invalid feed release integer")
+    if (item["distribution"] != "public" or item["packageName"] != PACKAGE
+            or item["abi"] != "arm64-v8a" or not isinstance(item["sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])):
+        raise ValueError("invalid feed release identity")
+    tag = "v" + version["versionName"]
+    if (item["apkUrl"] != f"https://github.com/{REPOSITORY}/releases/download/{tag}/{apk_name(version)}"
+            or item["releaseUrl"] != f"https://github.com/{REPOSITORY}/releases/tag/{tag}"):
+        raise ValueError("invalid feed release URL")
+    if (not isinstance(item["publishedAt"], str)
+            or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", item["publishedAt"])):
+        raise ValueError("invalid feed release timestamp")
+    try:
+        datetime.strptime(item["publishedAt"], "%Y-%m-%dT%H:%M:%SZ")
+        notes = item["notes"]
+        if not isinstance(notes, str) or not notes.strip() or len(notes.encode("utf-16-le")) // 2 > 12000:
+            raise ValueError("invalid feed release notes")
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("invalid feed release timestamp or notes") from exc
+    return feed
+
+
+def parse_feed(data, channel):
+    if not isinstance(data, bytes) or len(data) > MAX_FEED:
+        raise ValueError("feed exceeds 64 KiB")
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate feed field")
+            value[key] = item
+        return value
+    try:
+        feed = json.loads(data.decode("utf-8"), object_pairs_hook=unique_object)
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise ValueError("invalid feed JSON") from exc
+    return validate_feed(feed, channel)
 
 
 def make_feed(version, apk, notes, published_at):

@@ -5,15 +5,19 @@ repository/version confirmations. No source push, forced references or deletion.
 """
 import argparse
 import base64
+import hashlib
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import time
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
+from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import release_metadata as meta
@@ -32,15 +36,14 @@ def command(args, cwd=ROOT, data=None, timeout=120):
     return result.stdout
 
 
-def local_preflight(root=ROOT):
+def local_preflight(root=None):
+    root = ROOT if root is None else root
     version = meta.load_version(root / "version.json")
     def git(*args):
         return command(["git", *args], cwd=root).decode("utf-8").strip()
     if git("status", "--porcelain", "--untracked-files=all"):
         raise ValueError("dirty checkout: explicitly review and commit source before preparing a release")
-    origin = git("remote", "get-url", "origin").removesuffix(".git").lower()
-    if origin not in ("https://github.com/ingnijm/ai-bagu", "git@github.com:ingnijm/ai-bagu"):
-        raise ValueError("origin does not match confirmed repository")
+    check_origin(root)
     license_text = (root / "LICENSE").read_text(encoding="utf-8")
     if "MIT License" not in license_text or "Permission is hereby granted" not in license_text:
         raise ValueError("MIT license missing")
@@ -51,6 +54,12 @@ def local_preflight(root=ROOT):
                 name.endswith((".bagu-backup", ".db", ".sqlite", ".sqlite3", ".jks", ".keystore", ".key", ".p12", ".pfx"))):
             raise ValueError("tracked private data or generated artifact blocks public release")
     return version, git("rev-parse", "HEAD")
+
+
+def check_origin(root):
+    origin = command(["git", "remote", "get-url", "origin"], cwd=root).decode("utf-8").strip().removesuffix(".git").lower()
+    if origin not in ("https://github.com/ingnijm/ai-bagu", "git@github.com:ingnijm/ai-bagu"):
+        raise ValueError("origin does not match confirmed repository")
 
 
 def validate_download_url(url, pages=False):
@@ -77,13 +86,50 @@ class SafeRedirects(HTTPRedirectHandler):
 def anonymous_download(url, limit, pages=False):
     validate_download_url(url, pages)
     request = Request(url, headers={"User-Agent": "Bagu-release-verifier", "Cache-Control": "no-cache"})
-    with build_opener(SafeRedirects(pages)).open(request, timeout=30) as response:
-        if response.status != 200:
-            raise ValueError("anonymous download failed")
-        data = response.read(limit + 1)
+    status = None
+    try:
+        with build_opener(SafeRedirects(pages)).open(request, timeout=30) as response:
+            status = response.status
+            if status != 200:
+                raise GitHubError(status)
+            data = response.read(limit + 1)
+    except HTTPError as exc:
+        # HTTPError also owns a response stream. Do not read its private body.
+        status = exc.code
+        try:
+            exc.close()
+        except OSError:
+            pass
+        raise GitHubError(status) from None
+    except (OSError, HTTPException):
+        raise GitHubError(status) from None
     if len(data) > limit:
         raise ValueError("download exceeds limit")
     return data
+
+
+class GitHubError(ValueError):
+    """Only safe protocol facts survive; tool output never enters diagnostics."""
+    def __init__(self, status=None):
+        self.status = status
+        detail = "no response" if status is None else f"HTTP {status}"
+        super().__init__(f"GitHub request failed ({detail}); no automatic destructive retry")
+
+
+def included_response(data):
+    status = None
+    # gh --include prefixes the response body with its HTTP status and headers.
+    # Also tolerate proxy/informational header blocks without searching bodies.
+    for _ in range(6):
+        match = re.match(rb"HTTP/\d+(?:\.\d+)? ([1-5][0-9]{2})(?: [^\r\n]*)?\r?\n", data)
+        if not match:
+            break
+        status = int(match[1])
+        separator = re.search(rb"\r?\n\r?\n", data)
+        if separator is None:
+            return status, b""
+        data = data[separator.end():]
+    return status, data
 
 
 class GitHub:
@@ -95,16 +141,30 @@ class GitHub:
     def api(self, path, method="GET", body=None, optional=False, binary=False):
         args = ["gh", "api", path, "--hostname", "github.com", "--method", method,
                 "-H", "Accept: " + ("application/octet-stream" if binary else "application/vnd.github+json")]
+        if not binary:
+            args += ["--include"]
         payload = None
         if body is not None:
             args += ["--input", "-"]
             payload = meta.json_bytes(body)
-        result = subprocess.run(args, cwd=ROOT, input=payload, capture_output=True, timeout=180)
-        if result.returncode:
-            if optional and b"(HTTP 404)" in result.stderr:
+        try:
+            result = subprocess.run(args, cwd=ROOT, input=payload, capture_output=True, timeout=180)
+        except (OSError, subprocess.SubprocessError):
+            raise GitHubError() from None
+        if binary:
+            if not result.returncode:
+                return result.stdout
+            match = re.search(rb"\(HTTP ([1-5][0-9]{2})\)", result.stderr)
+            raise GitHubError(int(match[1]) if match else None)
+        status, data = included_response(result.stdout)
+        if result.returncode or status is None or not 200 <= status < 300:
+            if optional and status == 404:
                 return None
-            raise ValueError(f"GitHub {method} request failed; no automatic destructive retry")
-        return result.stdout if binary else json.loads(result.stdout)
+            raise GitHubError(status)
+        try:
+            return json.loads(data)
+        except (ValueError, UnicodeError, RecursionError):
+            raise GitHubError(status) from None
 
     def find_release(self, tag):
         # The tag endpoint only exposes published releases. Authenticated list
@@ -245,23 +305,25 @@ def publish_release(remote, directory, version, commit, execute=False, published
             raise ValueError("uploaded asset hash/content verification failed")
     if release["draft"]:
         remote.publish_draft(release)
+    release = remote.get_release(release["id"])
+    validate_release_identity(release, version, commit)
+    if release["draft"] or {a["name"] for a in release["assets"]} != set(expected) or len(release["assets"]) != len(expected):
+        raise ValueError("published Release state or asset set not verified")
     remote.verify_tag(tag, commit)
     return {"release": "published", "releaseUrl": f"https://github.com/{meta.REPOSITORY}/releases/tag/{tag}", "pages": "not-written"}
 
 
 def merge_feed_files(existing, feed):
+    if not isinstance(feed, dict) or feed.get("release") is None:
+        raise ValueError("publishing feed requires a release")
+    meta.validate_feed(feed, feed.get("channel"))
     if not set(existing) <= FEED_FILES:
         raise ValueError("feed branch contains non-allowlisted files")
     result = dict(existing)
     for channel in ("beta", "stable"):
         name = f"updates/{channel}.json"
         if name in result:
-            if len(result[name]) > meta.MAX_FEED:
-                raise ValueError("existing feed too large")
-            previous = json.loads(result[name])
-            if (set(previous) != {"schema_version", "channel", "release"} or previous["schema_version"] != 1
-                    or previous["channel"] != channel):
-                raise ValueError("existing feed invalid")
+            previous = meta.parse_feed(result[name], channel)
         else:
             previous = {"schema_version": 1, "channel": channel, "release": None}
             result[name] = meta.json_bytes(previous)
@@ -277,44 +339,154 @@ def merge_feed_files(existing, feed):
     return result
 
 
-def update_feed(remote, feed):
-    prefix = remote.prefix
-    ref = remote.api(f"{prefix}/git/ref/heads/{FEED_BRANCH}", optional=True)
-    old_commit = None if ref is None else ref["object"]["sha"]
+def git_sha(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise ValueError("invalid Git object identity")
+    return value
+
+
+def ref_commit(ref):
+    if not isinstance(ref, dict) or not isinstance(ref.get("object"), dict) or ref["object"].get("type") != "commit":
+        raise ValueError("invalid Git commit reference")
+    return git_sha(ref["object"].get("sha"))
+
+
+def feed_git_access(remote):
+    """Prove repository and Git-data access before any optional missing-ref lookup."""
+    repo = remote.api(remote.prefix)
+    if (not isinstance(repo, dict) or repo.get("full_name", "").lower() != meta.REPOSITORY.lower()
+            or repo.get("private") is not False or repo.get("archived") is not False
+            or not isinstance(repo.get("permissions"), dict)
+            or repo["permissions"].get("pull") is not True or repo["permissions"].get("push") is not True):
+        raise ValueError("fixed repository must be public, non-archived, and grant pull/push access")
+    branch = repo.get("default_branch")
+    if not isinstance(branch, str) or not branch or len(branch) > 255:
+        raise ValueError("repository default branch unavailable")
+    head = ref_commit(remote.api(f"{remote.prefix}/git/ref/heads/{quote(branch, safe='/')}"))
+    commit = remote.api(f"{remote.prefix}/git/commits/{head}")
+    if commit.get("sha") != head:
+        raise ValueError("default Git commit unavailable")
+    tree_sha = git_sha(commit.get("tree", {}).get("sha"))
+    tree = remote.api(f"{remote.prefix}/git/trees/{tree_sha}")
+    if tree.get("sha") != tree_sha or not isinstance(tree.get("tree"), list):
+        raise ValueError("default Git tree unavailable")
+
+
+def feed_head(remote):
+    ref = remote.api(f"{remote.prefix}/git/ref/heads/{FEED_BRANCH}", optional=True)
+    return None if ref is None else ref_commit(ref)
+
+
+def read_feed_branch(remote):
+    old_commit = feed_head(remote)
     existing = {}
-    if old_commit:
-        commit = remote.api(f"{prefix}/git/commits/{old_commit}")
-        tree = remote.api(f"{prefix}/git/trees/{commit['tree']['sha']}?recursive=1")
-        if tree.get("truncated"):
-            raise ValueError("feed tree truncated")
-        for entry in tree["tree"]:
-            if entry["path"] == "updates" and entry["type"] == "tree":
-                continue
-            if entry["path"] not in FEED_FILES or entry["type"] != "blob" or entry["mode"] != "100644":
-                raise ValueError("feed branch contains private or unexpected content")
-            if entry.get("size", meta.MAX_FEED + 1) > meta.MAX_FEED:
-                raise ValueError("existing feed too large")
-            blob = remote.api(f"{prefix}/git/blobs/{entry['sha']}")
-            if blob["encoding"] != "base64":
-                raise ValueError("invalid feed blob encoding")
-            existing[entry["path"]] = base64.b64decode(blob["content"])
-    files = merge_feed_files(existing, feed)
-    if files != existing:
-        tree = remote.api(f"{prefix}/git/trees", "POST", {"tree": [
-            {"path": name, "mode": "100644", "type": "blob", "content": content.decode("utf-8")}
-            for name, content in sorted(files.items())]})
-        commit = remote.api(f"{prefix}/git/commits", "POST", {
-            "message": f"chore(updates): publish {feed['release']['versionName']}",
-            "tree": tree["sha"], "parents": [old_commit] if old_commit else [],
-        })
-        if old_commit:
-            remote.api(f"{prefix}/git/refs/heads/{FEED_BRANCH}", "PATCH", {"sha": commit["sha"], "force": False})
+    if old_commit is None:
+        return old_commit, existing
+    commit = remote.api(f"{remote.prefix}/git/commits/{old_commit}")
+    if commit.get("sha") != old_commit:
+        raise ValueError("feed commit identity mismatch")
+    tree_sha = git_sha(commit.get("tree", {}).get("sha"))
+    tree = remote.api(f"{remote.prefix}/git/trees/{tree_sha}?recursive=1")
+    entries = tree.get("tree")
+    if (tree.get("sha") != tree_sha or tree.get("truncated") is not False
+            or not isinstance(entries, list) or len(entries) > 4):
+        raise ValueError("feed tree invalid, truncated or oversized")
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or entry["path"] in seen:
+            raise ValueError("invalid or duplicate feed tree entry")
+        name = entry["path"]
+        seen.add(name)
+        if name == "updates" and entry.get("type") == "tree" and entry.get("mode") == "040000":
+            continue
+        if name not in FEED_FILES or entry.get("type") != "blob" or entry.get("mode") != "100644":
+            raise ValueError("feed branch contains private or unexpected content")
+        size = entry.get("size")
+        if type(size) is not int or not 0 <= size <= meta.MAX_FEED:
+            raise ValueError("existing feed too large or invalid")
+        sha = git_sha(entry.get("sha"))
+        blob = remote.api(f"{remote.prefix}/git/blobs/{sha}")
+        encoded = blob.get("content")
+        if (blob.get("encoding") != "base64" or blob.get("sha") != sha or type(blob.get("size")) is not int
+                or blob["size"] != size or not isinstance(encoded, str) or len(encoded) > 2 * meta.MAX_FEED):
+            raise ValueError("invalid feed blob metadata or size")
+        try:
+            data = base64.b64decode(encoded.replace("\n", "").replace("\r", ""), validate=True)
+        except ValueError:
+            raise ValueError("invalid feed blob encoding") from None
+        actual_sha = hashlib.sha1(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest()
+        if len(data) != size or actual_sha != sha:
+            raise ValueError("feed blob size or identity mismatch")
+        if name != ".nojekyll":
+            meta.parse_feed(data, Path(name).stem)
         else:
-            remote.api(f"{prefix}/git/refs", "POST", {"ref": f"refs/heads/{FEED_BRANCH}", "sha": commit["sha"]})
-    pages = remote.api(f"{prefix}/pages", optional=True)
-    if not pages or pages.get("source") != {"branch": FEED_BRANCH, "path": "/"}:
-        raise ValueError("feed branch ready; configure Pages source codex/update-feed / in GitHub, then retry feed")
+            try:
+                data.decode("utf-8")
+            except UnicodeError:
+                raise ValueError("invalid .nojekyll encoding") from None
+        existing[name] = data
+    return old_commit, existing
+
+
+def write_feed_branch(remote, old_commit, existing, files, message):
+    if feed_head(remote) != old_commit:
+        raise ValueError("concurrent feed branch change; inspect and retry")
+    if files == existing:
+        return
+    tree = remote.api(f"{remote.prefix}/git/trees", "POST", {"tree": [
+        {"path": name, "mode": "100644", "type": "blob", "content": content.decode("utf-8")}
+        for name, content in sorted(files.items())]})
+    commit = remote.api(f"{remote.prefix}/git/commits", "POST", {
+        "message": message, "tree": git_sha(tree.get("sha")), "parents": [old_commit] if old_commit else [],
+    })
+    new_commit = git_sha(commit.get("sha"))
+    if feed_head(remote) != old_commit:
+        raise ValueError("concurrent feed branch change; inspect and retry")
+    if old_commit:
+        remote.api(f"{remote.prefix}/git/refs/heads/{FEED_BRANCH}", "PATCH", {"sha": new_commit, "force": False})
+    else:
+        remote.api(f"{remote.prefix}/git/refs", "POST", {"ref": f"refs/heads/{FEED_BRANCH}", "sha": new_commit})
+    verified_commit, verified_files = read_feed_branch(remote)
+    if verified_commit != new_commit or verified_files != files:
+        raise ValueError("concurrent feed branch change or verification mismatch")
+
+
+def initialize_feed(remote):
+    feed_git_access(remote)
+    old_commit, existing = read_feed_branch(remote)
+    files = dict(existing)
+    files.setdefault(".nojekyll", b"")
+    for channel in ("beta", "stable"):
+        files.setdefault(f"updates/{channel}.json", meta.json_bytes({"schema_version": 1, "channel": channel, "release": None}))
+    write_feed_branch(remote, old_commit, existing, files, "chore(updates): initialize missing feeds")
     return files
+
+
+def update_feed(remote, feed):
+    feed_git_access(remote)
+    old_commit, existing = read_feed_branch(remote)
+    files = merge_feed_files(existing, feed)
+    write_feed_branch(remote, old_commit, existing, files, f"chore(updates): publish {feed['release']['versionName']}")
+    require_pages_source(remote)
+    return files
+
+
+def require_pages_source(remote):
+    pages = remote.api(f"{remote.prefix}/pages")
+    if (not pages or pages.get("source") != {"branch": FEED_BRANCH, "path": "/"}
+            or "build_type" in pages and pages["build_type"] != "legacy"):
+        raise ValueError("feed branch ready; configure Pages source codex/update-feed / in GitHub, then retry feed")
+
+
+def verify_pages_ready(remote):
+    require_pages_source(remote)
+    feed_git_access(remote)
+    old_commit, files = read_feed_branch(remote)
+    if old_commit is None or set(files) != FEED_FILES:
+        raise ValueError("Pages feed branch incomplete; run init-feed and configure Pages first")
+    verify_live_feeds(files, attempts=1)
+    if feed_head(remote) != old_commit:
+        raise ValueError("concurrent feed branch change during Pages verification")
 
 
 def verify_public_assets(directory, feed):
@@ -324,19 +496,26 @@ def verify_public_assets(directory, feed):
             raise ValueError("anonymous asset verification failed")
 
 
-def verify_live_feeds(files):
-    for name, expected in files.items():
-        if name == ".nojekyll":
-            continue
-        for attempt in range(6):
+def verify_live_feeds(files, attempts=6):
+    if set(files) != FEED_FILES:
+        raise ValueError("Pages feed files incomplete")
+    for channel in ("beta", "stable"):
+        name = f"updates/{channel}.json"
+        expected = meta.parse_feed(files[name], channel)
+        for attempt in range(attempts):
+            last_failure = None
             try:
                 actual = anonymous_download(FEED_ROOT + Path(name).name, meta.MAX_FEED, pages=True)
-                if json.loads(actual) == json.loads(expected):
+                if meta.parse_feed(actual, channel) == expected:
                     break
+            except GitHubError as exc:
+                last_failure = exc
             except (OSError, ValueError):
                 pass
-            if attempt == 5:
-                raise ValueError("Release published; Pages not yet serving expected feed. Retry feed later")
+            if attempt == attempts - 1:
+                if last_failure is not None:
+                    raise last_failure from None
+                raise ValueError("Pages not serving both valid expected feeds; check deployment and retry feed later")
             time.sleep(5)
 
 
@@ -430,12 +609,24 @@ def prepare(directory, version, commit):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("preflight", "prepare", "publish", "feed"), nargs="?", default="preflight")
+    parser.add_argument("stage", choices=("preflight", "prepare", "publish", "feed", "init-feed"), nargs="?", default="preflight")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirm-repository")
     parser.add_argument("--confirm-version")
     args = parser.parse_args()
     try:
+        if args.stage == "init-feed":
+            print(json.dumps({"stage": "init-feed", "dry_run": not args.execute, "repository": meta.REPOSITORY,
+                              "branch": FEED_BRANCH, "files": sorted(FEED_FILES)}))
+            if not args.execute:
+                print("Dry-run: offline; add only missing feeds. No credentials, tools, workspace or remote changes.")
+                return 0
+            if args.confirm_repository != meta.REPOSITORY:
+                raise ValueError("init-feed requires exact --confirm-repository InGnIJM/AI-Bagu")
+            check_origin(ROOT)
+            initialize_feed(GitHub())
+            print("Feed branch ready; Pages deployment NOT verified. Configure Pages source codex/update-feed / manually.")
+            return 0
         version, commit = local_preflight()
         directory = ROOT / "dist/android" / version["versionName"] / "public"
         print(json.dumps({"stage": args.stage, "dry_run": not args.execute, "repository": meta.REPOSITORY,
@@ -448,8 +639,10 @@ def main():
             raise ValueError("publication requires exact --confirm-repository and --confirm-version")
         remote = GitHub()
         remote.remote_preflight(version, commit, recover_published=args.stage == "feed")
+        if args.stage != "feed":
+            verify_pages_ready(remote)
         if args.stage == "preflight":
-            print("Local and authenticated remote preflight passed; no remote writes.")
+            print("Local, authenticated remote and anonymous Pages preflight passed; no remote writes.")
             return 0
         if args.stage == "prepare":
             prepare(directory, version, commit)
@@ -471,8 +664,10 @@ def main():
             verify_public_assets(directory, feed)
             files = update_feed(remote, feed)
             verify_live_feeds(files)
-        except Exception:
+        except Exception as exc:
             print("PARTIAL: Release published; feed/Pages verification incomplete. Retry feed; no deletion or force-push attempted.", file=sys.stderr)
+            if isinstance(exc, GitHubError):
+                print(str(exc), file=sys.stderr)
             return 2
         print("Release=verified; anonymous assets=verified; Pages=verified")
         return 0
