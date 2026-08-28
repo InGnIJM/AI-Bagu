@@ -31,8 +31,6 @@ final class UpdateController {
     private final UpdateEngine engine;
     private WeakReference<MainActivity> owner=new WeakReference<>(null);
     private boolean recoveryPrompt;
-    private volatile String diagnosticOperationId = DiagnosticPolicy.newOperation();
-    private volatile String diagnosticFailureId;
     private WeakReference<AlertDialog> recoveryDialog=new WeakReference<>(null);
     static synchronized UpdateController get(Context context) {
         if(instance==null)instance=new UpdateController(context.getApplicationContext());
@@ -48,6 +46,11 @@ final class UpdateController {
             public void enable(boolean value){write(preferences.edit().putBoolean("automatic",value));}
             public String lastStatus(){return preferences.getString("lastStatus","never");}
             public void lastStatus(String value){write(preferences.edit().putString("lastStatus",value));}
+            public String lastCheck(){return preferences.getString("lastCheck","");}
+            public void lastCheck(String value){
+                if(value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>UpdateCheckSummary.MAX_BYTES)throw new IllegalArgumentException("Update summary too large");
+                write(preferences.edit().putString("lastCheck",value));
+            }
             private void write(SharedPreferences.Editor edit){if(!edit.commit())throw new IllegalStateException("Update preferences unavailable");}
         };
         UpdateEngine.Device device=new UpdateEngine.Device() {
@@ -60,7 +63,7 @@ final class UpdateController {
             UpdateIO.https(),worker,System::currentTimeMillis,
             state->main.post(()->publish(state)),
             (op,candidate)->main.post(()->requestInstallation(op,candidate)),
-            (stage,failure)->{diagnosticFailureId=diagnosticOperationId;AndroidDiagnostics.event("native.update",stage,failure,diagnosticOperationId,null);});
+            AndroidDiagnostics::update);
     }
     private void requestInstallation(String op,UpdatePolicy.Release candidate) {
         MainActivity activity=owner.get();
@@ -81,31 +84,21 @@ final class UpdateController {
         if(owner.get()!=activity)return;
         engine.cancel("background_"+UUID.randomUUID().toString());
         Map<String,Object> state=engine.state();
-        engine.installBlocked((String)state.get("operationId"),"应用已离开前台，请返回后再次点击安装。");
+        engine.cancelInstallation((String)state.get("operationId"),"应用已离开前台，请返回后再次点击安装。");
     }
     private void publish(Map<String,Object> state){
-        if ("error".equals(state.get("status"))) AndroidDiagnostics.event("native.update", "error", null, diagnosticOperationId, null);
         MainActivity activity=owner.get();
         if(activity!=null&&activity.updateForeground()) {
-            activity.publishUpdate(diagnosticState(state));
+            activity.publishUpdate(UpdateIO.json(state));
             // Cache restoration can complete after the first foreground/page-ready callback.
             if("startup".equals(state.get("operationId")))checkOperation("auto_"+UUID.randomUUID().toString(),true);
         }
     }
-    private String diagnosticState(Map<String,Object> state){
-        Map<String,Object> detail=new LinkedHashMap<>(state);
-        if(diagnosticOperationId.equals(diagnosticFailureId)){
-            detail.put("message",state.get("message")+"\n反馈编号："+diagnosticOperationId);
-            detail.put("diagnostic_id",diagnosticOperationId);
-        }
-        return UpdateIO.json(detail);
-    }
-    private void beginDiagnostic(){if(!Boolean.TRUE.equals(engine.state().get("busy"))){diagnosticOperationId=DiagnosticPolicy.newOperation();diagnosticFailureId=null;}}
-    private synchronized boolean checkOperation(String op,boolean automatic){beginDiagnostic();return engine.check(op,automatic);}
-    String state(){return diagnosticState(engine.state());}
+    private boolean checkOperation(String op,boolean automatic){return engine.check(op,automatic);}
+    String state(){return UpdateIO.json(engine.state());}
     void automatic(boolean value,String op){engine.automatic(value,op);}
     boolean check(String op){return checkOperation(op,false);}
-    synchronized boolean download(String id,String op){beginDiagnostic();return engine.download(id,op);}
+    boolean download(String id,String op){return engine.download(id,op);}
     void cancel(String op){
         UpdatePolicy.validateOperationId(op);
         if(Boolean.TRUE.equals(engine.state().get("recovery"))) {
@@ -121,35 +114,40 @@ final class UpdateController {
                         try {
                             app.revokeUriPermission(Uri.parse("content://"+app.getPackageName()+".updates/candidate.apk"),Intent.FLAG_GRANT_READ_URI_PERMISSION);
                             engine.recover(op);
-                        } catch(RuntimeException failure) { AndroidDiagnostics.event("native.update", "verify", failure, null, null); activity.publishUpdate(state()); }
+                        } catch(RuntimeException failure) { engine.recoveryFailed(op,failure); activity.publishUpdate(state()); }
                     }).setOnCancelListener(ignored->activity.publishUpdate(state())).setOnDismissListener(ignored->recoveryPrompt=false).create();
                 recoveryDialog=new WeakReference<>(prompt);
                 prompt.show();
             });
         } else {
             engine.cancel(op);
-            engine.installBlocked((String)engine.state().get("operationId"),"已取消安装准备。");
+            engine.cancelInstallation((String)engine.state().get("operationId"),"已取消安装准备。");
             main.post(()->{MainActivity activity=owner.get();if(activity!=null)activity.cancelUpdatePreparation("已取消安装准备。");});
         }
     }
-    synchronized boolean install(String id,String op){beginDiagnostic();return engine.install(id,op);}
+    boolean install(String id,String op){return engine.install(id,op);}
     boolean installCurrent(String op,String id){return engine.installCurrent(op,id);}
     void blocked(String op,String reason){engine.installBlocked(op,reason);}
     void installerReturned(){engine.installerReturned();}
     boolean launchInstaller(MainActivity activity,String op,UpdatePolicy.Release candidate) {
         if(owner.get()!=activity||!activity.updateForeground()||!engine.installCurrent(op,candidate.id()))return false;
         try {
-            PackageInfo installed=currentPackage();
-            if(installed.getLongVersionCode()>=candidate.versionCode||!UpdatePolicy.TRUSTED_CERTIFICATE.equals(signer(installed)))
-                throw new IOException("Installed package changed");
-            if(!app.getPackageManager().canRequestPackageInstalls()) {
-                engine.installBlocked(op,"需要允许本应用安装更新。授权返回后请再次点击安装。");
+            try {
+                PackageInfo installed=currentPackage();
+                if(installed.getLongVersionCode()>=candidate.versionCode||!UpdatePolicy.TRUSTED_CERTIFICATE.equals(signer(installed)))
+                    throw new UpdateFailure(UpdateFailure.APK);
+            } catch(Exception failure){throw UpdateFailure.at(UpdateFailure.APK,failure);}
+            boolean permitted;
+            try{permitted=app.getPackageManager().canRequestPackageInstalls();}
+            catch(RuntimeException failure){throw UpdateFailure.at(UpdateFailure.PERMISSION,failure);}
+            if(!permitted) {
+                engine.installPermissionRequired(op,null);
                 new AlertDialog.Builder(activity).setTitle("允许安装应用更新")
                     .setMessage("系统需要“安装未知应用”权限。只在你确认后打开设置；返回后不会自动安装。")
                     .setNegativeButton("取消",null).setPositiveButton("打开设置",(dialog,which)->{
-                        if(!activity.updateForeground())return;
+                        if(!activity.updateForeground()||!engine.installPermissionCurrent(op))return;
                         try{activity.startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+app.getPackageName())));}
-                        catch(RuntimeException failure){AndroidDiagnostics.event("native.update", "permission", failure, null, null);engine.installBlocked(op,"系统设置不可用，请稍后再试。");}
+                        catch(RuntimeException failure){engine.installPermissionRequired(op,failure);}
                     }).show();
                 return false;
             }
@@ -161,7 +159,7 @@ final class UpdateController {
             engine.installLaunched(op);
             activity.startActivityForResult(intent,INSTALL_REQUEST);
             return true;
-        } catch(Exception failure){AndroidDiagnostics.event("native.update", "install", failure, null, null);engine.installLaunchFailed(op);return false;}
+        } catch(Exception failure){engine.installLaunchFailed(op,failure);return false;}
     }
     private PackageInfo currentPackage()throws PackageManager.NameNotFoundException {
         return app.getPackageManager().getPackageInfo(app.getPackageName(),PackageManager.GET_SIGNING_CERTIFICATES);

@@ -24,6 +24,8 @@ def test_native_update_policy(tmp_path):
     assert compiled.returncode == 0, compiled.stdout + compiled.stderr
     result = subprocess.run([str(java / "java.exe"), "-cp", classpath, "org.junit.runner.JUnitCore",
                              "io.github.ingnijm.baguhelper.UpdatePolicyTest", "io.github.ingnijm.baguhelper.UpdateEngineTest",
+                             "io.github.ingnijm.baguhelper.UpdateIOTest",
+                             "io.github.ingnijm.baguhelper.UpdateCheckTest",
                              "io.github.ingnijm.baguhelper.UpdateInstallGateTest",
                              "io.github.ingnijm.baguhelper.SpeechInputTest",
                              "io.github.ingnijm.baguhelper.DiagnosticPolicyTest",

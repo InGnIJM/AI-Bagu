@@ -20,12 +20,15 @@ public class UpdateEngineTest {
     }
     static final class Memory implements UpdateEngine.Preferences {
         final Map<String,Object> values = new HashMap<>();
+        String failNumber;
         public long number(String key) { return ((Number) values.getOrDefault(key, 0L)).longValue(); }
         public boolean enabled() { return !Boolean.FALSE.equals(values.get("enabled")); }
-        public void putNumber(String key, long value) { values.put(key, value); }
+        public void putNumber(String key, long value) { if(key.equals(failNumber))throw new IllegalStateException("sk-test private preferences"); values.put(key, value); }
         public void enable(boolean value) { values.put("enabled", value); }
         public String lastStatus() { return (String) values.getOrDefault("lastStatus", "never"); }
         public void lastStatus(String value) { values.put("lastStatus", value); }
+        public String lastCheck() { return (String) values.getOrDefault("lastCheck", ""); }
+        public void lastCheck(String value) { values.put("lastCheck", value); }
     }
     static final class Network implements UpdateIO.Transport {
         final Map<String, byte[]> bodies = new HashMap<>();
@@ -67,10 +70,11 @@ public class UpdateEngineTest {
     final Queue queue = new Queue(); final Memory prefs = new Memory();
     final Network network = new Network(); final Device device = new Device();
     UpdateEngine engine; File cache; final List<String> installRequests = new ArrayList<>();
+    final List<UpdateDiagnostic> diagnostics = new ArrayList<>();
     void start() throws Exception {
         if (cache == null) cache = temporary.newFolder("updates");
         engine = new UpdateEngine("beta", cache, prefs, device, new UpdateIO(network), queue,
-            () -> 1000L, state -> {}, (op, candidate) -> installRequests.add(op));
+            () -> 1000L, state -> {}, (op, candidate) -> installRequests.add(op), diagnostics::add);
         queue.run();
     }
     void candidate() throws Exception {
@@ -98,12 +102,17 @@ public class UpdateEngineTest {
         engine.check("manual",false); queue.run(); assertEquals(4,network.calls);
     }
     @Test public void failedFeedProducesStageEvidenceWithoutDiagnosticFailureChangingUpdateResult() throws Exception {
-        List<String> stages = new ArrayList<>();
+        List<UpdateDiagnostic> events = new ArrayList<>();
         engine = new UpdateEngine("beta", temporary.newFolder("diagnostic-updates"), prefs, device,
             new UpdateIO(network), queue, () -> 1000L, state -> {}, (op, candidate) -> {},
-            (stage, failure) -> { stages.add(stage + ":" + failure.getClass().getSimpleName()); throw new IllegalStateException("logger unavailable"); });
+            event -> { events.add(event); throw new IllegalStateException("logger unavailable"); });
         queue.run(); engine.check("diagnostic-check", false); queue.run();
-        assertEquals(Arrays.asList("check:IOException", "check:IOException"), stages);
+        List<String> channels = new ArrayList<>();
+        for (UpdateDiagnostic event : events) if (event.channel != null && event.outcome.equals("error")) {
+            channels.add(event.channel); assertEquals(1005, event.errorCode);
+            assertEquals(engine.state().get("diagnostic_id"), event.diagnosticId);
+        }
+        assertEquals(Arrays.asList("beta", "stable"), channels);
         assertEquals("error", engine.state().get("status"));
         assertEquals("error", prefs.lastStatus());
     }
@@ -121,6 +130,35 @@ public class UpdateEngineTest {
         start(); assertEquals("ready",engine.state().get("status")); assertEquals(2,device.verified);
         Files.write(new File(cache,"candidate.apk").toPath(),new byte[]{0}); start();
         assertEquals("available",engine.state().get("status")); assertFalse(new File(cache,"candidate.apk").exists());
+    }
+    @Test public void restartCacheFailureOwnsFeedbackWhilePreservingLastCheck() throws Exception {
+        for (boolean leased : Arrays.asList(false, true)) for (String kind : Arrays.asList("hash", "apk", "missing")) {
+            cache=temporary.newFolder();prefs.values.clear();device.reject=false;
+            candidate();network.bodies.remove(UpdatePolicy.FEED_ROOT+"stable.json");
+            engine.check("partial-check",false);queue.run();
+            Map<?,?> lastCheck=(Map<?,?>)engine.state().get("lastCheck");
+            Object checkId=lastCheck.get("diagnosticId");assertEquals("partial-error",lastCheck.get("status"));
+            engine.download(id(),"download");queue.run();
+            if(leased){engine.install(id(),"install");queue.run();engine.installLaunched("install");}
+            File apk=new File(cache,"candidate.apk");
+            if("hash".equals(kind))Files.write(apk.toPath(),"corrupted-apk".getBytes(StandardCharsets.UTF_8));
+            if("apk".equals(kind))device.reject=true;
+            if("missing".equals(kind))Files.delete(apk.toPath());
+            diagnostics.clear();start();
+            int code="hash".equals(kind)?1203:"apk".equals(kind)?1204:1201;
+            UpdateDiagnostic failure=null;
+            for(UpdateDiagnostic event:diagnostics)if(event.errorCode==code)failure=event;
+            assertNotNull(failure);assertEquals("verify",failure.stage);
+            assertEquals("Current cache failure must own its feedback number",failure.diagnosticId,engine.state().get("diagnostic_id"));
+            assertNotEquals(checkId,failure.diagnosticId);
+            assertTrue(engine.state().get("message").toString().contains(failure.diagnosticId));
+            assertFalse(engine.state().get("message").toString().contains(checkId.toString()));
+            assertEquals(lastCheck,engine.state().get("lastCheck"));
+            assertEquals(leased?"recovery":"available",engine.state().get("status"));
+            assertFalse(engine.check("throttled-after-restart",true));
+            assertEquals(failure.diagnosticId,engine.state().get("diagnostic_id"));
+            assertEquals(leased&&!"missing".equals(kind),apk.exists());
+        }
     }
     @Test public void cancelledDownloadCannotPublishReadyOrLeavePartAndRejectsStaleCandidate() throws Exception {
         candidate(); String candidateId=id();
@@ -267,5 +305,82 @@ public class UpdateEngineTest {
         engine.download(id(),"download");queue.run();assertEquals(first,engine.state().get("noticeId"));
         engine.check("new-check",false);queue.run();Object second=engine.state().get("noticeId");assertNotEquals(first,second);
         start();assertNotEquals(second,engine.state().get("noticeId"));
+    }
+
+    @Test public void cancelledDownloadKeepsItsDiagnosticIdButNotTheCancelBridgeId() throws Exception {
+        candidate(); Object checkId=engine.state().get("diagnostic_id");
+        engine.download(id(),"download"); String downloadId=(String)engine.state().get("diagnostic_id");
+        assertNotEquals(checkId,downloadId);
+        assertFalse(engine.download(id(),"duplicate")); assertFalse(engine.check("busy",false));
+        assertEquals(downloadId,engine.state().get("diagnostic_id"));
+        engine.cancel("cancel");engine.cancel("duplicate-cancel");queue.run();
+        assertEquals(downloadId,engine.state().get("diagnostic_id"));
+        assertEquals("duplicate-cancel",engine.state().get("operationId"));
+        List<UpdateDiagnostic> completed=new ArrayList<>();
+        for(UpdateDiagnostic event:diagnostics)if(event.diagnosticId.equals(downloadId)&&!event.outcome.equals("started"))completed.add(event);
+        assertEquals(1,completed.size());assertEquals("cancelled",completed.get(0).outcome);
+        assertEquals(0,completed.get(0).errorCode);assertNull(completed.get(0).httpStatus);
+    }
+    @Test public void staleInstallerWorkerFailureCannotAttachToANewerCheck() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();
+        String candidateId=id();engine.install(candidateId,"old-install");String previous=(String)engine.state().get("diagnostic_id");
+        engine.cancelInstallation("old-install","已取消安装准备。");
+        device.reject=true;engine.check("new-check",false);String current=(String)engine.state().get("diagnostic_id");
+        assertNotEquals(previous,current);queue.run();
+        assertEquals(current,engine.state().get("diagnostic_id"));assertEquals("available",engine.state().get("lastStatus"));
+        assertTrue(installRequests.isEmpty());
+        boolean found=false;
+        for(UpdateDiagnostic event:diagnostics)if(event.errorCode==1204){assertEquals(previous,event.diagnosticId);found=true;}
+        assertTrue(found);assertFalse(engine.state().get("message").toString().contains(previous));
+    }
+    @Test public void permissionAndInstallerFailureUseAcceptedOperationAndIgnoreStaleCallbacks() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        String installId=(String)engine.state().get("diagnostic_id");
+        engine.installPermissionRequired("install",null);
+        UpdateDiagnostic permission=diagnostics.get(diagnostics.size()-1);
+        assertEquals(1301,permission.errorCode);assertEquals(installId,permission.diagnosticId);
+        assertEquals("permission",permission.stage);
+        engine.check("new-check",false);String current=(String)engine.state().get("diagnostic_id");
+        engine.installPermissionRequired("install",new SecurityException("sk-test"));
+        engine.installLaunchFailed("install",new IOException("sk-test"));queue.run();
+        assertEquals(current,engine.state().get("diagnostic_id"));
+        engine.install(id(),"install2");queue.run();engine.installLaunched("install2");
+        engine.installLaunchFailed("install2",new IOException("sk-test C:/private/key"));
+        UpdateDiagnostic failed=diagnostics.get(diagnostics.size()-1);
+        assertEquals(1302,failed.errorCode);assertEquals(engine.state().get("diagnostic_id"),failed.diagnosticId);
+        assertFalse(engine.state().get("message").toString().contains("sk-test"));
+    }
+    @Test public void failedCriticalInstallerPreferenceStillPreventsHandoff() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        prefs.failNumber="installerLease";
+        UpdateFailure failure=assertThrows(UpdateFailure.class,()->engine.installLaunched("install"));
+        assertEquals(1201,failure.code);assertEquals(false,engine.state().get("installerLease"));
+        assertEquals("install-check",engine.state().get("status"));
+        assertThrows(IllegalStateException.class,()->engine.installerReturned());
+        assertFalse(engine.state().get("message").toString().contains("已打开系统安装器"));
+    }
+    @Test public void downloadDiagnosticsArePhaseBoundedNotPerChunk() throws Exception {
+        candidate();byte[] large=new byte[200000];
+        network.bodies.put(UpdatePolicy.FEED_ROOT+"beta.json",feed(3,"beta",large).getBytes(StandardCharsets.UTF_8));
+        network.bodies.put((String)UpdatePolicyTest.release(3,"beta").get("apkUrl"),large);
+        engine.check("larger",false);queue.run();engine.download(id(),"large-download");
+        String downloadId=(String)engine.state().get("diagnostic_id");queue.run();
+        int count=0;for(UpdateDiagnostic event:diagnostics)if(event.diagnosticId.equals(downloadId))count++;
+        assertTrue("No diagnostic record per download chunk",count<=5);assertEquals("ready",engine.state().get("status"));
+    }
+    @Test public void recoveryStorageFailureKeepsLeaseAndReportsItsOwnOperation() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();engine.installLaunched("install");
+        Files.delete(new File(cache,"candidate.apk").toPath());start();
+        Object previous=engine.state().get("diagnostic_id");prefs.failNumber="installerLease";
+        engine.recover("recovery-write");
+        assertEquals(true,engine.state().get("installerLease"));assertEquals("recovery",engine.state().get("status"));
+        assertFalse(engine.download(id(),"blocked"));
+        UpdateDiagnostic failure=diagnostics.get(diagnostics.size()-1);
+        assertEquals(1201,failure.errorCode);assertEquals("write",failure.stage);
+        assertEquals(engine.state().get("diagnostic_id"),failure.diagnosticId);assertNotEquals(previous,failure.diagnosticId);
+        prefs.failNumber=null;engine.recoveryFailed("revoke-error",new SecurityException("sk-test C:/private"));
+        failure=diagnostics.get(diagnostics.size()-1);assertEquals(1301,failure.errorCode);
+        assertTrue(engine.state().get("message").toString().contains("仍被保护"));
+        engine.recover("recovery-ok");assertEquals(false,engine.state().get("installerLease"));
     }
 }
