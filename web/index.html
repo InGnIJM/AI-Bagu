@@ -1233,8 +1233,9 @@
       -webkit-overflow-scrolling: touch;
       box-shadow: 2px 2px 0px var(--color-border);
     }
-    .markdown-body table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 14px; }
+    .markdown-body table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 14px; overflow-wrap: break-word; }
     .markdown-body th, .markdown-body td {
+      min-width: 112px;
       padding: 10px 14px;
       border-right: 1.5px solid var(--color-border);
       border-bottom: 1.5px solid var(--color-border);
@@ -1243,8 +1244,11 @@
     }
     .markdown-body th:last-child, .markdown-body td:last-child { border-right: 0; }
     .markdown-body tbody tr:last-child td { border-bottom: 0; }
-    .markdown-body th { background: #FEF9C3; color: var(--color-foreground); font-weight: 800; }
+    .markdown-body th { background: #FEF9C3; color: var(--color-foreground); font-weight: 800; white-space: nowrap; }
     .markdown-body tbody tr:nth-child(even) { background: #F8FAFC; }
+    .markdown-body .align-left { text-align: left; }
+    .markdown-body .align-center { text-align: center; }
+    .markdown-body .align-right { text-align: right; }
     .answer-media { margin: 16px 0; white-space: normal; }
     .answer-image-link {
       display: block;

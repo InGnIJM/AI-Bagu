@@ -74,6 +74,8 @@ Android Activity / WebView ── 受令牌保护的 loopback HTTP
 
 `result_full_answer` 保存答案文本，HTML 在返回时安全渲染，不直接存题库 HTML。题库以后修改不会替换已存答案或来源；查询中的题干等公开字段仍取当前 `questions`，不是完整历史题目快照。
 
+维护命令 `import --format-only --include-history` 是显式的格式恢复例外：先完整备份 SQLite，只对与同一来源的旧版解析结果整篇匹配的 `stored` 快照恢复 Markdown 结构。它不改变点评、评级、来源或调度，不生成新历史答案；正常查询/重放仍然不读取当前题库答案替换快照。默认不带 `--include-history` 时只恢复题库答案。详见 [CLI 格式修复](cli.md#修复旧答案表格与其他格式)。
+
 ## AI 评卷与答案来源
 
 ### 消息和解析

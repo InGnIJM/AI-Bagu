@@ -251,8 +251,11 @@ class _AnswerTextParser(HTMLParser):
         self.list_stack = []
         self.list_counts = []
         self.in_list_item = 0
+        self.list_paragraphs = []
         self.link_stack = []
         self.skip_depth = 0
+        self.quote_starts = []
+        self.inline_code = None
         self.table_rows = None
         self.table_row = None
         self.table_cell = None
@@ -262,7 +265,9 @@ class _AnswerTextParser(HTMLParser):
         self._append("\n" * count)
 
     def _append(self, value):
-        if self.table_cell is not None:
+        if self.inline_code is not None:
+            self.inline_code.append(value)
+        elif self.table_cell is not None:
             self.table_cell.append(value)
         else:
             self.parts.append(value)
@@ -292,8 +297,16 @@ class _AnswerTextParser(HTMLParser):
             self._append("**")
         elif tag in {"em", "i"}:
             self._append("*")
+        elif tag in {"del", "s", "strike"}:
+            self._append("~~")
         elif tag == "code" and not self.in_pre:
-            self._append("`")
+            self.inline_code = []
+        elif tag == "code" and self.in_pre and not self.pre_language:
+            language = next((name[9:] for name in attr_map.get("class", "").split()
+                             if name.startswith("language-")), "")
+            self.pre_language = re.sub(r"[^A-Za-z0-9_+-]", "", language)
+            if self.pre_language and self.parts and self.parts[-1] == "```\n":
+                self.parts[-1] = f"```{self.pre_language}\n"
         elif tag == "a":
             url = _safe_http_url(attr_map.get("href", ""), self.base_url)
             self.link_stack.append(url)
@@ -302,9 +315,14 @@ class _AnswerTextParser(HTMLParser):
         elif tag in {"p", "div"}:
             if not self.in_list_item:
                 self._break(2)
+            elif tag == "p" and self.list_paragraphs:
+                if self.list_paragraphs[-1]:
+                    self._append("\n" + "  " * len(self.list_stack))
+                self.list_paragraphs[-1] = True
         elif tag == "blockquote":
             self._break(2)
-            self._append("> ")
+            target = self.table_cell if self.table_cell is not None else self.parts
+            self.quote_starts.append((target, len(target)))
         elif tag in {"h4", "h5", "h6"}:
             self._break(2)
             self._append("#" * int(tag[1]) + " ")
@@ -316,6 +334,7 @@ class _AnswerTextParser(HTMLParser):
         elif tag == "li":
             self._break()
             self.in_list_item += 1
+            self.list_paragraphs.append(False)
             depth = max(0, len(self.list_stack) - 1)
             if self.list_stack and self.list_stack[-1] == "ol":
                 self.list_counts[-1] += 1
@@ -349,7 +368,7 @@ class _AnswerTextParser(HTMLParser):
             return
         if tag in {"th", "td"} and self.table_cell is not None:
             value = re.sub(r"\s+", " ", "".join(self.table_cell)).strip()
-            value = value.replace("|", "\\|")
+            value = re.sub(r"(\\*)\|", lambda match: "\\" * (2 * len(match.group(1)) + 1) + "|", value)
             self.table_row.append((value, self.table_cell_is_header))
             self.table_cell = None
         elif tag == "tr" and self.table_row is not None:
@@ -376,8 +395,14 @@ class _AnswerTextParser(HTMLParser):
             self._append("**")
         elif tag in {"em", "i"}:
             self._append("*")
-        elif tag == "code" and not self.in_pre:
-            self._append("`")
+        elif tag in {"del", "s", "strike"}:
+            self._append("~~")
+        elif tag == "code" and not self.in_pre and self.inline_code is not None:
+            value = "".join(self.inline_code)
+            self.inline_code = None
+            marker = "`" * max(1, max((len(run) + 1 for run in re.findall(r"`+", value)), default=1))
+            padding = " " if value.startswith("`") or value.endswith("`") else ""
+            self._append(marker + padding + value + padding + marker)
         elif tag == "a":
             url = self.link_stack.pop() if self.link_stack else ""
             if url:
@@ -393,11 +418,18 @@ class _AnswerTextParser(HTMLParser):
             if not self.in_list_item:
                 self._break(2)
         elif tag == "blockquote":
+            if self.quote_starts:
+                target, start = self.quote_starts.pop()
+                quoted = "".join(target[start:]).strip()
+                del target[start:]
+                target.append("\n".join("> " + line for line in quoted.splitlines()))
             self._break(2)
         elif tag in {"h4", "h5", "h6"}:
             self._break(2)
         elif tag == "li":
             self.in_list_item = max(0, self.in_list_item - 1)
+            if self.list_paragraphs:
+                self.list_paragraphs.pop()
         elif tag in {"ul", "ol"} and self.list_stack:
             self.list_stack.pop()
             self.list_counts.pop()
@@ -405,13 +437,14 @@ class _AnswerTextParser(HTMLParser):
     def handle_data(self, data):
         if self.skip_depth:
             return
-        if self.in_pre:
+        if self.in_pre or self.inline_code is not None:
             self._append(data)
         else:
-            self._append(re.sub(r"\s+", " ", data))
+            value = re.sub(r"\s+", " ", data)
+            self._append(re.sub(r"([\\`*\[\]_~>#])", r"\\\1", value))
 
     def text(self):
-        raw = html_lib.unescape("".join(self.parts)).replace("\xa0", " ")
+        raw = "".join(self.parts).replace("\xa0", " ")
         lines = raw.replace("\r\n", "\n").replace("\r", "\n").splitlines()
         cleaned = []
         in_fence = False
@@ -421,7 +454,7 @@ class _AnswerTextParser(HTMLParser):
                 in_fence = not in_fence
             elif in_fence:
                 normalized = line.rstrip()
-            elif MARKDOWN_LIST_RE.match(line):
+            elif MARKDOWN_LIST_RE.match(line) or line.startswith("  "):
                 normalized = line.rstrip()
             else:
                 normalized = line.strip()
@@ -432,8 +465,55 @@ class _AnswerTextParser(HTMLParser):
         return "\n".join(cleaned).strip()
 
 
-def _html_text(fragment, base_url):
-    parser = _AnswerTextParser(base_url)
+class _LegacyAnswerTextParser(HTMLParser):
+    """Frozen pre-Markdown extraction, used only to prove an old answer matches its source."""
+
+    def __init__(self, base_url):
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.parts = []
+        self.in_pre = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"p", "div", "blockquote", "table", "tr", "h4", "h5", "h6"}:
+            self.parts.append("\n\n")
+        elif tag == "br":
+            self.parts.append("\n")
+        elif tag == "li":
+            self.parts.append("\n- ")
+        elif tag == "pre":
+            self.parts.append("\n\n")
+            self.in_pre = True
+        elif tag == "img":
+            attrs = dict(attrs)
+            src = urllib.parse.urljoin(self.base_url, attrs.get("src", ""))
+            alt = (attrs.get("alt") or "图片").strip()
+            if src:
+                self.parts.append(f"[图片：{alt}]({src})")
+
+    def handle_endtag(self, tag):
+        if tag == "pre":
+            self.in_pre = False
+            self.parts.append("\n\n")
+        elif tag in {"p", "div", "blockquote", "table", "tr", "h4", "h5", "h6"}:
+            self.parts.append("\n\n")
+
+    def handle_data(self, data):
+        self.parts.append(data if self.in_pre else re.sub(r"\s+", " ", data))
+
+    def text(self):
+        raw = html_lib.unescape("".join(self.parts)).replace("\xa0", " ")
+        cleaned = []
+        for line in raw.splitlines():
+            if line.strip():
+                cleaned.append(line.strip())
+            elif cleaned and cleaned[-1]:
+                cleaned.append("")
+        return "\n".join(cleaned).strip()
+
+
+def _html_text(fragment, base_url, *, legacy=False):
+    parser = (_LegacyAnswerTextParser if legacy else _AnswerTextParser)(base_url)
     parser.feed(fragment)
     parser.close()
     return parser.text()
@@ -453,7 +533,7 @@ def _anchored_url(url, attrs):
     return f"{base}#{urllib.parse.quote(match.group(2).strip(), safe='-._~')}"
 
 
-def parse_question_page(cat, url, html):
+def parse_question_page(cat, url, html, *, legacy=False):
     """按 h2 分组、h3 分题，返回每道题对应的正文和锚点链接。"""
     heading_re = re.compile(
         r"<h(?P<level>[23])\b(?P<attrs>[^>]*)>(?P<title>.*?)</h(?P=level)\s*>",
@@ -483,18 +563,18 @@ def parse_question_page(cat, url, html):
             )
             has_h3 = any(headings[i].group("level") == "3" for i in range(index + 1, next_h2))
             if has_h3:
-                section_intro = _html_text(body_html, url)
+                section_intro = _html_text(body_html, url, legacy=legacy)
                 first_h3_in_section = True
             else:
                 questions.append(
-                    (cat, title, _html_text(body_html, url), _anchored_url(url, heading.group("attrs")))
+                    (cat, title, _html_text(body_html, url, legacy=legacy), _anchored_url(url, heading.group("attrs")))
                 )
                 section_intro = ""
                 first_h3_in_section = False
             continue
         question = f"{section}｜{title}" if section else title
         question = question.replace("｜#", "｜")
-        answer = _html_text(body_html, url)
+        answer = _html_text(body_html, url, legacy=legacy)
         if first_h3_in_section and section_intro:
             answer = f"{section_intro}\n\n{answer}".strip()
         first_h3_in_section = False
@@ -509,6 +589,132 @@ def fetch_questions(cat, url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "ignore")
     return parse_question_page(cat, url, html)
+
+
+def fetch_format_references(cat, url):
+    """Parse the same source bytes twice; never infer cell boundaries from plain text."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as response:
+        raw = response.read(8 * 1024 * 1024 + 1)
+    if len(raw) > 8 * 1024 * 1024:
+        raise ValueError("格式参考页面超过 8 MiB")
+    page = raw.decode("utf-8")
+    original = parse_question_page(cat, url, page, legacy=True)
+    formatted = parse_question_page(cat, url, page)
+    if len(original) != len(formatted):
+        raise ValueError("格式参考的题目数量不一致")
+    result = []
+    for old, new in zip(original, formatted):
+        if old[:2] != new[:2] or old[3] != new[3]:
+            raise ValueError("格式参考的题目身份不一致")
+        result.append((*new[:2], old[2], new[2]))
+    return result
+
+
+def _format_match_key(value):
+    # Ignore blank lines and indentation, but not words, punctuation or internal spaces.
+    return "\n".join(line.strip() for line in (value or "").splitlines() if line.strip())
+
+
+def repair_answer_formats(conn, *, include_history=False, dry_run=False):
+    """Backed-up, all-or-nothing format repair; historical snapshots require explicit opt-in."""
+    if conn.in_transaction:
+        raise ValueError("修复格式前请先结束当前数据库事务")
+    if conn.execute("PRAGMA user_version").fetchone()[0] != DATABASE_VERSION:
+        raise ValueError("格式修复仅支持当前数据库版本；请另行备份并升级数据库")
+    questions = conn.execute("SELECT id, category, question, answer FROM questions").fetchall()
+    categories = {row["category"] for row in questions}
+    references = {}
+    for category, url in PAGES.items():
+        if category not in categories:
+            continue
+        # Failure aborts before any writes. No partial success on a failed source.
+        for cat, title, legacy, formatted in fetch_format_references(category, url):
+            references.setdefault(_question_identity(cat, title), []).append((legacy, formatted))
+
+    def replacement(answer, identity):
+        matches = references.get(identity, [])
+        if len(matches) != 1 or not answer:
+            return None
+        legacy, formatted = matches[0]
+        if not formatted or answer == formatted:
+            return None
+        variants = (legacy, restore_code_blocks(legacy, formatted))
+        if _format_match_key(answer) not in {_format_match_key(value) for value in variants}:
+            return None
+        render_answer_html(formatted)  # Validate before backing up or writing anything.
+        return formatted
+
+    updates = []
+    history_updates = []
+    unmatched = []
+    for question in questions:
+        identity = _question_identity(question["category"], question["question"])
+        formatted = replacement(question["answer"], identity)
+        if formatted is not None:
+            updates.append((formatted, question["id"], question["answer"]))
+        elif identity in references and question["answer"]:
+            candidates = references[identity]
+            if len(candidates) != 1 or question["answer"] != candidates[0][1]:
+                unmatched.append(question["id"])
+        if include_history:
+            items = conn.execute(
+                "SELECT session_id, result_full_answer FROM session_items "
+                "WHERE question_id=? AND grade IS NOT NULL AND result_answer_source='stored'",
+                (question["id"],),
+            ).fetchall()
+            for item in items:
+                restored = replacement(item["result_full_answer"], identity)
+                if restored is not None:
+                    history_updates.append((restored, item["session_id"], question["id"], item["result_full_answer"]))
+    report = {"questions": len(updates), "history": len(history_updates),
+              "unmatched_ids": unmatched, "backup": None, "dry_run": dry_run}
+    if dry_run or not (updates or history_updates):
+        return report
+    database = next(row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main")
+    if not database:
+        raise ValueError("修复格式需要可备份的数据库文件")
+    path = Path(database)
+    fd, backup_path = tempfile.mkstemp(
+        prefix=f"{path.stem}.before-answer-format-{dt.datetime.now():%Y%m%d-%H%M%S}-",
+        suffix=".sqlite3", dir=path.parent,
+    )
+    os.close(fd)
+    backup = sqlite3.connect(backup_path)
+    try:
+        conn.backup(backup)
+    finally:
+        backup.close()
+    report["backup"] = backup_path
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        affected = {item[1] for item in updates} | {item[2] for item in history_updates}
+        for question in questions:
+            if question["id"] not in affected:
+                continue
+            current = conn.execute("SELECT category, question FROM questions WHERE id=?",
+                                   (question["id"],)).fetchone()
+            if current is None or tuple(current) != (question["category"], question["question"]):
+                raise ValueError("题目身份在核对后发生变化，格式修复已回滚")
+        for formatted, qid, original in updates:
+            changed = conn.execute("UPDATE questions SET answer=? WHERE id=? AND answer IS ?",
+                                   (formatted, qid, original)).rowcount
+            if changed != 1:
+                raise ValueError("题库在核对后发生变化，格式修复已回滚")
+        for formatted, sid, qid, original in history_updates:
+            changed = conn.execute(
+                "UPDATE session_items SET result_full_answer=? "
+                "WHERE session_id=? AND question_id=? AND result_full_answer IS ? "
+                "AND result_answer_source='stored' AND grade IS NOT NULL",
+                (formatted, sid, qid, original),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("历史答案在核对后发生变化，格式修复已回滚")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return report
 
 
 def _question_identity(category, question):
@@ -1116,18 +1322,33 @@ def _render_inline_markdown(value):
             index = link.end()
             continue
         if source[index] == "`":
-            end = source.find("`", index + 1)
-            if end != -1:
+            marker = re.match(r"`+", source[index:]).group(0)
+            closing = re.search(r"(?<!`)" + re.escape(marker) + r"(?!`)", source[index + len(marker):])
+            if closing:
+                end = index + len(marker) + closing.start()
+                value = source[index + len(marker):end].replace("\n", " ")
+                if value.startswith(" ") and value.endswith(" ") and value.strip():
+                    value = value[1:-1]
                 parts.append(
-                    "<code>" + html_lib.escape(source[index + 1 : end]) + "</code>"
+                    "<code>" + html_lib.escape(value) + "</code>"
                 )
-                index = end + 1
+                index = end + len(marker)
                 continue
+            parts.append(marker)
+            index += len(marker)
+            continue
         matched = False
         for marker, tag in (("**", "strong"), ("~~", "del"), ("*", "em"), ("_", "em")):
             if not source.startswith(marker, index):
                 continue
             end = source.find(marker, index + len(marker))
+            while end != -1:
+                cursor = end - 1
+                while cursor >= 0 and source[cursor] == "\\":
+                    cursor -= 1
+                if (end - cursor - 1) % 2 == 0:
+                    break
+                end = source.find(marker, end + len(marker))
             if marker == "_":
                 before = source[index - 1] if index else ""
                 after = source[index + 1 : index + 2]
@@ -1159,7 +1380,8 @@ def _render_inline_markdown(value):
             break
         if matched:
             continue
-        if source[index] == "\\" and index + 1 < len(source):
+        if (source[index] == "\\" and index + 1 < len(source)
+                and source[index + 1] in r"!\"#$%&'()*+,-./:;<=>?@[\]^_`{|}~\\"):
             parts.append(html_lib.escape(source[index + 1]))
             index += 2
             continue
@@ -1172,25 +1394,31 @@ def _split_markdown_table_row(line):
     value = line.strip()
     if value.startswith("|"):
         value = value[1:]
-    if value.endswith("|") and not value.endswith("\\|"):
-        value = value[:-1]
     cells = []
     current = []
-    escaped = False
-    for char in value:
-        if escaped:
-            current.append(char)
-            escaped = False
-        elif char == "\\":
-            escaped = True
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\":
+            end = index
+            while end < len(value) and value[end] == "\\":
+                end += 1
+            count = end - index
+            if end < len(value) and value[end] == "|" and count % 2:
+                current.append("\\" * (count // 2) + "|")
+                index = end + 1
+            else:
+                current.append("\\" * count)
+                index = end
+            continue
         elif char == "|":
             cells.append("".join(current).strip())
             current = []
         else:
             current.append(char)
-    if escaped:
-        current.append("\\")
-    cells.append("".join(current).strip())
+        index += 1
+    if current or not cells or not value.endswith("|"):
+        cells.append("".join(current).strip())
     return cells
 
 
@@ -1204,13 +1432,20 @@ def _render_markdown_table(lines):
     header = rows[0]
     body = rows[2:]
     width = len(header)
-    head_html = "".join(f"<th>{_render_inline_markdown(cell)}</th>" for cell in header)
+    alignments = [
+        ' class="align-center"' if cell.startswith(":") and cell.endswith(":") else
+        ' class="align-right"' if cell.endswith(":") else
+        ' class="align-left"' if cell.startswith(":") else ""
+        for cell in rows[1]
+    ]
+    alignments = (alignments + [""] * width)[:width]
+    head_html = "".join(f"<th{alignments[i]}>{_render_inline_markdown(cell)}</th>" for i, cell in enumerate(header))
     body_html = []
     for row in body:
         normalized = row[:width] + [""] * max(0, width - len(row))
         body_html.append(
             "<tr>"
-            + "".join(f"<td>{_render_inline_markdown(cell)}</td>" for cell in normalized)
+            + "".join(f"<td{alignments[i]}>{_render_inline_markdown(cell)}</td>" for i, cell in enumerate(normalized))
             + "</tr>"
         )
     return (
@@ -1235,7 +1470,7 @@ def _render_markdown_lists(tokens):
             item_ordered = item_marker.endswith(".") and item_marker[:-1].isdigit()
             if item_indent != indent or item_ordered != ordered:
                 break
-            parts.append("<li>" + _render_inline_markdown(body))
+            parts.append("<li>" + "<br>".join(_render_inline_markdown(line) for line in body.splitlines()))
             index += 1
             while index < len(tokens) and tokens[index][0] > indent:
                 nested, index = render_level(index, tokens[index][0])
@@ -1294,12 +1529,16 @@ def _legacy_python_code_end(lines, start):
     return end if statements >= 2 else None
 
 
+def _markdown_fence(line):
+    return re.fullmatch(r"(`{3,}|~{3,})([^`]*?)", line.strip())
+
+
 def _is_markdown_block_start(lines, index):
     line = lines[index]
     stripped = line.strip()
     if not stripped:
         return True
-    if stripped.startswith("```") or re.match(r"^#{1,6}\s+", stripped):
+    if _markdown_fence(stripped) or re.match(r"^#{1,6}\s+", stripped):
         return True
     if stripped.startswith(">") or MARKDOWN_LIST_RE.match(line):
         return True
@@ -1325,11 +1564,14 @@ def _render_markdown_blocks(source):
             index += 1
             continue
         stripped = lines[index].strip()
-        if stripped.startswith("```"):
-            language = re.sub(r"[^A-Za-z0-9_+-]", "", stripped[3:].strip())
+        fence = _markdown_fence(stripped)
+        if fence:
+            marker = fence.group(1)
+            language = re.sub(r"[^A-Za-z0-9_+-]", "", fence.group(2).strip())
+            closing = re.compile(re.escape(marker[0]) + "{" + str(len(marker)) + r",}\s*$")
             index += 1
             code_lines = []
-            while index < len(lines) and not lines[index].strip().startswith("```"):
+            while index < len(lines) and not closing.fullmatch(lines[index].strip()):
                 code_lines.append(lines[index])
                 index += 1
             if index < len(lines):
@@ -1372,6 +1614,13 @@ def _render_markdown_blocks(source):
             while index < len(lines):
                 item = MARKDOWN_LIST_RE.match(lines[index])
                 if not item:
+                    continuation = lines[index]
+                    indent = len(continuation) - len(continuation.lstrip())
+                    if tokens and continuation.strip() and indent >= tokens[-1][0] + 2:
+                        old_indent, marker, body = tokens[-1]
+                        tokens[-1] = (old_indent, marker, body + "\n" + continuation.strip())
+                        index += 1
+                        continue
                     break
                 indent = len(item.group("indent").expandtabs(4))
                 tokens.append((indent, item.group("marker"), item.group("body")))
@@ -3783,7 +4032,11 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init")
     p_imp = sub.add_parser("import")
-    p_imp.add_argument("--code-only", action="store_true", help="备份后仅恢复旧答案的代码块格式")
+    format_options = p_imp.add_mutually_exclusive_group()
+    format_options.add_argument("--code-only", action="store_true", help="备份后仅恢复旧答案的代码块格式")
+    format_options.add_argument("--format-only", action="store_true", help="核对来源后仅恢复旧答案的特殊格式")
+    p_imp.add_argument("--include-history", action="store_true", help="与 --format-only 同用，恢复正文匹配的题库来源历史答案格式")
+    p_imp.add_argument("--dry-run", action="store_true", help="与 --format-only 同用，只核对，不备份或写库")
     p_draw = sub.add_parser("draw")
     p_draw.add_argument("-n", type=int, default=5)
     p_draw.add_argument("--cat", default=None)
@@ -3799,8 +4052,25 @@ def main(argv=None):
     p_serve.add_argument("--port", type=int, default=8765)
 
     args = parser.parse_args(argv)
+    if args.cmd == "import" and (args.include_history or args.dry_run) and not args.format_only:
+        parser.error("--include-history 和 --dry-run 必须与 --format-only 同用")
     if args.cmd == "serve":
         serve(port=args.port)
+        return
+    if args.cmd == "import" and args.format_only:
+        conn = None
+        try:
+            mode = "ro" if args.dry_run else "rw"
+            conn = sqlite3.connect(Path(DB_PATH).resolve().as_uri() + f"?mode={mode}", uri=True)
+            conn.row_factory = sqlite3.Row
+            report = repair_answer_formats(conn, include_history=args.include_history, dry_run=args.dry_run)
+            print(json.dumps(report, ensure_ascii=False))
+        except Exception as error:
+            print(f"格式修复失败（未写入修复结果）：{type(error).__name__}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            if conn is not None:
+                conn.close()
         return
     conn = get_conn()
     try:

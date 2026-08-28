@@ -135,6 +135,8 @@
 
 `import --code-only` 先在数据库旁创建 `*.before-code-format-*.sqlite3`，仅恢复可与来源匹配的代码围栏/缩进；不新增题目、不替换正文或历史评分、不改调度，不调用模型。
 
+`import --format-only` 按同一来源字节分别执行冻结的旧解析和当前解析，仅恢复整篇匹配的旧答案 Markdown；正文变化、身份不唯一时跳过。`--dry-run` 只预览；实际写入先创建 `*.before-answer-format-*.sqlite3`，再以单事务和原值条件更新。默认不动历史；显式 `--include-history` 只恢复已评分、`stored` 来源且独立匹配的 `result_full_answer` 格式，不改文字含义、点评、评级、submission、来源、会话或调度。重放仍使用保存的快照，不能在查询时拿当前题库答案替代。
+
 ## 题库管理与文件导入
 
 - 网页管理 API：`GET/POST /api/questions`、`PUT/DELETE /api/questions/:id`、`POST /api/questions/import`

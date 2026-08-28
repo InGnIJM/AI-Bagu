@@ -3368,7 +3368,7 @@ def test_question_public_renders_safe_markdown_blocks(conn):
     assert "<blockquote><p>注意事项</p></blockquote>" in rendered
     assert '<pre><code class="language-sql">SELECT * FROM messages;</code></pre>' in rendered
     assert '<div class="answer-table-wrap"><table>' in rendered
-    assert "<th>特性</th>" in rendered and "<td>十万级</td>" in rendered
+    assert "<th>特性</th>" in rendered and '<td class="align-right">十万级</td>' in rendered
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
     assert '<img data-answer-image src="https://cdn.example.com/a.png"' in rendered
     assert 'alt="架构图"' in rendered
@@ -3385,6 +3385,226 @@ def test_render_answer_html_keeps_plain_text_paragraphs_and_line_breaks():
     rendered = bagu.render_answer_html("第一段\n仍是第一段\n\n第二段")
 
     assert rendered == "<p>第一段<br>仍是第一段</p>\n<p>第二段</p>"
+
+
+def test_imported_blockquote_keeps_all_paragraphs_and_nested_quote():
+    source = ("<blockquote><p>第一段</p><p>第二段 <strong>重点</strong></p>"
+              "<blockquote><p>内部引用</p></blockquote></blockquote><p>外部正文</p>")
+    rendered = bagu.render_answer_html(bagu._html_text(source, "https://example.com"))
+    assert rendered == (
+        "<blockquote><p>第一段</p>\n<p>第二段 <strong>重点</strong></p>\n"
+        "<blockquote><p>内部引用</p></blockquote></blockquote>\n<p>外部正文</p>"
+    )
+
+
+def test_imported_special_formats_keep_code_language_deletion_and_literal_characters():
+    source = ('<p><del>旧配置</del> <code>user_id</code> *literal* &amp;lt;script&amp;gt;</p>'
+              '<pre><code class="language-sql">SELECT *\nFROM t;</code></pre>')
+    rendered = bagu.render_answer_html(bagu._html_text(source, "https://example.com"))
+    assert "<del>旧配置</del> <code>user_id</code> *literal* &amp;lt;script&amp;gt;" in rendered
+    assert '<pre><code class="language-sql">SELECT *\nFROM t;</code></pre>' in rendered
+    assert "<em>literal</em>" not in rendered
+
+
+def test_markdown_table_preserves_backslashes_escaped_pipes_and_alignment():
+    rendered = bagu.render_answer_html(
+        "| 路径 | 条件 |\n| :--- | ---: |\n"
+        r"| `C:\temp\file` | `a\|b` 和 \*普通文本\* |" + "\n"
+    )
+    assert r"<code>C:\temp\file</code>" in rendered
+    assert '<code>a|b</code> 和 *普通文本*' in rendered
+    assert '<th class="align-right">条件</th>' in rendered
+    assert '<td class="align-right">' in rendered
+
+
+def test_imported_table_code_keeps_backslash_before_pipe_and_following_cell():
+    source = (r"<table><tr><th>h1</th><th>h2</th></tr><tr><td><code>a\|b</code></td>"
+              "<td>end</td></tr></table>")
+    rendered = bagu.render_answer_html(bagu._html_text(source, "https://example.com"))
+    assert r"<td><code>a\|b</code></td><td>end</td>" in rendered
+
+
+def test_imported_emphasis_ignores_escaped_closing_marker():
+    rendered = bagu.render_answer_html(bagu._html_text("<p><em>a * b</em></p>", "https://example.com"))
+    assert rendered == "<p><em>a * b</em></p>"
+
+
+@pytest.mark.parametrize("fence", ["~~~~", "````"])
+def test_markdown_long_fences_do_not_close_on_shorter_or_other_fence(fence):
+    rendered = bagu.render_answer_html(f"{fence}text\n```\n<unsafe>\n{fence}\n\n正文")
+    assert rendered == '<pre><code class="language-text">```\n&lt;unsafe&gt;</code></pre>\n<p>正文</p>'
+
+
+def test_inline_code_delimiters_preserve_embedded_backticks():
+    assert bagu.render_answer_html("使用 ``a`b`` 和 `x_y`。") == (
+        "<p>使用 <code>a`b</code> 和 <code>x_y</code>。</p>"
+    )
+
+
+def test_list_continuation_stays_in_item_and_nested_list():
+    rendered = bagu.render_answer_html("- 第一项\n  续行 **重点**\n  - 子项\n- 第二项")
+    assert rendered == "<ul><li>第一项<br>续行 <strong>重点</strong><ul><li>子项</li></ul></li><li>第二项</li></ul>"
+
+
+def test_imported_list_paragraphs_do_not_merge_words():
+    source = "<ul><li><p>第一段</p><p>第二段</p></li><li>第二项</li></ul>"
+    rendered = bagu.render_answer_html(bagu._html_text(source, "https://example.com"))
+    assert rendered == "<ul><li>第一段<br>第二段</li><li>第二项</li></ul>"
+
+
+def test_fetch_format_references_compares_two_parsers_of_identical_source(monkeypatch):
+    source = ('<h2>分组</h2><h3 id="table">表格</h3>'
+              '<table><tr><th>字段</th> <th>值</th></tr>'
+              '<tr><td>吞吐</td> <td>十万</td></tr></table>'
+              '<p><strong>重点</strong></p><pre>SELECT 1;</pre>')
+    monkeypatch.setattr(bagu.urllib.request, "urlopen", lambda *args, **kwargs: io.BytesIO(source.encode()))
+    result = bagu.fetch_format_references("测试", "https://example.com")
+    assert result == [("测试", "分组｜表格", "字段 值\n\n吞吐 十万\n\n重点\n\nSELECT 1;",
+                       "| 字段 | 值 |\n| --- | --- |\n| 吞吐 | 十万 |\n\n**重点**\n\n```\nSELECT 1;\n```")]
+
+
+def test_format_repair_sql_failure_rolls_back_all_changes(conn, monkeypatch):
+    for title in ("一", "二"):
+        bagu.create_question(conn, {"category": "测试", "question": title, "answer": title, "url": ""})
+    conn.execute("CREATE TRIGGER reject_second BEFORE UPDATE ON questions WHEN OLD.question='二' "
+                 "BEGIN SELECT RAISE(ABORT, 'blocked'); END")
+    conn.commit()
+    monkeypatch.setattr(bagu, "PAGES", {"测试": "https://example.com"})
+    monkeypatch.setattr(bagu, "fetch_format_references", lambda *args: [
+        ("测试", "一", "一", "**一**"), ("测试", "二", "二", "**二**"),
+    ])
+    with pytest.raises(sqlite3.IntegrityError, match="blocked"):
+        bagu.repair_answer_formats(conn)
+    assert [row[0] for row in conn.execute("SELECT answer FROM questions ORDER BY id")] == ["一", "二"]
+    assert not conn.in_transaction
+
+
+def test_format_repair_rejects_question_renamed_during_source_fetch(conn, monkeypatch):
+    bagu.create_question(conn, {"category": "测试", "question": "原题", "answer": "旧答案", "url": ""})
+    monkeypatch.setattr(bagu, "PAGES", {"测试": "https://example.com"})
+    def renamed_during_fetch(*args):
+        conn.execute("UPDATE questions SET question='用户新题干'")
+        conn.commit()
+        return [("测试", "原题", "旧答案", "**旧答案**")]
+    monkeypatch.setattr(bagu, "fetch_format_references", renamed_during_fetch)
+    with pytest.raises(ValueError, match="变化"):
+        bagu.repair_answer_formats(conn)
+    assert tuple(conn.execute("SELECT question, answer FROM questions").fetchone()) == ("用户新题干", "旧答案")
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_format_repair_cli_never_upgrades_schema_before_backup(conn, monkeypatch, dry_run):
+    database = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    conn.execute("PRAGMA user_version=1")
+    monkeypatch.setattr(bagu, "DB_PATH", database)
+    monkeypatch.setattr(bagu, "PAGES", {})
+    args = ["import", "--format-only"] + (["--dry-run"] if dry_run else [])
+    with pytest.raises(SystemExit) as error:
+        bagu.main(args)
+    assert error.value.code == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert not list(database.parent.glob("*.before-answer-format-*.sqlite3"))
+
+
+def test_format_repair_cli_does_not_create_missing_database(tmp_path, monkeypatch):
+    database = tmp_path / "missing.db"
+    monkeypatch.setattr(bagu, "DB_PATH", database)
+    monkeypatch.setattr(bagu, "PAGES", {})
+    with pytest.raises(SystemExit) as error:
+        bagu.main(["import", "--format-only", "--dry-run"])
+    assert error.value.code == 1
+    assert not database.exists()
+
+
+def test_format_repair_restores_only_matching_text_and_preserves_history_by_default(conn, monkeypatch):
+    question = bagu.create_question(conn, {
+        "category": "测试", "question": "表格", "answer": "特性 Kafka\n\n吞吐 十万",
+        "url": "https://example.com/table",
+    })
+    sid, _ = bagu.draw(conn, 1)
+    bagu.review_question(conn, sid, question["id"], "again", "sub_12345678-1234-4234-8234-123456789abc")
+    before_q = dict(conn.execute("SELECT * FROM questions").fetchone())
+    before_items = [tuple(row) for row in conn.execute("SELECT * FROM session_items")]
+    monkeypatch.setattr(bagu, "PAGES", {"测试": "https://example.com"})
+    formatted = "| 特性 | Kafka |\n| --- | --- |\n| 吞吐 | 十万 |"
+    monkeypatch.setattr(bagu, "fetch_format_references", lambda *args: [
+        ("测试", "表格", "特性 Kafka\n\n吞吐 十万", formatted),
+        ("测试", "不存在", "旧", "**旧**"),
+    ], raising=False)
+    report = bagu.repair_answer_formats(conn, dry_run=True)
+    assert report["questions"] == 1 and report["history"] == 0
+    assert dict(conn.execute("SELECT * FROM questions").fetchone()) == before_q
+    report = bagu.repair_answer_formats(conn)
+    after_q = dict(conn.execute("SELECT * FROM questions").fetchone())
+    assert after_q.pop("answer") == formatted
+    assert before_q.pop("answer") == "特性 Kafka\n\n吞吐 十万"
+    assert after_q == before_q
+    assert [tuple(row) for row in conn.execute("SELECT * FROM session_items")] == before_items
+    with sqlite3.connect(report["backup"]) as backup:
+        assert backup.execute("SELECT answer FROM questions").fetchone()[0] == "特性 Kafka\n\n吞吐 十万"
+
+
+def test_format_repair_explicit_history_is_format_only_and_replay_uses_snapshot(conn, monkeypatch):
+    question = bagu.create_question(conn, {
+        "category": "测试", "question": "引用", "answer": "旧结论", "url": "",
+    })
+    sid, _ = bagu.draw(conn, 1)
+    submission = "sub_12345678-1234-4234-8234-123456789abc"
+    bagu.review_question(conn, sid, question["id"], "again", submission)
+    conn.execute("UPDATE questions SET answer='用户改过的正文'")
+    conn.commit()
+    before_q = [tuple(row) for row in conn.execute("SELECT * FROM questions")]
+    before_item = dict(conn.execute("SELECT * FROM session_items").fetchone())
+    before_sessions = [tuple(row) for row in conn.execute("SELECT * FROM sessions")]
+    monkeypatch.setattr(bagu, "PAGES", {"测试": "https://example.com"})
+    monkeypatch.setattr(bagu, "fetch_format_references", lambda *args: [
+        ("测试", "引用", "旧结论", "> **旧结论**"),
+    ], raising=False)
+    report = bagu.repair_answer_formats(conn, include_history=True)
+    assert report["questions"] == 0 and report["history"] == 1
+    assert [tuple(row) for row in conn.execute("SELECT * FROM questions")] == before_q
+    assert [tuple(row) for row in conn.execute("SELECT * FROM sessions")] == before_sessions
+    after_item = dict(conn.execute("SELECT * FROM session_items").fetchone())
+    assert after_item.pop("result_full_answer") == "> **旧结论**"
+    before_item.pop("result_full_answer")
+    assert after_item == before_item
+    replay = bagu.review_question(conn, sid, question["id"], "again", submission)
+    assert replay["full_answer"] == "> **旧结论**"
+    assert replay["full_answer_html"] == "<blockquote><p><strong>旧结论</strong></p></blockquote>"
+    assert bagu.repair_answer_formats(conn, include_history=True)["history"] == 0
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_format_repair_skips_changed_or_ambiguous_source(conn, monkeypatch, ambiguous):
+    question = bagu.create_question(conn, {
+        "category": "测试", "question": "内容", "answer": "保留旧结论", "url": "",
+    })
+    monkeypatch.setattr(bagu, "PAGES", {"测试": "https://example.com"})
+    references = [("测试", "内容", "保留旧结论" if ambiguous else "已改变结论", "**已改变结论**")]
+    if ambiguous:
+        references.append(("测试", "内容", "保留旧结论", "**保留旧结论**"))
+    monkeypatch.setattr(bagu, "fetch_format_references", lambda *args: references, raising=False)
+    report = bagu.repair_answer_formats(conn)
+    assert report["questions"] == 0
+    assert conn.execute("SELECT answer FROM questions WHERE id=?", (question["id"],)).fetchone()[0] == "保留旧结论"
+
+
+def test_format_repair_render_failure_does_not_write_partial_updates(conn, monkeypatch):
+    for title in ("一", "二"):
+        bagu.create_question(conn, {"category": "测试", "question": title, "answer": title, "url": ""})
+    monkeypatch.setattr(bagu, "PAGES", {"测试": "https://example.com"})
+    monkeypatch.setattr(bagu, "fetch_format_references", lambda *args: [
+        ("测试", "一", "一", "**一**"), ("测试", "二", "二", "**二**"),
+    ], raising=False)
+    original_render = bagu.render_answer_html
+    def fail_second(value):
+        if value == "**二**":
+            raise ValueError("render failed")
+        return original_render(value)
+    monkeypatch.setattr(bagu, "render_answer_html", fail_second)
+    with pytest.raises(ValueError, match="render failed"):
+        bagu.repair_answer_formats(conn)
+    assert [row[0] for row in conn.execute("SELECT answer FROM questions ORDER BY id")] == ["一", "二"]
 
 
 @pytest.mark.parametrize(

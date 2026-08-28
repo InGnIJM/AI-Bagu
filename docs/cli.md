@@ -11,6 +11,8 @@
 | `python bagu.py init` | 创建或迁移数据库结构，不清空已有题目和进度 |
 | `python bagu.py import` | 抓取代码中配置的公开题库；新增题目，更新匹配旧题的题干、答案及来源锚点，保留复习进度 |
 | `python bagu.py import --code-only` | 先创建完整 SQLite 备份，只修复可匹配的旧答案代码格式 |
+| `python bagu.py import --format-only --dry-run` | 联网核对旧答案，预览可恢复的表格、引用、列表等格式，不写入修复结果 |
+| `python bagu.py import --format-only` | 完整 SQLite 备份后，只恢复正文与来源匹配的旧题库答案格式 |
 | `python bagu.py stats` | 打印总题数、今日可复习题数、已掌握题数，以及各分类的总数、已刷数、到期数 |
 | `python bagu.py list` | 打印全部题目的 ID、分类和题干；不提供分页或搜索参数 |
 | `python bagu.py draw -n 5 --cat MySQL` | 开始一轮并打印题目；`-n` 默认 5，`--cat` 可省略，按完整分类名筛选 |
@@ -90,6 +92,30 @@ python bagu.py import --code-only
 该命令不新增题目、不替换答案正文、不修改历史评分、调度或进度，也不调用模型，不需要模型 Key；仍需要连接公开题库来源。正常 `import` 会更新正文，不能当作 `--code-only` 的等价替代。
 
 这里生成的是完整 SQLite 备份；应用导出的 `.bagu-backup` 仅含题目与进度，二者用途不同。数据库升级和恢复边界见 [架构与数据](architecture.md) 与 [Android Beta](android-beta.md)。
+
+## 修复旧答案表格与其他格式
+
+2026-08-28 新增；不代表旧 APK 或已启动的旧服务自动具备此功能。重启桌面服务后使用更新的渲染器。
+
+```bash
+python bagu.py import --format-only --dry-run
+python bagu.py import --format-only
+```
+
+同一份来源网页分别按旧版纯文本规则、新版 Markdown 规则解析；只有整篇旧答案与来源一致（允许空行和行首缩进差异，兼容以前的代码块修复）才恢复格式。保留表格列、代码围栏及语言、列表、引用、标题、强调、删除线、链接与图片。不会猜测空格分列，不新增题目，不替换内容有变化或身份不唯一的答案；`unmatched_ids` 列出已找到来源但未匹配的题目。
+
+默认只修改 `questions.answer`，不修改历史答案。若明确需要修复“已记录”的题库答案快照，先预览再执行：
+
+```bash
+python bagu.py import --format-only --include-history --dry-run
+python bagu.py import --format-only --include-history
+```
+
+`--include-history` 仅检查已评分且来源为 `stored` 的 `result_full_answer`，必须独立匹配原文才恢复；模型答案、来源不明或内容变化的历史答案保持原样。点评、评级、submission、答案来源、会话和所有调度字段不变；查询仍使用已存快照，不从当前题库替换历史答案，也不重新评分。
+
+格式命令只接受已经存在、且 schema 为当前版本的数据库，不执行初始化或升级；旧版或高版本数据库会被拒绝。`--dry-run` 使用 SQLite 只读连接；需要升级的数据库须另行完整备份并升级，不能用格式修复代替数据库迁移。
+
+写入前在数据库旁创建 `*.before-answer-format-*.sqlite3` 完整备份，JSON 报告给出 `backup` 路径、题库和历史更新数量。所有格式生成与渲染先完成校验；来源请求失败时不写入任何修复，事务内遇到冲突或写入失败整批回滚。不调用模型、不读取模型 Key。`--dry-run` 不创建备份、不写入修复；这两个附加参数只能与 `--format-only` 同用，不能与 `--code-only` 混用。
 
 ## Hermes 聊天调用约定
 
