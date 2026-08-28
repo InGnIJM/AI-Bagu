@@ -103,13 +103,16 @@ def add_pinned_native_payloads(apk):
             archive.writestr(archive_name, payload.getvalue())
 
 
-def make_isolated_release_script_root(tmp_path):
+def make_isolated_release_script_root(tmp_path, version=None):
     root = tmp_path / "isolated-release"
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
     shutil.copy2(ROOT / "scripts/android.ps1", scripts / "android.ps1")
     shutil.copy2(ROOT / "scripts/verify_android_apk.py", scripts / "verify_android_apk.py")
-    shutil.copy2(ROOT / "version.json", root / "version.json")
+    if version is None:
+        shutil.copy2(ROOT / "version.json", root / "version.json")
+    else:
+        (root / "version.json").write_text(json.dumps(version), encoding="utf-8")
     return root
 
 
@@ -158,12 +161,18 @@ def test_setup_signing_rejects_an_isolated_partial_identity(tmp_path):
     assert key.read_bytes() == b"partial"
 
 
-def test_verify_rejects_missing_companion_metadata_before_sdk_tools(tmp_path):
+@pytest.mark.parametrize(("version_name", "version_code"), [
+    ("0.1.0-beta.2", 2),
+    ("0.1.0-beta.3", 3),
+])
+def test_verify_rejects_missing_companion_metadata_before_sdk_tools(tmp_path, version_name, version_code):
     """Catches Verify accepting a delivery set that omits the promised certificate/install metadata."""
-    root = make_isolated_release_script_root(tmp_path)
-    delivery = root / "dist/android/0.1.0-beta.2/public"
+    root = make_isolated_release_script_root(tmp_path, {
+        "versionName": version_name, "versionCode": version_code, "channel": "beta",
+    })
+    delivery = root / "dist/android" / version_name / "public"
     delivery.mkdir(parents=True)
-    apk = delivery / "bagu-0.1.0-beta.2-public-arm64-v8a.apk"
+    apk = delivery / f"bagu-{version_name}-public-arm64-v8a.apk"
     apk.write_bytes(b"test-apk")
     (delivery / "SHA256SUMS").write_text(
         f"{hashlib.sha256(apk.read_bytes()).hexdigest()} *{apk.name}\n", encoding="utf-8"

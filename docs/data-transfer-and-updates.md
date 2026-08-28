@@ -2,7 +2,7 @@
 
 [项目首页](../README.md) · [Android 指南](android-beta.md) · [历史验收记录](validation.md)
 
-本文说明 `version.json` 对应的迁移／更新实现与维护者发布流程。当前候选为 `0.1.0-beta.2`、versionCode `2`、`beta` 通道；候选版本、源码功能和下面的命令示例都不是“APK 已交付、设备已验收、Release／Pages 已上线”的证明。历史文档若仍按 `71fbbfd` 描述旧备份入口，应结合所用安装包阅读。
+本文说明 `version.json` 对应的迁移／更新实现与维护者发布流程。当前候选为 `0.1.0-beta.3`、versionCode `3`、`beta` 通道；候选版本、源码功能和下面的命令示例都不是“APK 已交付、设备已验收、Release／Pages 已上线”的证明。历史文档若仍按 `71fbbfd` 描述旧备份入口，应结合所用安装包阅读。
 
 ## 电脑与手机之间迁移
 
@@ -103,7 +103,7 @@ python .\scripts\release_github.py init-feed --execute --confirm-repository InGn
 
 脚本检查固定 origin、仓库公开且未归档、写权限和 Git 数据访问，之后才将目标分支的 404 当作缺失。只操作 `codex/update-feed`，不切换本地工作区；该分支只允许 `.nojekyll`、`updates/beta.json`、`updates/stable.json`。缺失 beta 通道写入 `{"schema_version":1,"channel":"beta","release":null}`，stable 文件对应使用 `"channel":"stable"`；已有合法清单保留原字节。非法清单、额外文件、符号链接或并发冲突都会停止，不覆盖、不强推。
 
-成功仅表示“清单分支就绪”。维护者还须在 GitHub Pages 将来源设为 **Deploy from a branch → `codex/update-feed` → `/ (root)`**，脚本不会修改 Pages 设置。配置方式见 [GitHub 官方说明](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site)。固定清单地址为 [beta.json](https://ingnijm.github.io/AI-Bagu/updates/beta.json) 和 [stable.json](https://ingnijm.github.io/AI-Bagu/updates/stable.json)；列出地址不表示本轮已验证上线。
+成功仅表示“清单分支就绪”。维护者还须在 GitHub Pages 将来源设为 **Deploy from a branch → `codex/update-feed` → `/ (root)`**，脚本不会修改 Pages 设置。配置方式见 [GitHub 官方说明](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site)。固定清单地址为 [beta.json](https://ingnijm.github.io/AI-Bagu/updates/beta.json) 和 [stable.json](https://ingnijm.github.io/AI-Bagu/updates/stable.json)；配置后仍须验证匿名访问和分支内容一致性，仅列出地址不能证明就绪。两个空通道都有效时，检查更新可以成功，但还没有 APK 可下载。
 
 ## 维护者：发布预检、准备与执行
 
@@ -138,7 +138,7 @@ Pages 必须在这些时点就绪，避免先签名或公开 Release 才发现�
 
 GitHub JSON 请求用 [`gh api --include`](https://cli.github.com/manual/gh_api) 读取并保留真实 HTTP 状态，但不输出响应头／正文或工具 stderr；401/403、404、429、5xx 和无响应分别报告，404 不统一解释为未配置。附件校验仍使用纯二进制字节，不混入 HTTP 头。Pages 部署延迟时可稍后重试，不绕过就绪检查。
 
-本轮仍保持 `0.1.0-beta.2 / 2`。下次正式准备候选为 `0.1.0-beta.3 / 3`，须另行授权修改版本；若编号已分发或远端有冲突，停止并确认，不能自动猜新编号或覆盖旧版本。
+当前正式准备候选为 `0.1.0-beta.3 / 3`，更新说明见 [beta.3 更新说明](releases/0.1.0-beta.3.md)。此前的 `0.1.0-beta.2 / 2` 预览包不能改名当作新版，必须从精确发布提交重新构建。每次准备和发布前重新核验远端；若候选编号已分发或发生冲突，停止并确认，不能自动猜新编号或覆盖旧版本。源码提交／推送、签名、设备安装和公开发布仍须分别取得相应确认。
 
 ### 中断的本地准备
 
@@ -151,17 +151,17 @@ GitHub JSON 请求用 [`gh api --include`](https://cli.github.com/manual/gh_api)
 只有维护者另外明确确认仓库、版本、六个精确附件及验收范围后才执行发布。以下版本只是当前候选示例，必须与 `version.json` 完全一致；确认参数不带 tag 的 `v` 前缀：
 
 ```powershell
-python .\scripts\release_github.py publish --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.2
+python .\scripts\release_github.py publish --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.3
 ```
 
 流程为：验证回执与实际 APK、确认 Pages 就绪 → 创建或续用匹配草稿 → 上传允许附件并核验远端字节 → 公开 Release → 匿名验证附件 → 更新 `codex/update-feed` 分支 → 验证实际 Pages 内容。beta 创建 prerelease；不会覆盖冲突 tag／附件、强推或删除 Release，也不会改变当前本地 checkout。只有同 commit、同内容的草稿可续传；已公开但缺少附件的 Release 不会被偷偷补写。
 
-Pages 需要维护者在 GitHub 中另行配置来源 `codex/update-feed`、根目录 `/`；脚本不会自动改该配置。固定清单地址是 `https://ingnijm.github.io/AI-Bagu/updates/beta.json` 和 `stable.json`（同一路径）；这只是客户端配置，不表示现在已经可访问。
+Pages 需要维护者在 GitHub 中另行配置来源 `codex/update-feed`、根目录 `/`；脚本不会自动改该配置。固定清单地址是 `https://ingnijm.github.io/AI-Bagu/updates/beta.json` 和 `stable.json`（同一路径）；每次发布仍以实际匿名访问和分支一致性检查为准，不能沿用过去的就绪结果。
 
 若输出 `PARTIAL`／退出码 2，表示 Release 已公开，但匿名附件、feed 或 Pages 核验尚未完成。不要重建另一个同版本包，也不要删除已公开 Release。保留精确源码与附件，排查后仅重试：
 
 ```powershell
-python .\scripts\release_github.py feed --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.2
+python .\scripts\release_github.py feed --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.3
 ```
 
 `feed` 只接受精确匹配的已公开 Release，仍检查本地回执与远端附件；它不能把草稿当成已发布版本。更新当前通道时保留另一通道，未发布过的通道用 `release: null`，拒绝通道降级和同版本内容冲突。即使另一通道已有更高版本，也不应阻止修复本通道已发布版本的 feed。最终分别核对 Release、匿名附件和 Pages 的结果，不把其中一项成功当成全部完成。
@@ -172,4 +172,4 @@ python .\scripts\release_github.py feed --execute --confirm-repository InGnIJM/A
 
 第三方字体、图标和 Android／Python／Chaquopy 等运行时或依赖保留各自许可证。已有字体声明位于 [assets/fonts](../assets/fonts/)；发布时应核对随包依赖与所需声明，不用项目 MIT 替代它们。不得提交或上传 `.env`、模型配置、真实数据库、备份、草稿、签名私钥或密码。
 
-最终验收须分别记录源码版本、测试／lint、精确 public APK 与签名／哈希、API 29／36 隔离迁移与两版本安装、Release、Pages，以及失败或未覆盖项。当前候选见 [0.1.0-beta.2 本地验收记录](releases/0.1.0-beta.2-validation.md)；其他基线见[验收记录](validation.md)。未覆盖项不能用本地测试通过代替。
+最终验收须分别记录源码版本、测试／lint、精确 public APK 与签名／哈希、API 29／36 隔离迁移与两版本安装、Release、Pages，以及失败或未覆盖项。[0.1.0-beta.2 本地验收记录](releases/0.1.0-beta.2-validation.md) 仅属于历史产物，不是 beta.3 的验证回执；[beta.3 更新说明](releases/0.1.0-beta.3.md) 也不代表已构建或发布。其他基线见[验收记录](validation.md)。未覆盖项不能用本地测试通过代替。
