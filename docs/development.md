@@ -41,7 +41,7 @@ docs/superpowers/plans/             历史实现计划，不替代当前运行�
 AGENTS.md                          当前项目协作规则
 ```
 
-Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面与生命周期，`HostPolicy` 限制导航与 URL，`RuntimeHost` / `android_runtime.py` 启动隔离运行时，`NativeBridge` 暴露受限存储、文件和语音能力，`SpeechInput` / `AndroidSpeechBackend` 管理识别状态与系统服务。不要把 Android 的随机端口 origin 当作可靠跨启动存储。
+Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面与生命周期，`HostPolicy` 限制导航与 URL，`RuntimeHost` / `android_runtime.py` 启动隔离运行时，`NativeBridge` 暴露受限存储、文件和语音能力，`SpeechInput` / `AndroidSpeechBackend` 管理识别状态与系统服务。更新安装由 `PackageInstallDriver` 写入系统 session，`UpdateInstallActivity` 只接收非导出的显式回调，`UpdateInstallStatusPolicy` 映射固定结果；禁止恢复通用 APK `ACTION_VIEW` 或厂商包名分支。不要把 Android 的随机端口 origin 当作可靠跨启动存储。
 
 本地生成且禁止提交：`.env`、`settings.json`、`bagu.db`、`.signing/`、`.toolchains/`、`.android-sdk/`、Gradle/Android 缓存、`dist/`。桌面服务日志默认位于 `.superpowers/bagu-server.log`，Android 日志位于私有 `logs/`；日志不是源码，不应携带 Key、令牌或作答正文。
 
@@ -91,10 +91,10 @@ python -m pytest test/test_bagu.py test/test_android_project.py -q
 | 核心与网页 | `python -m pytest test/test_bagu.py -q` | SQLite、会话、评卷、HTTP、网页脚本回归；不证明真实模型或浏览器服务连通 |
 | Android 项目契约 | 加上 `test/test_android_project.py` | 项目配置、隔离运行时、桥接和打包策略；包含 PowerShell/JDK/离线 Gradle 检查，不是全部 APK/设备验收 |
 | 语音脚本 | `node --test test/speech_input.test.cjs` | 实际页面脚本配合模拟浏览器/原生识别边界；也由核心 pytest 调用，不采集真实音频 |
-| Java 单元测试 | `android/app/src/test/` 的 Gradle 单元测试任务 | 宿主、语音、更新状态机／网络分类、诊断过滤与 ZIP；不替代 WebView 或系统安装器真正运行 |
+| Java 单元测试 | `android/app/src/test/` 的 Gradle 单元测试任务 | 宿主、语音、更新状态机／网络分类、session 恢复与状态映射、诊断过滤与 ZIP；不替代 WebView 或系统安装器真正运行 |
 | Android lint | 对目标 variant 运行 release lint | Android 静态问题；零错误不等于设备兼容性或无警告 |
 | APK 校验 | `scripts/android.ps1 -Mode Verify` 及 APK 校验脚本 | 指定产物的签名、内容、原生库及哈希；不会重建，也不能单独证明产物对应最新源码 |
-| 设备仪器与手动验收 | `android/app/src/androidTest/` 和隔离设备 | 该 APK 在该系统、WebView、ABI、页面大小和服务环境中的表现；不能泛化为所有手机 |
+| 设备仪器与手动验收 | `android/app/src/androidTest/` 和隔离设备 | session 写入／废弃、显式可变回调及该 APK 在该系统、WebView、ABI、页面大小和服务环境中的表现；不能泛化为所有手机，尤其不能代替问题小米机型复测 |
 
 `Build` 不只是单测命令，它还会生成签名 APK。旧基线脚本同时处理 internal/public，当前版本化脚本已将二者分开；请按 [Android 指南](android-beta.md#构建与校验)核对所用版本、flavor 与计划，勿照搬历史任务列表。构建前须准备缓存和稳定签名身份，internal 还需授权题库；不在普通文档/单元测试任务中顺带构建或安装。
 

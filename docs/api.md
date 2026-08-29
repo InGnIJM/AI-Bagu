@@ -169,7 +169,7 @@ ZIP 固定包含 `manifest.json`、`server.jsonl`、`web.jsonl`、`native.jsonl`
 
 ## Android 更新状态与诊断
 
-沿用受限桥接 `getUpdateState()` 与 `bagu-update` 事件，不新增下载 URL、路径或日志读取方法。既有 `operationId` 用于请求与过期回调控制，`revision` 用于状态顺序；它们不等于供反馈的诊断编号。旧字段保留，新增 `lastCheck`：
+沿用受限桥接 `getUpdateState()`、`installUpdate(candidateId, operationId)`、`cancelUpdate(operationId)` 与 `bagu-update` 事件，不新增下载 URL、路径或日志读取方法。既有 `operationId` 用于请求与过期回调控制，`revision` 用于状态顺序；它们不等于供反馈的诊断编号。`ready`、`installerLease` 和 `recovery` 继续保留；系统 PackageInstaller session ID、安装器包名、APK 路径及原始错误正文不进入状态 JSON。旧字段保留，新增 `lastCheck`：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -194,12 +194,12 @@ ZIP 固定包含 `manifest.json`、`server.jsonl`、`web.jsonl`、`native.jsonl`
 | HTTP / DNS / 超时 / TLS / 其他连接 | 1001 / 1002 / 1003 / 1004 / 1005 |
 | JSON 或 UTF-8 / 清单校验 / 大小超限 / 重定向拒绝 | 1101 / 1102 / 1103 / 1104 |
 | 本地存储 / 长度 / SHA-256 / APK 身份、签名或兼容性 | 1201 / 1202 / 1203 / 1204 |
-| 安装来源权限 / 安装器启动 | 1301 / 1302 |
+| 安装来源权限或设备策略 / 安装器协议或超时 / 开发者验证或高级保护 | 1301 / 1302 / 1303 |
 | 未分类错误 | 1999 |
 
-主动取消是 `cancelled` 结果，不生成网络错误。操作只有被接受才分配新诊断编号，取消沿用原编号；节流跳过、忙时拒绝或重复点击不清除已有失败编号。工作线程与回调捕获所属操作上下文，过期结果不改变新操作的编号或状态。
+主动取消下载或系统安装确认是 `cancelled` 结果，不生成网络错误；安装取消会废弃对应 session、解除租约并保留校验缓存。无效、冲突或不兼容 APK 统一为 1204，session 写入／空间失败为 1201，策略阻止为 1301；Android 16.1+ 的开发者验证 extra 为 1303。操作只有被接受才分配新诊断编号，取消沿用原编号；节流跳过、忙时拒绝、重复或错误 session 回调不清除已有失败编号。工作线程与回调捕获所属操作上下文，过期结果不改变新操作的编号或状态。
 
-`AndroidDiagnostics` 接收不可变 `UpdateDiagnostic`，通过已有 `native.update` 写入 `operation_id`（诊断编号）、`stage`、`outcome`、可选 `channel`、`error_code`、可选 `status`（HTTP）及 `duration_ms`。只对 native.update 开放通道与结果白名单，落盘和导出使用同一过滤器；不记录每块下载进度或任意异常消息，日志失败不改变更新结果。自动检查失败只在设置页显示，网页不重复上报原生错误；用户可通过原有诊断导出入口反馈。
+`AndroidDiagnostics` 接收不可变 `UpdateDiagnostic`，通过已有 `native.update` 写入 `operation_id`（诊断编号）、`stage`、`outcome`、可选 `channel`、`error_code`、可选 `status`（HTTP）及 `duration_ms`。白名单包含安装确认专用的 `confirm` 阶段，用 `started/ok/error` 区分确认回调到达、启动请求成功或失败；不记录确认 Intent、路径、Session ID 或系统错误正文。只对 native.update 开放通道与结果白名单，落盘和导出使用同一过滤器；不记录每块下载进度或任意异常消息，日志失败不改变更新结果。自动检查失败只在设置页显示，网页不重复上报原生错误；用户可通过原有诊断导出入口反馈。
 
 ## 模型配置
 

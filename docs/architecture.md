@@ -119,6 +119,7 @@ AI 按语义区分核心错误（again）、关键缺漏（hard）、次要缺�
 - Android 用 `AppPaths` 区分 data/config/static/logs。只在数据库不存在时复制清洁种子；已有数据只迁移结构，不被种子覆盖。internal 种子仅保留授权题目并清空进度/会话，public 为空种子，不直接打包工作站数据库。
 - Android 每进程仅启动一个 `127.0.0.1` 随机端口服务。页面入口携带随机令牌，API 通过 `X-Bagu-Token` 校验；令牌不得持久化到用户配置、写入日志或文档。
 - Android 模型 URL 必须 HTTPS，Python 重定向策略阻止 HTTPS 降级，并在跨源重定向时移除认证、Cookie 等敏感请求头；桌面保留自定义 HTTP 模型支持。
+- Android 更新先在私有缓存完成长度、哈希、包名、版本、ABI 与证书信息校验，再由 `PackageInstallDriver` 将字节复制到系统 `PackageInstaller.Session` 并 `fsync`。提交回调只进入非导出的 `UpdateInstallActivity`，需要确认时仅转交系统提供的 `Intent.EXTRA_INTENT`；网页接口不暴露 session ID、安装器包名、路径或原始错误正文。提交后 `ready=false`，session ID、目标版本与租约持久化；重启先核对实际版本，再查询遗留 session，不自动重试。旧的 APK Provider／通用 `ACTION_VIEW` 不再属于当前架构。
 - WebView 禁止任意文件访问、mixed content 和非受控顶层导航；CSP 限制远程可执行内容与 frames，并使用 no-referrer 防止启动 URL 外泄。原生存储桥只接受限定的 `bagu-` 状态键与有界数据，不传输 API Key；文件操作走系统选择器，不申请全盘存储权限。
 - 语音只填入草稿，不自动评分；Android 系统识别与桌面浏览器识别的可用性、网络和隐私取决于相应服务。不能把源码回归通过等同于真实语音或模型服务已连通。
 

@@ -8,6 +8,7 @@
 
 | 记录 | 对象 | 不能据此推断 |
 | --- | --- | --- |
+| 2026-08-29 beta.4 本地候选 | 当前未提交工作区、精确 public ARM64 候选 APK、同签名 code 2 QA 包与自动化 | 已在报告问题的 API36 物理手机完成安装、已提交源码或已公开发布 beta.4 |
 | 2026-08-28 beta.3 公开发布 | `8cc586f`、精确 public ARM64 APK、隔离设备及真实 Release／Pages／应用内升级 | 所有真机通过、后续未提交格式恢复已打包、原仪器测试夹具问题已修复 |
 | 2026-08-28 答案格式恢复 | 后续本地工作区、合成自动化与单独授权的本地数据恢复 | beta.3 包含这些改动、手机题库自动同步 |
 | 2026-08-28 更新诊断体验 APK | 明确哈希的 public ARM64 同版本体验包、实际构建/签名/内容校验 | 已安装手机、API29/API36 设备通过、正式版本递增或 GitHub/Pages 上线 |
@@ -21,6 +22,33 @@
 早期基础文档核对的源码为 `71fbbfd`，包含语音提交 `5ab4140` 和后续评分更新；公开 beta.3 对应的精确源码则为 `8cc586f`。较早章节中的“本轮未发布／未验收”仅描述各自当时的对象，相关失败与限制不删除。
 
 后续迁移、自动更新和发布工作应在完成后另外记录源码、精确产物、测试环境及结果；不能用开发计划的勾选项或用户截图替代验收证据。
+
+## beta.4 本地候选（未公开发布）
+
+日期：2026-08-29。本节记录 Android 安装确认修复、统一错误弹窗和 Compact Editorial 更新提示在当前**未提交工作区**的本地证据。没有提交、推送、创建 Tag、上传附件、修改 Pages 或更新远端 feed；下列产物不能冒充与精确 Git 提交绑定的正式发布回执。
+
+### 实现与自动化
+
+- API 35 及以上创建安装确认 Activity `PendingIntent` 时显式设置 creator BAL 允许模式；仍使用显式组件、可变回调、非导出 Activity 和用户确认，不恢复 APK `ACTION_VIEW` 或临时 Provider。
+- `native.update` 新增固定 `confirm` 阶段，只记录确认回调到达、启动请求成功或固定失败码；不保存 Intent、APK 路径、异常正文或安装 Session ID。安装成功仍只能由下次启动核对实际 versionCode 确认。
+- 主动触发的轮次、评卷、模型、题库、文件／备份、语音、诊断和手动更新错误统一进入可访问弹窗；必填／格式校验仍在字段旁，取消、成功、进度和后台自动检查失败不弹窗。更新可用提示为 B「Compact Editorial」，详情按钮只进入设置页，不直接下载。
+- 先加入失败测试锁定缺失 BAL 与 `confirm` 生命周期，再实现最小修复。最终 `python -m pytest test -q` 为 **668 passed**，零失败；独立 `node --test test/speech_input.test.cjs` 为 **27 passed**。
+- Windows PowerShell 执行 `scripts/android.ps1 -Mode Check` 为 **BUILD SUCCESSFUL**；10 份 JUnit XML 共 **108 项，零失败／错误／跳过**。release lint 为 **0 错误、5 条警告**（`MonochromeLauncherIcon`、`ObsoleteSdkInt`、`StaticFieldLeak`、`UnusedAttribute`、`UseRequiresApi`），未通过压低规则掩盖问题。`:app:compilePublicDebugAndroidTestJavaWithJavac` 另行成功，证明包含 BAL 分支断言的仪器测试可编译；没有把“可编译”写成已在设备运行。
+- `scripts/android.ps1 -Mode Verify` 对下述 beta.4 精确 APK 通过：包名／版本、稳定签名、public 空种子、仅 ARM64、ZIP 以及 **68 个原生 ELF 的 16 KiB LOAD 对齐与 GNU_RELRO** 均符合约束。
+- 桌面与窄屏合成页面检查了错误弹窗的焦点、纯文本、长消息滚动和动作布局；视觉检查发现弹窗背景引用了未定义 token，随后固定为白色并限制长消息高度。自动化另覆盖 Escape、Tab 循环、焦点恢复、更新去重、错误优先和后台失败静默。
+
+### 本地产物
+
+- beta.4 候选：`dist/android/0.1.0-beta.4/public/bagu-0.1.0-beta.4-public-arm64-v8a.apk`，**29,957,285 字节**，SHA-256 `e67342481f3dbe50eb780d8a04d2c1bf1483e58a7d91f14937cf8330d8841308`，versionName `0.1.0-beta.4`、versionCode `4`、beta 通道。
+- 同签名 code 2 QA 包：`build/qa/bagu-install-fix-code2-public-arm64-v8a.apk`，**29,957,285 字节**，SHA-256 `4aa2592bbf75639f5b13ba9cdfe94a8056eecccb34957b651d211e445bb21364`。它用于先覆盖当前体验包再检查应用内升级链路，不是公开版本。
+- 两包证书 SHA-256 均为 `ac92a24f30a5e6c10c4ced0d0db89124f39f36e00778fef6ca3ba4973bdf0ee3`；复用既有稳定身份，没有重新生成或输出签名凭据。beta.4 本地目录恰有 APK、`SHA256SUMS`、证书指纹、`update.json`、安装说明和发布说明六项文件。
+- 一次 UI 最终修正前的候选输出已保留为 `dist/android/0.1.0-beta.4/public.interrupted-ui-before-white-card`，明确标记为中断产物，不应安装或发布。
+
+### 尚未完成与发布边界
+
+当前 ADB 只发现 API32 x86_64 模拟环境，与 ARM64 交付包及报告问题的 API36 手机不匹配，因此没有为追求“已安装”而强制安装、清除数据或改 ABI。仍需在报告问题的 API36 物理手机验证首次来源授权、系统确认页出现、取消后重试、同签名覆盖升级、启动后的 code 核对和数据保留；正式发布前还需覆盖小米 HyperOS 及至少一台 vivo／ColorOS 设备。
+
+离线 `preflight` 与 `prepare` dry-run 都按预期在“dirty checkout”门禁停止：源码尚未明确审阅并提交，脚本拒绝生成可冒充精确提交的发布回执。没有绕过该门禁，也没有运行 `publish`／`feed`、调用登录凭据或写远端。公开发布和 Git 操作仍需要另行明确授权。
 
 ## beta.3 公开发布
 
