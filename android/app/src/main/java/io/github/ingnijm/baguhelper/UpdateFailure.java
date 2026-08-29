@@ -10,7 +10,7 @@ final class UpdateFailure extends IOException {
     static final int HTTP = 1001, DNS = 1002, TIMEOUT = 1003, TLS = 1004, CONNECTION = 1005;
     static final int JSON = 1101, MANIFEST = 1102, LIMIT = 1103, REDIRECT = 1104;
     static final int STORAGE = 1201, LENGTH = 1202, HASH = 1203, APK = 1204;
-    static final int PERMISSION = 1301, INSTALLER = 1302, UNKNOWN = 1999;
+    static final int PERMISSION = 1301, INSTALLER = 1302, VERIFICATION = 1303, UNKNOWN = 1999;
     final int code;
     final Integer httpStatus;
 
@@ -25,7 +25,7 @@ final class UpdateFailure extends IOException {
 
     static boolean validCode(int code) {
         return (code >= HTTP && code <= CONNECTION) || (code >= JSON && code <= REDIRECT) ||
-            (code >= STORAGE && code <= APK) || code == PERMISSION || code == INSTALLER || code == UNKNOWN;
+            (code >= STORAGE && code <= APK) || (code >= PERMISSION && code <= VERIFICATION) || code == UNKNOWN;
     }
     static UpdateFailure at(int boundary, Throwable failure) {
         return failure instanceof UpdateFailure ? (UpdateFailure) failure : new UpdateFailure(boundary, null, failure);
@@ -52,7 +52,8 @@ final class UpdateFailure extends IOException {
             case HASH: return "安装包 SHA-256 校验不符";
             case APK: return "安装包身份、签名或兼容性校验未通过";
             case PERMISSION: return "尚未获得安装来源权限或无法打开授权设置";
-            case INSTALLER: return "无法打开系统安装器";
+            case INSTALLER: return "无法完成系统安装器交接";
+            case VERIFICATION: return "系统开发者验证或高级保护策略阻止了安装";
             default: return "更新操作发生未分类错误";
         }
     }

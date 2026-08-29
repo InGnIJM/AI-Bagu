@@ -12,7 +12,7 @@ def test_native_update_policy(tmp_path):
     jars = [next((cache / path).rglob("*.jar")) for path in ("junit/junit/4.13.2", "org.hamcrest/hamcrest-core/1.3")]
     classpath = os.pathsep.join(str(p) for p in [tmp_path, *jars])
     sources = list((root / "android/app/src/main/java/io/github/ingnijm/baguhelper").glob("Update*.java"))
-    sources = [p for p in sources if p.stem not in ("UpdateController", "UpdateApkProvider")]
+    sources = [p for p in sources if p.stem not in ("UpdateController", "UpdateInstallActivity", "PackageInstallDriver")]
     sources += list((root / "android/app/src/test/java/io/github/ingnijm/baguhelper").glob("Update*Test.java"))
     sources += [root / "android/app/src/main/java/io/github/ingnijm/baguhelper/SpeechInput.java",
                 root / "android/app/src/test/java/io/github/ingnijm/baguhelper/SpeechInputTest.java"]
@@ -27,6 +27,7 @@ def test_native_update_policy(tmp_path):
                              "io.github.ingnijm.baguhelper.UpdateIOTest",
                              "io.github.ingnijm.baguhelper.UpdateCheckTest",
                              "io.github.ingnijm.baguhelper.UpdateInstallGateTest",
+                             "io.github.ingnijm.baguhelper.UpdateInstallStatusPolicyTest",
                              "io.github.ingnijm.baguhelper.SpeechInputTest",
                              "io.github.ingnijm.baguhelper.DiagnosticPolicyTest",
                              "io.github.ingnijm.baguhelper.DiagnosticStoreTest"],

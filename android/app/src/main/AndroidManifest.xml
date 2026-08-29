@@ -3,6 +3,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.QUERY_ADVANCED_PROTECTION_MODE" />
     <queries>
         <intent><action android:name="android.speech.RecognitionService" /></intent>
     </queries>
@@ -13,8 +14,9 @@
         android:theme="@style/Theme.Bagu" android:supportsRtl="true">
         <provider android:name=".ImportProvider" android:authorities="${applicationId}.imports"
             android:exported="false" android:grantUriPermissions="true" />
-        <provider android:name=".UpdateApkProvider" android:authorities="${applicationId}.updates"
-            android:exported="false" android:grantUriPermissions="true" />
+        <activity android:name=".UpdateInstallActivity" android:exported="false"
+            android:excludeFromRecents="true" android:noHistory="true"
+            android:theme="@style/Theme.Bagu.InstallCallback" />
         <activity android:name=".MainActivity" android:exported="true"
             android:launchMode="singleTask" android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|uiMode"

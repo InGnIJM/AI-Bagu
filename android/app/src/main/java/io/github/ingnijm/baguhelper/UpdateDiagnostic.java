@@ -6,7 +6,7 @@ import java.util.*;
 /** One immutable, operation-owned diagnostic event; no remote or arbitrary text fields. */
 final class UpdateDiagnostic {
     static final Set<String> STAGES = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
-        "initialize", "check", "download", "verify", "write", "permission", "install")));
+        "initialize", "check", "download", "verify", "write", "permission", "install", "confirm")));
     static final Set<String> OUTCOMES = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
         "started", "ok", "error", "cancelled", "blocked", "interrupted")));
     final String stage, outcome, channel, diagnosticId;

@@ -413,7 +413,6 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request == UpdateController.INSTALL_REQUEST) { if (updater != null) updater.installerReturned(); return; }
         if (request != DOCUMENT_REQUEST || state.operation == null) return;
         String operation = state.operation;
         String template = state.template;

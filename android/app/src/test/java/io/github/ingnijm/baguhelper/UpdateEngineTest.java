@@ -51,8 +51,10 @@ public class UpdateEngineTest {
     }
     static final class Device implements UpdateEngine.Device {
         long installed = 1; int verified;
-        boolean reject;
-        Runnable duringVerify;
+        boolean reject,failAbandon;
+        final Set<Integer> sessions = new HashSet<>();
+        final List<Integer> abandoned = new ArrayList<>();
+        Runnable duringVerify,duringSessionExists;
         public long installedCode() { return installed; }
         public int sdk() { return 29; }
         public List<String> abis() { return Arrays.asList("arm64-v8a"); }
@@ -60,6 +62,11 @@ public class UpdateEngineTest {
             verified++;
             if (duringVerify != null) duringVerify.run();
             if (reject || release.versionCode <= installed) throw new IOException("archive invalid");
+        }
+        public boolean installSessionExists(int sessionId) { if(duringSessionExists!=null){Runnable action=duringSessionExists;duringSessionExists=null;action.run();}return sessions.contains(sessionId); }
+        public void abandonInstallSession(int sessionId) throws Exception {
+            if(failAbandon)throw new IOException("sk-test abandon unavailable");
+            sessions.remove(sessionId); abandoned.add(sessionId);
         }
     }
     static String feed(int code, String channel, byte[] apk) {
@@ -71,6 +78,7 @@ public class UpdateEngineTest {
     final Network network = new Network(); final Device device = new Device();
     UpdateEngine engine; File cache; final List<String> installRequests = new ArrayList<>();
     final List<UpdateDiagnostic> diagnostics = new ArrayList<>();
+    int nextSession=40;
     void start() throws Exception {
         if (cache == null) cache = temporary.newFolder("updates");
         engine = new UpdateEngine("beta", cache, prefs, device, new UpdateIO(network), queue,
@@ -86,6 +94,9 @@ public class UpdateEngineTest {
         assertEquals("available",engine.state().get("status"));
     }
     String id() { return (String)((Map<?,?>) engine.state().get("candidate")).get("id"); }
+    int commit(String op) throws Exception {
+        int sessionId=++nextSession;device.sessions.add(sessionId);engine.installSessionCommitted(op,sessionId);return sessionId;
+    }
 
     @Test public void strictJsonRejectsDuplicatesFractionsExtraAndTrailingInput() throws Exception {
         for (String value : Arrays.asList("{\"a\":1,\"a\":2}", "{\"a\":1.0}", "{\"a\":1e0}", "{}{}", "{\"a\":01}", "{\"a\":\"\n\"}")) {
@@ -139,7 +150,7 @@ public class UpdateEngineTest {
             Map<?,?> lastCheck=(Map<?,?>)engine.state().get("lastCheck");
             Object checkId=lastCheck.get("diagnosticId");assertEquals("partial-error",lastCheck.get("status"));
             engine.download(id(),"download");queue.run();
-            if(leased){engine.install(id(),"install");queue.run();engine.installLaunched("install");}
+            if(leased){engine.install(id(),"install");queue.run();commit("install");}
             File apk=new File(cache,"candidate.apk");
             if("hash".equals(kind))Files.write(apk.toPath(),"corrupted-apk".getBytes(StandardCharsets.UTF_8));
             if("apk".equals(kind))device.reject=true;
@@ -189,8 +200,8 @@ public class UpdateEngineTest {
         candidate(); engine.download(id(),"download"); queue.run();
         engine.install(id(),"install");queue.run();assertEquals(Arrays.asList("install"),installRequests);
         assertTrue(engine.installCurrent("install",id()));
-        engine.installLaunched("install");
-        start(); assertEquals("ready",engine.state().get("status"));
+        commit("install");
+        start(); assertEquals("recovery",engine.state().get("status"));
         device.installed=2;start();assertEquals("updated",engine.state().get("status"));
         assertFalse(engine.state().containsKey("candidate"));
     }
@@ -207,21 +218,44 @@ public class UpdateEngineTest {
             assertFalse(UpdateEngine.canInstall(true,busy[0],busy[1],busy[2],busy[3],busy[4],busy[5],busy[6],busy[7])); }
         assertFalse(UpdateEngine.canInstall(false,false,false,false,false,false,false,false,false));
     }
-    @Test public void installerLeasePreventsReplacementUntilInstallerReturnsAndDoesNotClaimSuccess() throws Exception {
+    @Test public void installerLeasePreventsReplacementUntilSystemCancellationAndDoesNotClaimSuccess() throws Exception {
         candidate();engine.download(id(),"download");queue.run();String candidateId=id();
-        engine.install(candidateId,"install");queue.run();engine.installLaunched("install");
+        engine.install(candidateId,"install");queue.run();int sessionId=commit("install");
         network.bodies.put(UpdatePolicy.FEED_ROOT+"beta.json",feed(3,"beta",new byte[]{1,2}).getBytes(StandardCharsets.UTF_8));
         engine.check("newer",false);queue.run();assertEquals(candidateId,id());
         assertFalse(engine.download(candidateId,"overwrite"));
-        engine.installerReturned();assertEquals("ready",engine.state().get("status"));
-        assertEquals(2,prefs.number("requestedVersion"));
+        engine.installResult(sessionId,UpdateInstallStatusPolicy.map(3,false));assertEquals("ready",engine.state().get("status"));
+        assertEquals(0,prefs.number("requestedVersion"));
         engine.check("newer-after-return",false);queue.run();assertNotEquals(candidateId,id());
     }
-    @Test public void failedInstallerLaunchReleasesLeaseAndExplainsFailure() throws Exception {
+    @Test public void failedInstallerPreparationReturnsReadyAndExplainsFailure() throws Exception {
         candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
-        engine.installLaunched("install");engine.installLaunchFailed("install");
+        engine.installLaunchFailed("install");
         assertEquals("ready",engine.state().get("status"));assertEquals(false,engine.state().get("installerLease"));
         assertTrue(((String)engine.state().get("message")).contains("无法"));
+    }
+    @Test public void uncertainCommitKeepsLeaseUntilSessionCanBeRecovered() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        int sessionId=commit("install");engine.installCommitUncertain("install",new IOException("sk-test binder"));
+        assertEquals("recovery",engine.state().get("status"));assertEquals(true,engine.state().get("installerLease"));
+        assertEquals(false,engine.state().get("ready"));assertEquals(sessionId,prefs.number("installSessionId"));
+        assertEquals(1302,diagnostics.get(diagnostics.size()-1).errorCode);
+    }
+    @Test public void stagedSessionAbandonFailureKeepsProtectionAndIdentity() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);assertTrue(engine.installSessionPrepared("install",73));
+        engine.installAbandonFailed("install",73,new IOException("sk-test abandon"));
+        assertEquals("recovery",engine.state().get("status"));assertEquals(true,engine.state().get("installerLease"));
+        assertEquals(73,prefs.number("installSessionId"));assertEquals(false,engine.state().get("ready"));
+    }
+    @Test public void sessionCreatedAfterInstallGuardExpiresIsTrackedUntilDiscarded() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        engine.cancelInstallation("install","guard expired");device.sessions.add(73);
+        assertFalse(engine.installSessionPrepared("install",73));
+        assertEquals("recovery",engine.state().get("status"));assertEquals(true,engine.state().get("installerLease"));
+        assertEquals(73,prefs.number("installSessionId"));assertEquals(false,engine.state().get("ready"));
+        device.abandonInstallSession(73);engine.installRejectedSessionDiscarded(73);
+        assertEquals(0,prefs.number("installSessionId"));assertEquals("ready",engine.state().get("status"));
     }
     @Test public void clearedCacheAndResidualPartRecoverWithoutPretendingReady() throws Exception {
         candidate();engine.download(id(),"download");queue.run();
@@ -255,15 +289,15 @@ public class UpdateEngineTest {
         assertFalse(engine.installCurrent("install",candidateId));
     }
     @Test public void missingLeasedApkRequiresConfirmedRecoveryBeforeRedownload() throws Exception {
-        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();engine.installLaunched("install");
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();commit("install");
         Files.delete(new File(cache,"candidate.apk").toPath());start();
         assertEquals("recovery",engine.state().get("status"));assertEquals(true,engine.state().get("installerLease"));
         assertEquals(true,engine.state().get("recovery"));assertFalse(engine.download(id(),"premature"));
         engine.recover("confirmed-recovery");assertEquals(false,engine.state().get("installerLease"));
-        assertEquals(2,prefs.number("requestedVersion"));assertTrue(engine.download(id(),"retry"));
+        assertEquals(0,prefs.number("requestedVersion"));assertTrue(engine.download(id(),"retry"));
     }
     @Test public void validMetadataWithCorruptLeasedApkPreservesBytesAndOffersRecovery() throws Exception {
-        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();engine.installLaunched("install");
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();commit("install");
         File apk=new File(cache,"candidate.apk"),metadata=new File(cache,"candidate.json");
         byte[] envelope=Files.readAllBytes(metadata.toPath()),damaged=new byte[]{7,8,9};
         Files.write(apk.toPath(),damaged);start();
@@ -277,17 +311,17 @@ public class UpdateEngineTest {
         assertArrayEquals(damaged,Files.readAllBytes(apk.toPath()));
         assertTrue(engine.download(id(),"retry"));queue.run();assertEquals("ready",engine.state().get("status"));
     }
-    @Test public void validLeasedApkRemainsReadyAndCannotBeResetByRecovery() throws Exception {
-        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();engine.installLaunched("install");
+    @Test public void validLeasedApkStillRequiresExplicitSessionRecovery() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();commit("install");
         File apk=new File(cache,"candidate.apk");byte[] before=Files.readAllBytes(apk.toPath());start();
-        assertEquals("ready",engine.state().get("status"));assertEquals(false,engine.state().get("recovery"));
-        engine.recover("not-needed");assertEquals(true,engine.state().get("installerLease"));
+        assertEquals("recovery",engine.state().get("status"));assertEquals(true,engine.state().get("recovery"));
+        engine.recover("confirmed");assertEquals(false,engine.state().get("installerLease"));
         assertEquals("ready",engine.state().get("status"));assertArrayEquals(before,Files.readAllBytes(apk.toPath()));
     }
     @Test public void partialMetadataEvictionOffersConfirmedRecoveryWithoutTouchingLeasedBytes() throws Exception {
         for(boolean corrupt:Arrays.asList(false,true)) {
             cache=temporary.newFolder();
-            candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();engine.installLaunched("install");
+            candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();commit("install");
             File apk=new File(cache,"candidate.apk"),metadata=new File(cache,"candidate.json");
             byte[] before=Files.readAllBytes(apk.toPath());
             if(corrupt)Files.write(metadata.toPath(),"invalid".getBytes(StandardCharsets.UTF_8));else Files.delete(metadata.toPath());
@@ -296,7 +330,7 @@ public class UpdateEngineTest {
             assertEquals("recovery",engine.state().get("status"));
             engine.cancel("background");assertEquals(true,engine.state().get("installerLease"));
             engine.recover("confirmed-recovery");assertEquals(false,engine.state().get("installerLease"));
-            assertEquals(2,prefs.number("requestedVersion"));assertArrayEquals(before,Files.readAllBytes(apk.toPath()));
+            assertEquals(0,prefs.number("requestedVersion"));assertArrayEquals(before,Files.readAllBytes(apk.toPath()));
             engine.check("recover-check",false);queue.run();assertTrue(engine.download(id(),"retry"));queue.run();
         }
     }
@@ -344,19 +378,26 @@ public class UpdateEngineTest {
         engine.installPermissionRequired("install",new SecurityException("sk-test"));
         engine.installLaunchFailed("install",new IOException("sk-test"));queue.run();
         assertEquals(current,engine.state().get("diagnostic_id"));
-        engine.install(id(),"install2");queue.run();engine.installLaunched("install2");
+        engine.install(id(),"install2");queue.run();
         engine.installLaunchFailed("install2",new IOException("sk-test C:/private/key"));
         UpdateDiagnostic failed=diagnostics.get(diagnostics.size()-1);
         assertEquals(1302,failed.errorCode);assertEquals(engine.state().get("diagnostic_id"),failed.diagnosticId);
         assertFalse(engine.state().get("message").toString().contains("sk-test"));
     }
+    @Test public void devicePolicyBlockIsExplicitAndDoesNotOfferAnotherPermissionLoop() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        engine.installPolicyBlocked("install");
+        assertEquals("ready",engine.state().get("status"));assertTrue(engine.state().get("message").toString().contains("系统策略"));
+        assertFalse(engine.state().get("message").toString().contains("打开设置"));
+        UpdateDiagnostic failure=diagnostics.get(diagnostics.size()-1);assertEquals(1301,failure.errorCode);assertEquals("permission",failure.stage);
+    }
     @Test public void failedCriticalInstallerPreferenceStillPreventsHandoff() throws Exception {
         candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
         prefs.failNumber="installerLease";
-        UpdateFailure failure=assertThrows(UpdateFailure.class,()->engine.installLaunched("install"));
+        UpdateFailure failure=assertThrows(UpdateFailure.class,()->engine.installSessionCommitted("install",73));
         assertEquals(1201,failure.code);assertEquals(false,engine.state().get("installerLease"));
         assertEquals("install-check",engine.state().get("status"));
-        assertThrows(IllegalStateException.class,()->engine.installerReturned());
+        assertFalse(engine.installSessionCurrent(73));
         assertFalse(engine.state().get("message").toString().contains("已打开系统安装器"));
     }
     @Test public void downloadDiagnosticsArePhaseBoundedNotPerChunk() throws Exception {
@@ -369,7 +410,7 @@ public class UpdateEngineTest {
         assertTrue("No diagnostic record per download chunk",count<=5);assertEquals("ready",engine.state().get("status"));
     }
     @Test public void recoveryStorageFailureKeepsLeaseAndReportsItsOwnOperation() throws Exception {
-        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();engine.installLaunched("install");
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();commit("install");
         Files.delete(new File(cache,"candidate.apk").toPath());start();
         Object previous=engine.state().get("diagnostic_id");prefs.failNumber="installerLease";
         engine.recover("recovery-write");
@@ -379,8 +420,125 @@ public class UpdateEngineTest {
         assertEquals(1201,failure.errorCode);assertEquals("write",failure.stage);
         assertEquals(engine.state().get("diagnostic_id"),failure.diagnosticId);assertNotEquals(previous,failure.diagnosticId);
         prefs.failNumber=null;engine.recoveryFailed("revoke-error",new SecurityException("sk-test C:/private"));
-        failure=diagnostics.get(diagnostics.size()-1);assertEquals(1301,failure.errorCode);
+        failure=diagnostics.get(diagnostics.size()-1);assertEquals(1302,failure.errorCode);
         assertTrue(engine.state().get("message").toString().contains("仍被保护"));
         engine.recover("recovery-ok");assertEquals(false,engine.state().get("installerLease"));
+    }
+
+    @Test public void committedSystemSessionPersistsIdentityAndCannotBeSubmittedTwice() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);engine.installSessionCommitted("install",73);
+        assertEquals(73,prefs.number("installSessionId"));assertEquals(2,prefs.number("requestedVersion"));
+        assertEquals(true,engine.state().get("installerLease"));assertEquals(false,engine.state().get("ready"));
+        assertEquals(true,engine.state().get("recovery"));assertEquals("installing",engine.state().get("status"));
+        assertFalse(engine.install(id(),"duplicate"));
+        engine.installSessionCommitted("install",74);
+        assertEquals(73,prefs.number("installSessionId"));
+    }
+
+    @Test public void pendingConfirmationRecordsArrivalAndLaunchWithoutSensitivePayload() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);engine.installSessionCommitted("install",73);
+        engine.installConfirmationArrived(73);
+        engine.installConfirmationLaunched(73);
+        UpdateDiagnostic arrived=diagnostics.get(diagnostics.size()-2);
+        UpdateDiagnostic launched=diagnostics.get(diagnostics.size()-1);
+        assertEquals("confirm",arrived.stage);assertEquals("started",arrived.outcome);
+        assertEquals("confirm",launched.stage);assertEquals("ok",launched.outcome);
+        assertFalse(arrived.toRecord().containsKey("session_id"));
+        assertFalse(launched.toRecord().toString().contains("73"));
+    }
+
+    @Test public void confirmationLaunchFailureUsesInstallerCodeAndKeepsSystemSessionProtected() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);engine.installSessionCommitted("install",73);
+        engine.installConfirmationArrived(73);
+        engine.installConfirmationFailed(73,new SecurityException("content://private/session/73 sk-test"));
+        UpdateDiagnostic failed=diagnostics.get(diagnostics.size()-1);
+        assertEquals("confirm",failed.stage);assertEquals("error",failed.outcome);assertEquals(1302,failed.errorCode);
+        assertEquals("recovery",engine.state().get("status"));assertEquals(true,engine.state().get("installerLease"));
+        assertFalse(failed.toRecord().toString().contains("private"));assertFalse(failed.toRecord().toString().contains("sk-test"));
+    }
+
+    @Test public void cancelledAndFailedSystemSessionsReleaseLeaseButKeepVerifiedApkRetryable() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);engine.installSessionCommitted("install",73);
+        engine.installResult(73,UpdateInstallStatusPolicy.map(3,false));
+        assertEquals("ready",engine.state().get("status"));assertEquals(true,engine.state().get("ready"));
+        assertEquals(false,engine.state().get("installerLease"));assertEquals(0,prefs.number("installSessionId"));
+        assertTrue(new File(cache,"candidate.apk").isFile());
+
+        engine.install(id(),"retry");queue.run();device.sessions.add(74);engine.installSessionCommitted("retry",74);
+        engine.installResult(74,UpdateInstallStatusPolicy.map(6,false));
+        assertEquals("ready",engine.state().get("status"));assertEquals(true,engine.state().get("ready"));
+        assertTrue(engine.state().get("message").toString().contains("无法读写"));
+        assertEquals(1201,diagnostics.get(diagnostics.size()-1).errorCode);
+    }
+
+    @Test public void staleSessionCallbackCannotMutateCurrentInstall() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);engine.installSessionCommitted("install",73);
+        long revision=((Number)engine.state().get("revision")).longValue();
+        engine.installResult(72,UpdateInstallStatusPolicy.map(3,false));
+        assertEquals(revision,((Number)engine.state().get("revision")).longValue());
+        assertEquals(73,prefs.number("installSessionId"));assertEquals(true,engine.state().get("installerLease"));
+    }
+
+    @Test public void terminalResultCannotReleaseLeaseWhenSystemSessionAbandonFails() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);engine.installSessionCommitted("install",73);device.failAbandon=true;
+        engine.installResult(73,UpdateInstallStatusPolicy.map(3,false));
+        assertEquals("recovery",engine.state().get("status"));assertEquals(true,engine.state().get("installerLease"));
+        assertEquals(73,prefs.number("installSessionId"));assertEquals(false,engine.state().get("ready"));
+    }
+
+    @Test public void restartRecoversExistingSessionAndReleasesMissingSessionWithoutClaimingSuccess() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);engine.installSessionCommitted("install",73);start();
+        assertEquals("recovery",engine.state().get("status"));assertEquals(false,engine.state().get("ready"));
+        device.sessions.clear();start();
+        assertEquals("ready",engine.state().get("status"));assertEquals(true,engine.state().get("ready"));
+        assertEquals(false,engine.state().get("installerLease"));assertEquals(0,prefs.number("installSessionId"));
+        assertNotEquals("updated",engine.state().get("status"));
+    }
+
+    @Test public void confirmedRecoveryAbandonsExactSystemSessionBeforeReleasingLease() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);engine.installSessionCommitted("install",73);start();engine.recover("recover-session");
+        assertEquals(Arrays.asList(73),device.abandoned);assertEquals(false,engine.state().get("installerLease"));
+        assertEquals("ready",engine.state().get("status"));assertEquals(true,engine.state().get("ready"));
+    }
+
+    @Test public void stagedSessionIdentitySurvivesProcessDeathBeforeCommit() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);assertTrue(engine.installSessionPrepared("install",73));
+        assertEquals(73,prefs.number("installSessionId"));assertEquals(0,prefs.number("installerLease"));
+        start();assertEquals("recovery",engine.state().get("status"));assertEquals(true,engine.state().get("installerLease"));
+        engine.recover("discard-staged");assertEquals(Arrays.asList(73),device.abandoned);
+        assertEquals(0,prefs.number("installSessionId"));assertEquals("ready",engine.state().get("status"));
+    }
+
+    @Test public void terminalCallbackDuringRestoreCannotResurrectClearedLease() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);engine.installSessionCommitted("install",73);
+        device.duringSessionExists=()->engine.installResult(73,UpdateInstallStatusPolicy.map(3,false));
+        start();assertEquals(false,engine.state().get("installerLease"));assertEquals(false,engine.state().get("recovery"));
+        assertEquals(0,prefs.number("installSessionId"));assertEquals("ready",engine.state().get("status"));
+    }
+
+    @Test public void terminalCallbackDuringCacheVerificationCannotResurrectClearedLease() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);engine.installSessionCommitted("install",73);
+        device.duringVerify=()->engine.installResult(73,UpdateInstallStatusPolicy.map(3,false));
+        start();assertEquals(false,engine.state().get("installerLease"));assertEquals(false,engine.state().get("recovery"));
+        assertEquals(0,prefs.number("installSessionId"));assertEquals("ready",engine.state().get("status"));
+    }
+
+    @Test public void corruptMetadataCannotHidePersistedStagedSessionRecovery() throws Exception {
+        candidate();engine.download(id(),"download");queue.run();engine.install(id(),"install");queue.run();
+        device.sessions.add(73);engine.installSessionPrepared("install",73);
+        Files.write(new File(cache,"candidate.json").toPath(),"invalid".getBytes(StandardCharsets.UTF_8));
+        start();assertEquals("recovery",engine.state().get("status"));assertEquals(true,engine.state().get("installerLease"));
+        assertEquals(true,engine.state().get("recovery"));assertEquals(73,prefs.number("installSessionId"));
     }
 }
