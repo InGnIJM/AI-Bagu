@@ -8,7 +8,7 @@
 
 ### 安装与首次使用
 
-当前公开版本为 [0.1.0-beta.3（预发布，code 3）](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.3)，面向 Android 10 及以上、arm64-v8a（64 位 ARM）设备。[直接下载公开 APK](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.3/bagu-0.1.0-beta.3-public-arm64-v8a.apk)，无需登录；Release 同时提供 `SHA256SUMS`、签名指纹与安装说明。在手机文件管理器中打开，按系统提示仅为该来源允许安装未知应用；完成后可关闭该许可。
+当前公开版本为 [0.1.0-beta.4（预发布，code 4）](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.4)，面向 Android 10 及以上、arm64-v8a（64 位 ARM）设备。[直接下载公开 APK](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.4/bagu-0.1.0-beta.4-public-arm64-v8a.apk)，无需登录；Release 同时提供 `SHA256SUMS`、签名指纹与安装说明。在手机文件管理器中打开，按系统提示仅为该来源允许安装未知应用；完成后可关闭该许可。
 
 安装后直接打开「八股助手」，不需要电脑常驻、ADB、外部浏览器或自行安装 Python。底部导航为「练习 / 题库 / 概览 / 设置」。具体操作见[使用指南](user-guide.md)。
 
@@ -32,11 +32,11 @@ public 构建首次启动为空题库，可新增题目、导入自己的 CSV �
 
 ### 应用内更新
 
-已有更新入口的 beta.2 可在「设置 → 应用更新 → 检查更新」发现 beta.3；下载用户不需要 GitHub 账号。自动检查默认开启，前台通常每 24 小时尝试一次，但不自动下载／安装；下载须点击，应用进入后台会取消下载。安装前须结束练习、评卷、语音和文件工作，来源权限授权返回后也要再次点击安装。只有后续启动核对实际安装版本才报告成功。
+已有更新入口的 beta.2／beta.3 可在「设置 → 应用更新 → 检查更新」发现 beta.4；下载用户不需要 GitHub 账号。自动检查默认开启，前台通常每 24 小时尝试一次，但不自动下载／安装；下载须点击，应用进入后台会取消下载。安装前须结束练习、评卷、语音和文件工作，来源权限授权返回后也要再次点击安装。只有后续启动核对实际安装版本才报告成功。
 
-beta.3 的历史验收结论不自动覆盖后续源码。当前开发候选为 `0.1.0-beta.4 / code 4`，已将 APK 安装交接迁移到系统 `PackageInstaller.Session`，并为 Android 15+ 的确认回调显式授予 creator BAL、增加非导出回调、session 恢复、`confirm` 脱敏诊断及 Android 16.1+ 开发者验证固定诊断。code 2 签名 QA 包已完成本地签名、清单、空题库、ABI、16 KiB 对齐与哈希检查；报告问题的 API36 真机、小米 HyperOS 及 vivo／ColorOS 的取消、重试、覆盖升级和数据保留验收仍未执行，因此不能把候选当成已发布结论。
+beta.4 已将 APK 安装交接迁移到系统 `PackageInstaller.Session`，并为 Android 15+ 的确认回调显式授予 creator BAL、增加非导出回调、session 恢复、`confirm` 脱敏诊断及 Android 16.1+ 开发者验证固定诊断。正式 APK 已完成签名、清单、空题库、ABI、16 KiB 对齐、附件和更新源验证；报告问题的 API36 真机、小米 HyperOS 及 vivo／ColorOS 的取消、重试、覆盖升级和数据保留验收仍未执行，不能把自动化扩大为所有手机均通过。
 
-beta.3 按通道显示 HTTP／网络／清单校验等短原因和反馈编号，自动失败只在设置页显示。进程中断后的旧检查不会重放，缺失摘要按未知状态；可复用「问题诊断」导出日志。Beta 清单已指向 beta.3，Stable 为 `release:null`，属于成功读取而非失败。旧包具备的诊断细节取决于实际构建，操作和发布准备见[专项指南](data-transfer-and-updates.md)。
+beta.4 将用户主动操作失败显示为带解决办法的弹窗；后台自动检查失败仍只在设置页显示。进程中断后的旧检查不会重放，缺失摘要按未知状态；可复用「问题诊断」导出日志。Beta 清单已指向 beta.4，Stable 为 `release:null`，属于成功读取而非失败。旧包具备的诊断细节取决于实际构建，操作和发布准备见[专项指南](data-transfer-and-updates.md)。
 
 旧 internal 包若没有该入口，需要先手动取得同包名、同签名且版本号更高的可信 APK，覆盖升级一次，不要先卸载。稳定／测试通道选择、取消、缓存恢复和验收限制见[Android 应用更新](data-transfer-and-updates.md#android-应用更新)。
 
@@ -44,11 +44,11 @@ beta.3 按通道显示 HTTP／网络／清单校验等短原因和反馈编号�
 
 ## 版本与验收边界
 
-已发布 beta.3 来自提交 `8cc586f`，标签为 `v0.1.0-beta.3`，包含语音输入、评分答案来源、SQLite v2、双端迁移、诊断日志和更新诊断。后续本地答案格式恢复改动不在该 Tag 或 APK 中；旧 beta.1／beta.2 包也不会因更新源码自动获得新功能。
+已发布 beta.4 来自提交 `ac53f341342c2266079af72e23b953aa3ae43459`，标签为 `v0.1.0-beta.4`，包含语音输入、评分答案来源、SQLite v2、双端迁移、答案格式恢复、诊断日志、安装确认修复和统一错误弹窗。旧 beta.1／beta.2／beta.3 包不会因更新源码自动获得新功能。
 
-本版已完成正式 public 构建与精确附件校验、API29 x86 QA 和 API36 最终 ARM64 APK 转译运行验收；API36 还跑通从实际 Release 下载、系统确认覆盖安装到新版启动的链路，合成题库与进度保持一致。未完成物理 ARM64／真实 16 KiB 设备验收，测试夹具问题及其他限制见[beta.3 验收记录](validation.md#beta3-公开发布)。用户截图不替代这些检查。
+本版已完成正式 public 构建、精确附件、匿名下载及 Pages 校验；此前 beta.3 在隔离 API29/API36 环境完成过应用内升级链路，但 beta.4 的新安装确认修复尚未在报告问题的 API36 物理手机运行。未完成范围见[beta.4 验收记录](validation.md#beta4-公开发布)，用户截图不替代这些检查。
 
-当前开发工作区 `version.json` 为未发布的 beta.4/code4 候选；它不改变已公开 beta.3 的 Release 或更新清单。复现 beta.3 应使用 Tag `v0.1.0-beta.3` 对应的独立、干净源码。beta.4 只准备本地签名产物和离线材料，不提交、推送、上传或修改 Pages；历史包仍保留各自[验收记录](validation.md)。
+复现 beta.4 应使用 Tag `v0.1.0-beta.4` 对应的独立、干净源码、六项附件和本地验证回执；发布后的文档同步提交不改变 Tag 或已签名 APK。历史包仍保留各自[验收记录](validation.md)。
 
 ## 前置条件
 

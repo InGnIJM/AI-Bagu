@@ -2,7 +2,7 @@
 
 [文档导航](README.md) · [CLI](cli.md) · [用户指南](user-guide.md) · [架构与数据](architecture.md)
 
-本文包含公开 beta.3（源码 `8cc586f`）的 HTTP、双模式备份、诊断和原生更新契约，迁移操作见[数据迁移与更新](data-transfer-and-updates.md)。桌面默认地址为 `http://127.0.0.1:8765`，可用 `python bagu.py serve --port 8765` 启动；Android 使用独立私有数据库和随机本机端口。这不是账号服务或公网 API。
+本文包含公开 beta.4（源码 `ac53f34`）的 HTTP、双模式备份、诊断和原生更新契约，迁移操作见[数据迁移与更新](data-transfer-and-updates.md)。桌面默认地址为 `http://127.0.0.1:8765`，可用 `python bagu.py serve --port 8765` 启动；Android 使用独立私有数据库和随机本机端口。这不是账号服务或公网 API。
 
 ## 通用约定与安全
 

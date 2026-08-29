@@ -9,7 +9,7 @@
 | 在电脑启动，完成第一轮练习 | [快速开始](../README.md#快速开始) |
 | 配模型、用语音、管理题库、导入 CSV、处理报错 | [使用指南](user-guide.md) |
 | 在 Android 安装、更新或保留数据 | [Android 指南](android-beta.md#安装更新与备份) |
-| 下载公开 APK、查看更新清单 | [beta.3 Release](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.3)、[更新源状态](data-transfer-and-updates.md#已上线的版本与更新清单) |
+| 下载公开 APK、查看更新清单 | [beta.4 Release](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.4)、[更新源状态](data-transfer-and-updates.md#已上线的版本与更新清单) |
 | 了解备份包含什么、恢复会覆盖什么 | [备份与恢复](user-guide.md#备份与恢复) |
 | 查看界面及配图来源 | [README 界面示例](../README.md)、[图片说明](images/README.md) |
 
@@ -27,15 +27,15 @@
 
 ## 版本与文档范围
 
-截至 2026-08-28，公开预发布版为 [v0.1.0-beta.3](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.3)，versionCode 为 `3`，来自精确提交 `8cc586febdb94a24185e93a5c33d979f2f0ee645`。已提供免登录 APK 下载及 Beta 更新清单，Stable 清单为成功的空通道。普通用户不需要配置 GitHub CLI 或 Pages。
+截至 2026-08-29，公开预发布版为 [v0.1.0-beta.4](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.4)，versionCode 为 `4`，来自精确提交 `ac53f341342c2266079af72e23b953aa3ae43459`。已提供免登录 APK 下载及 Beta 更新清单，Stable 清单为成功的空通道。普通用户不需要配置 GitHub CLI 或 Pages。
 
-该版本包含原 `71fbbfd` 的语音、评分答案来源及 SQLite v2，以及双端两种导出／确认导入、诊断日志、Android 更新诊断与发布工具。以下范围须区分：
+该版本包含语音、评分答案来源及 SQLite v2、双端导入导出、答案格式恢复、诊断日志、Android 安装确认修复、统一错误弹窗与发布工具。以下范围须区分：
 
-- **公开 APK**：以该 Tag、附件及[beta.3 验收记录](validation.md#beta3-公开发布)为准；源码合入或文档更新不等于手机已安装新版。
-- **本地开发工作区**：另有未提交的答案 Markdown／表格格式恢复及 `import --format-only` 改动，不包含在 beta.3。相关说明保留为本地功能，不据此承诺已发布 APK 支持。
-- **版本配置**：本次文档同步所在工作区的 `version.json` 仍为 beta.2/code2；公开 beta.3 来自独立发布工作区。本轮不改版本或合并源码，复现发布应使用对应 Tag，不能直接把当前开发树当作公开版本。
+- **公开 APK**：以该 Tag、六项附件及[beta.4 验收记录](validation.md#beta4-公开发布)为准；源码合入或文档更新不等于手机已安装新版。
+- **发布后文档**：发布状态同步可能晚于 APK 对应提交，不改变已签名附件字节或 Tag 指向。
+- **版本配置**：公开 beta.4 的构建配置为 `0.1.0-beta.4 / 4 / beta`；复现发布必须使用对应 Tag、稳定签名和发布回执，不能把任意开发树当作公开版本。
 
-[历史验收记录](validation.md)集中保存每个阶段的测试、APK 哈希、模拟器与未覆盖项。beta.3 已验证隔离环境中的实际应用内升级，但未完成物理 ARM64／真实 16 KiB 设备验收。较早章节中的“未发布／未验收”只描述当时的对象，不撤销，也不套用到新版本。
+[历史验收记录](validation.md)集中保存每个阶段的测试、APK 哈希、模拟器与未覆盖项。beta.4 已完成构建、Release、匿名附件与 Pages 验证，但报告问题的 API36 物理手机和厂商系统安装仍待反馈。较早章节中的“未发布／未验收”只描述当时的对象，不撤销，也不套用到新版本。
 
 ## 设计依据与历史计划
 

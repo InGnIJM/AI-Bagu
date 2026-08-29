@@ -2,21 +2,21 @@
 
 [项目首页](../README.md) · [Android 指南](android-beta.md) · [历史验收记录](validation.md)
 
-本文说明已发布 beta.3 的迁移／更新实现与维护者发布流程。公开版本来自 Tag `v0.1.0-beta.3`、提交 `8cc586f`，不包含开发工作区后续未提交的格式恢复改动。发布、构建、设备检查的证据及限制见[beta.3 验收记录](validation.md#beta3-公开发布)；下面的命令说明本身不构成再次执行的授权。
+本文说明已发布 beta.4 的迁移／更新实现与维护者发布流程。公开版本来自 Tag `v0.1.0-beta.4`、提交 `ac53f341342c2266079af72e23b953aa3ae43459`。发布、构建、设备检查的证据及限制见[beta.4 验收记录](validation.md#beta4-公开发布)；下面的命令说明本身不构成再次执行的授权。
 
 ## 已上线的版本与更新清单
 
-截至 2026-08-28，[beta.3 Release](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.3) 已公开为预发布版，code 为 `3`，提供 [public ARM64 空题库 APK](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.3/bagu-0.1.0-beta.3-public-arm64-v8a.apk)，下载不需要登录。
+截至 2026-08-29，[beta.4 Release](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.4) 已公开为预发布版，code 为 `4`，提供 [public ARM64 空题库 APK](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.4/bagu-0.1.0-beta.4-public-arm64-v8a.apk)，下载不需要登录。
 
 更新清单是应用读取的“小型版本目录”，不是 APK 或题库。它告诉应用版本编号、兼容要求、下载地址、大小及 SHA-256；APK 本体仍从 GitHub Releases 下载。
 
 | 入口 | 当前内容 |
 | --- | --- |
-| [源码 Tag](https://github.com/InGnIJM/AI-Bagu/tree/v0.1.0-beta.3) | 精确发布源码 `8cc586f` |
-| [Beta 清单](https://ingnijm.github.io/AI-Bagu/updates/beta.json) | `0.1.0-beta.3` / versionCode `3`，指向具体 Tag 的 APK |
+| [源码 Tag](https://github.com/InGnIJM/AI-Bagu/tree/v0.1.0-beta.4) | 精确发布源码 `ac53f34` |
+| [Beta 清单](https://ingnijm.github.io/AI-Bagu/updates/beta.json) | `0.1.0-beta.4` / versionCode `4`，指向具体 Tag 的 APK |
 | [Stable 清单](https://ingnijm.github.io/AI-Bagu/updates/stable.json) | `release:null`，暂无稳定版；是检查成功，不是 HTTP 404 |
 
-Release 网页和两份清单已匿名核验为 HTTP 200。beta 安装检查两个通道，所以 Stable 文件仍须存在。已有更新入口的 beta.2 可手动检查并升级；安装 beta.3 后，两通道都成功且无更高兼容版本时显示“当前没有兼容的新版本”。
+Release 网页和两份清单已匿名核验。beta 安装检查两个通道，所以 Stable 文件仍须存在。已有更新入口的 beta.2／beta.3 可手动检查并升级；安装 beta.4 后，两通道都成功且无更高兼容版本时显示“当前没有兼容的新版本”。
 
 ## 电脑与手机之间迁移
 
@@ -79,7 +79,7 @@ Release 网页和两份清单已匿名核验为 HTTP 200。beta 安装检查两�
 
 若系统未允许本应用安装未知应用，先显示说明，由你点击打开设置。授权返回后仍要再次点击安装，不会自动接着安装；设备策略禁止该来源时显示固定原因，不循环打开授权页。
 
-当前开发源码把再次校验通过的 APK 写入系统 `PackageInstaller.Session`：使用完整安装模式，写入后执行 `fsync`，再用显式、可变且只指向应用内非导出 Activity 的回调提交。Android 15/API 35+ 创建回调 `PendingIntent` 时显式授予 creator BAL，只用于启动系统返回的安装确认界面；确认回调到达、启动成功或失败分别写入固定 `confirm` 阶段，不记录 Intent、路径、Session ID 或系统错误正文。不再把 `content://` APK URI 交给通用文件打开流程，也不指定厂商安装器包名。最终完整签名验证仍由 Android 安装器执行，应用解析到的证书信息本身不等于完整 APK 密码学验签。该源码修复尚未自动变成已发布 beta.3 APK；须另行构建、签名和设备验收。
+beta.4 把再次校验通过的 APK 写入系统 `PackageInstaller.Session`：使用完整安装模式，写入后执行 `fsync`，再用显式、可变且只指向应用内非导出 Activity 的回调提交。Android 15/API 35+ 创建回调 `PendingIntent` 时显式授予 creator BAL，只用于启动系统返回的安装确认界面；确认回调到达、启动成功或失败分别写入固定 `confirm` 阶段，不记录 Intent、路径、Session ID 或系统错误正文。不再把 `content://` APK URI 交给通用文件打开流程，也不指定厂商安装器包名。最终完整签名验证仍由 Android 安装器执行，应用解析到的证书信息本身不等于完整 APK 密码学验签。该修复已进入 beta.4 签名 APK；报告问题的 API36 物理手机及厂商系统仍须继续验收。
 
 系统回调为成功、打开确认界面或下载完成，都不直接代表升级已经由本应用核实。只有后续进程启动核对实际已安装版本后才报告成功；用户取消后废弃该系统会话并保留完整缓存，允许再次点击安装。不支持同版本覆盖或降级。
 
@@ -154,7 +154,7 @@ Pages 必须在这些时点就绪，避免先签名或公开 Release 才发现�
 
 GitHub JSON 请求用 [`gh api --include`](https://cli.github.com/manual/gh_api) 读取并保留真实 HTTP 状态，但不输出响应头／正文或工具 stderr；401/403、404、429、5xx 和无响应分别报告，404 不统一解释为未配置。附件校验仍使用纯二进制字节，不混入 HTTP 头。Pages 部署延迟时可稍后重试，不绕过就绪检查。
 
-`0.1.0-beta.3 / 3` 已公开分发，不再是可重复使用的候选编号。当前开发工作区已明确采用未发布的 `0.1.0-beta.4 / 4`；本地构建不代表远端不存在冲突，也不代表已经发布。公开发布前仍须使用精确、干净且已推送的源码执行远端预检；若有冲突则停止，不能重建替换或覆盖旧版本。
+`0.1.0-beta.4 / 4` 已公开分发，不再是可重复使用的候选编号。后续版本仍须使用精确、干净且已推送的源码执行远端预检；若有冲突则停止，不能重建替换或覆盖旧版本。
 
 ### 中断的本地准备
 
@@ -164,23 +164,23 @@ GitHub JSON 请求用 [`gh api --include`](https://cli.github.com/manual/gh_api)
 
 ### 公开发布与 feed 恢复
 
-只有维护者另外明确确认仓库、版本、六个精确附件及验收范围后才执行发布。以下记录 beta.3 发布时使用的命令，**本版已经发布，无需再次执行**；以后应替换为另行确认的新版本，并与干净发布工作区的 `version.json` 完全一致。确认参数不带 Tag 的 `v` 前缀：
+只有维护者另外明确确认仓库、版本、六个精确附件及验收范围后才执行发布。以下记录 beta.4 发布时使用的命令，**本版已经发布，无需再次执行**；以后应替换为另行确认的新版本，并与干净发布工作区的 `version.json` 完全一致。确认参数不带 Tag 的 `v` 前缀：
 
 ```powershell
-python .\scripts\release_github.py publish --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.3
+python .\scripts\release_github.py publish --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.4
 ```
 
 流程为：验证回执与实际 APK、确认 Pages 就绪 → 创建或续用匹配草稿 → 上传允许附件并核验远端字节 → 公开 Release → 匿名验证附件 → 更新 `codex/update-feed` 分支 → 验证实际 Pages 内容。beta 创建 prerelease；不会覆盖冲突 tag／附件、强推或删除 Release，也不会改变当前本地 checkout。只有同 commit、同内容的草稿可续传；已公开但缺少附件的 Release 不会被偷偷补写。
 
-Pages 来源为 `codex/update-feed`、根目录 `/`，由维护者另行配置，脚本不会自动修改。当前 Beta 指向 beta.3、Stable 保持空通道；后续发布仍须逐次验证固定清单的匿名可达性与精确内容。
+Pages 来源为 `codex/update-feed`、根目录 `/`，由维护者另行配置，脚本不会自动修改。当前 Beta 指向 beta.4、Stable 保持空通道；后续发布仍须逐次验证固定清单的匿名可达性与精确内容。
 
 若输出 `PARTIAL`／退出码 2，表示 Release 已公开，但匿名附件、feed 或 Pages 核验尚未完成。不要重建另一个同版本包，也不要删除已公开 Release。保留精确源码与附件，排查后仅重试：
 
 ```powershell
-python .\scripts\release_github.py feed --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.3
+python .\scripts\release_github.py feed --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.4
 ```
 
-`feed` 恢复命令也须在对应发布源码、原始精确附件与 `verification.json` 所在的工作区执行；当前 beta.3 已验证成功，不需要重试。它只接受精确匹配的已公开 Release，仍检查本地回执与远端附件，不能把草稿当成已发布版本。更新当前通道时保留另一通道，未发布过的通道用 `release: null`，拒绝通道降级和同版本内容冲突。即使另一通道已有更高版本，也不应阻止修复本通道已发布版本的 feed。最终分别核对 Release、匿名附件和 Pages 的结果，不把其中一项成功当成全部完成。
+`feed` 恢复命令也须在对应发布源码、原始精确附件与 `verification.json` 所在的工作区执行；当前 beta.4 已验证成功，不需要重试。它只接受精确匹配的已公开 Release，仍检查本地回执与远端附件，不能把草稿当成已发布版本。更新当前通道时保留另一通道，未发布过的通道用 `release: null`，拒绝通道降级和同版本内容冲突。即使另一通道已有更高版本，也不应阻止修复本通道已发布版本的 feed。最终分别核对 Release、匿名附件和 Pages 的结果，不把其中一项成功当成全部完成。
 
 ## 许可、隐私与验收记录
 
@@ -188,4 +188,4 @@ python .\scripts\release_github.py feed --execute --confirm-repository InGnIJM/A
 
 第三方字体、图标和 Android／Python／Chaquopy 等运行时或依赖保留各自许可证。已有字体声明位于 [assets/fonts](../assets/fonts/)；发布时应核对随包依赖与所需声明，不用项目 MIT 替代它们。不得提交或上传 `.env`、模型配置、真实数据库、备份、草稿、签名私钥或密码。
 
-最终验收须分别记录源码版本、测试／lint、精确 public APK 与签名／哈希、API 29／36 隔离迁移与两版本安装、Release、Pages，以及失败或未覆盖项。当前公开版本见 [beta.3 发布验收](validation.md#beta3-公开发布)；[beta.2 本地验收](releases/0.1.0-beta.2-validation.md)保留为历史对象，不能当作本版或所有真机的通过证明。
+最终验收须分别记录源码版本、测试／lint、精确 public APK 与签名／哈希、API 29／36 隔离迁移与两版本安装、Release、Pages，以及失败或未覆盖项。当前公开版本见 [beta.4 发布验收](validation.md#beta4-公开发布)；[beta.2 本地验收](releases/0.1.0-beta.2-validation.md)保留为历史对象，不能当作本版或所有真机的通过证明。

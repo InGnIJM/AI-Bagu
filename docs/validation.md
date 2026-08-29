@@ -2,13 +2,13 @@
 
 [文档导航](README.md) · [开发与测试](development.md) · [Android 构建与交付](android-beta.md)
 
-本页按功能与产物记录验收证据，包括从原 README 和 Android Beta 文档迁移的历史记录。**数字、哈希和设备结果仅适用于各节明确注明的源码或产物，不能代表所有后续版本。** 最新公开版本为下方的 [beta.3](#beta3-公开发布)；本地格式恢复、较早体验包及源码实施阶段分别保留，不把后来的发布结果回填为当时已验收。
+本页按功能与产物记录验收证据，包括从原 README 和 Android Beta 文档迁移的历史记录。**数字、哈希和设备结果仅适用于各节明确注明的源码或产物，不能代表所有后续版本。** 最新公开版本为下方的 [beta.4](#beta4-公开发布)；较早体验包及源码实施阶段分别保留，不把后来的发布结果回填为当时已验收。
 
 ## 如何阅读
 
 | 记录 | 对象 | 不能据此推断 |
 | --- | --- | --- |
-| 2026-08-29 beta.4 本地候选 | 当前未提交工作区、精确 public ARM64 候选 APK、同签名 code 2 QA 包与自动化 | 已在报告问题的 API36 物理手机完成安装、已提交源码或已公开发布 beta.4 |
+| 2026-08-29 beta.4 公开发布 | `ac53f34`、精确 public ARM64 APK、Release／Pages、同签名 code 2 QA 包与自动化 | 报告问题的 API36 物理手机和厂商机型已完成安装验收 |
 | 2026-08-28 beta.3 公开发布 | `8cc586f`、精确 public ARM64 APK、隔离设备及真实 Release／Pages／应用内升级 | 所有真机通过、后续未提交格式恢复已打包、原仪器测试夹具问题已修复 |
 | 2026-08-28 答案格式恢复 | 后续本地工作区、合成自动化与单独授权的本地数据恢复 | beta.3 包含这些改动、手机题库自动同步 |
 | 2026-08-28 更新诊断体验 APK | 明确哈希的 public ARM64 同版本体验包、实际构建/签名/内容校验 | 已安装手机、API29/API36 设备通过、正式版本递增或 GitHub/Pages 上线 |
@@ -19,13 +19,13 @@
 | 2026-08-28 事务修复 | 源码基线 `997fe91` | 原 `0.1.0-beta.1` 安装包包含修复 |
 | 2026-08-27 Android Beta | 明确哈希的历史 APK 与当时测试 | 之后的源码或新包已经完成同等验收 |
 
-早期基础文档核对的源码为 `71fbbfd`，包含语音提交 `5ab4140` 和后续评分更新；公开 beta.3 对应的精确源码则为 `8cc586f`。较早章节中的“本轮未发布／未验收”仅描述各自当时的对象，相关失败与限制不删除。
+早期基础文档核对的源码为 `71fbbfd`，公开 beta.3 对应 `8cc586f`，公开 beta.4 对应 `ac53f341342c2266079af72e23b953aa3ae43459`。较早章节中的“本轮未发布／未验收”仅描述各自当时的对象，相关失败与限制不删除。
 
 后续迁移、自动更新和发布工作应在完成后另外记录源码、精确产物、测试环境及结果；不能用开发计划的勾选项或用户截图替代验收证据。
 
-## beta.4 本地候选（未公开发布）
+## beta.4 公开发布
 
-日期：2026-08-29。本节记录 Android 安装确认修复、统一错误弹窗和 Compact Editorial 更新提示在当前**未提交工作区**的本地证据。没有提交、推送、创建 Tag、上传附件、修改 Pages 或更新远端 feed；下列产物不能冒充与精确 Git 提交绑定的正式发布回执。
+日期：2026-08-29。Android 安装确认修复、统一错误弹窗和 Compact Editorial 更新提示先在本地候选与 code 2 QA 包验证；随后经用户明确确认，在隔离干净工作区以精确提交 `ac53f341342c2266079af72e23b953aa3ae43459` 重新测试、签名构建并公开发布。Tag 为 `v0.1.0-beta.4`，发布分支为 `codex/release-beta4-public`。
 
 ### 实现与自动化
 
@@ -37,18 +37,19 @@
 - `scripts/android.ps1 -Mode Verify` 对下述 beta.4 精确 APK 通过：包名／版本、稳定签名、public 空种子、仅 ARM64、ZIP 以及 **68 个原生 ELF 的 16 KiB LOAD 对齐与 GNU_RELRO** 均符合约束。
 - 桌面与窄屏合成页面检查了错误弹窗的焦点、纯文本、长消息滚动和动作布局；视觉检查发现弹窗背景引用了未定义 token，随后固定为白色并限制长消息高度。自动化另覆盖 Escape、Tab 循环、焦点恢复、更新去重、错误优先和后台失败静默。
 
-### 本地产物
+### 发布产物与本地 QA
 
-- beta.4 候选：`dist/android/0.1.0-beta.4/public/bagu-0.1.0-beta.4-public-arm64-v8a.apk`，**29,957,285 字节**，SHA-256 `e67342481f3dbe50eb780d8a04d2c1bf1483e58a7d91f14937cf8330d8841308`，versionName `0.1.0-beta.4`、versionCode `4`、beta 通道。
+- [公开 beta.4 APK](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.4/bagu-0.1.0-beta.4-public-arm64-v8a.apk)：**29,956,897 字节**，SHA-256 `72688b17e48243e121b9f3cabe47a6fafa9a8561aceceb7590bf1eeeedcd225a`，versionName `0.1.0-beta.4`、versionCode `4`、beta 通道。它由发布准备从精确提交重新构建，不复用此前未绑定提交的候选字节。
+- 发布前本地候选为 **29,957,285 字节**，SHA-256 `e67342481f3dbe50eb780d8a04d2c1bf1483e58a7d91f14937cf8330d8841308`；该哈希不是公开附件，保留只用于说明不同工作区构建不能互相冒充。
 - 同签名 code 2 QA 包：`build/qa/bagu-install-fix-code2-public-arm64-v8a.apk`，**29,957,285 字节**，SHA-256 `4aa2592bbf75639f5b13ba9cdfe94a8056eecccb34957b651d211e445bb21364`。它用于先覆盖当前体验包再检查应用内升级链路，不是公开版本。
-- 两包证书 SHA-256 均为 `ac92a24f30a5e6c10c4ced0d0db89124f39f36e00778fef6ca3ba4973bdf0ee3`；复用既有稳定身份，没有重新生成或输出签名凭据。beta.4 本地目录恰有 APK、`SHA256SUMS`、证书指纹、`update.json`、安装说明和发布说明六项文件。
+- 公开 APK、本地候选和 code 2 QA 包的证书 SHA-256 均为 `ac92a24f30a5e6c10c4ced0d0db89124f39f36e00778fef6ca3ba4973bdf0ee3`；复用既有稳定身份，没有重新生成或输出签名凭据。Release 恰有 APK、`SHA256SUMS`、证书指纹、`update.json`、安装说明和发布说明六项附件。
 - 一次 UI 最终修正前的候选输出已保留为 `dist/android/0.1.0-beta.4/public.interrupted-ui-before-white-card`，明确标记为中断产物，不应安装或发布。
 
-### 尚未完成与发布边界
+### 发布状态与尚未完成
 
-当前 ADB 只发现 API32 x86_64 模拟环境，与 ARM64 交付包及报告问题的 API36 手机不匹配，因此没有为追求“已安装”而强制安装、清除数据或改 ABI。仍需在报告问题的 API36 物理手机验证首次来源授权、系统确认页出现、取消后重试、同签名覆盖升级、启动后的 code 核对和数据保留；正式发布前还需覆盖小米 HyperOS 及至少一台 vivo／ColorOS 设备。
+当前 ADB 只发现 API32 x86_64 模拟环境，与 ARM64 交付包及报告问题的 API36 手机不匹配，因此没有为追求“已安装”而强制安装、清除数据或改 ABI。仍需在报告问题的 API36 物理手机验证首次来源授权、系统确认页出现、取消后重试、同签名覆盖升级、启动后的 code 核对和数据保留；并继续覆盖小米 HyperOS 及至少一台 vivo／ColorOS 设备。
 
-离线 `preflight` 与 `prepare` dry-run 都按预期在“dirty checkout”门禁停止：源码尚未明确审阅并提交，脚本拒绝生成可冒充精确提交的发布回执。没有绕过该门禁，也没有运行 `publish`／`feed`、调用登录凭据或写远端。公开发布和 Git 操作仍需要另行明确授权。
+[Release / Tag：v0.1.0-beta.4](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.4) 为公开预发布版（`draft=false`、`prerelease=true`），目标提交为 `ac53f34`。发布脚本返回 `Release=verified; anonymous assets=verified; Pages=verified`；独立读回确认六附件、Beta 清单的 code 4／大小／哈希以及 Stable `release:null`。`codex/update-feed` 只更新 Beta，未覆盖 Stable。发布后只修正了 Release 正文中已过时的候选措辞，不替换附件、Tag 或 feed 字节。
 
 ## beta.3 公开发布
 
