@@ -3660,6 +3660,40 @@ def test_list_questions_supports_search_filter_and_pagination(conn):
     assert page["categories"] == ["MySQL", "Redis"]
 
 
+def test_list_questions_search_excludes_url_only_matches(conn):
+    visible_match_id = conn.execute(
+        "INSERT INTO questions(category, question, answer, url) VALUES(?,?,?,?)",
+        (
+            "计算机网络",
+            "HTTP 状态码如何分类？",
+            "HTTP 响应状态码分为五类。",
+            "https://source.example/http-status",
+        ),
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO questions(category, question, answer, url) VALUES(?,?,?,?)",
+        (
+            "计算机网络",
+            "TCP 为什么需要三次握手？",
+            "客户端和服务端需要确认双方的收发能力。",
+            "https://source.example/tcp-handshake",
+        ),
+    )
+    conn.commit()
+
+    http_results = bagu.list_questions(
+        conn, query="http", category="计算机网络"
+    )
+    assert http_results["total"] == 1
+    assert [item["id"] for item in http_results["items"]] == [visible_match_id]
+
+    url_results = bagu.list_questions(
+        conn, query="source.example", category="计算机网络"
+    )
+    assert url_results["total"] == 0
+    assert url_results["items"] == []
+
+
 def test_question_crud_and_search_include_answer(conn):
     created = bagu.create_question(
         conn,
@@ -4226,6 +4260,41 @@ def test_api_questions_crud_import_and_management_page(conn, tmp_path):
     assert "查看答案" in html
     assert "bindAnswerImageFallbacks" in html
     assert "item.answer_html" in html
+
+
+def test_api_questions_search_excludes_url_only_matches(conn, tmp_path):
+    visible_match_id = conn.execute(
+        "INSERT INTO questions(category, question, answer, url) VALUES(?,?,?,?)",
+        (
+            "计算机网络",
+            "HTTP 缓存如何工作？",
+            "HTTP 缓存通过响应头控制复用策略。",
+            "https://source.example/http-cache",
+        ),
+    ).lastrowid
+    distractor_id = conn.execute(
+        "INSERT INTO questions(category, question, answer, url) VALUES(?,?,?,?)",
+        (
+            "计算机网络",
+            "TCP 流量控制如何工作？",
+            "接收窗口用于限制发送方的数据量。",
+            "https://source.example/tcp-flow-control",
+        ),
+    ).lastrowid
+    conn.commit()
+
+    code, payload, _ = bagu.handle_http(
+        "GET",
+        "/api/questions?q=http&cat=计算机网络&page=1&page_size=20",
+        None,
+        conn,
+        tmp_path,
+    )
+
+    assert code == 200
+    assert payload["total"] == 1
+    assert [item["id"] for item in payload["items"]] == [visible_match_id]
+    assert distractor_id not in {item["id"] for item in payload["items"]}
 
 
 @contextmanager

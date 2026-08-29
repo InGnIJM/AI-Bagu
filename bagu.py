@@ -1694,9 +1694,9 @@ def list_questions(conn, query="", category="", page=1, page_size=20):
         needle = f"%{_like_literal(query)}%"
         where.append(
             """(question LIKE ? ESCAPE '\\' OR category LIKE ? ESCAPE '\\'
-                OR answer LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\')"""
+                OR answer LIKE ? ESCAPE '\\')"""
         )
-        params.extend([needle, needle, needle, needle])
+        params.extend([needle, needle, needle])
     if category:
         where.append("category = ?")
         params.append(category)

@@ -162,11 +162,11 @@
 
 - `version.json` 是 versionName/versionCode/channel 来源；默认 public 空题库构建，internal 必须显式指定且不可公开。自有源码 MIT 不重新授权题库、第三方字体、素材或运行时
 - 更新默认仅自动检查，前台／页面就绪且通常距上次尝试 24 小时；手动可绕过间隔。stable 读 stable，beta 读两通道取最高兼容整数 code；部分失败不得报告已最新
-- 更新失败在发生位置生成 `UpdateFailure` 固定码与可选真实 HTTP 状态，不匹配异常消息。不可变 `UpdateDiagnostic` 通过 `AndroidDiagnostics` 的 `native.update` 白名单落盘／导出，不记录正文、完整 URL、路径或异常消息；日志失败不影响更新结果
+- 更新失败在发生位置生成 `UpdateFailure` 固定码与可选真实 HTTP 状态，不匹配异常消息；Android 16.1+ 开发者验证／高级保护使用 1303。不可变 `UpdateDiagnostic` 通过 `AndroidDiagnostics` 的 `native.update` 白名单落盘／导出，不记录正文、完整 URL、路径或异常消息；日志失败不影响更新结果
 - 接受操作后才生成 `n_` +32 hex 诊断编号，两通道共用、取消沿用；节流／忙拒绝不抹掉旧编号，回调捕获所属操作。保留 getUpdateState/bagu-update 旧字段，lastCheck 是最多4KiB安全摘要；checking 重启变 interrupted，缺失/非法为 unknown，摘要写失败仅内存降级，不放宽安装状态持久化
 - 自动检查失败仅设置页显示，不弹窗／切页；手动检查显示通道短原因及编号。网页不重复记录原生错误，诊断导出与安装互斥，未结束练习仍可导出
 - 下载须用户操作，可取消，进入后台取消；不承诺断点续传。固定 feed／仓库、有限 HTTPS 重定向、64 KiB 清单／128 MiB APK、完整 hash/size/版本/包名/ABI/证书检查不得放宽
-- 安装前再次验证缓存与本机状态；open 会话、评卷、语音、文件操作和待确认导入都阻止安装。不自动结束会话；来源权限须明确打开设置，返回后再次点击安装。只用专用只读临时 URI；安装器返回不等于成功，后续启动核对实际版本才确认
+- 安装前再次验证缓存与本机状态；open 会话、评卷、语音、文件操作和待确认导入都阻止安装。不自动结束会话；来源权限须明确打开设置，返回后再次点击安装。只用系统 `PackageInstaller.Session` 交接已校验字节及非导出显式可变回调，不恢复 APK `ACTION_VIEW`／临时 Provider 或厂商包名；系统回调不等于成功，后续启动核对实际版本才确认
 - 「稍后」只关闭当前通知，不永久忽略版本或关闭自动检查。缓存损坏恢复不得绕过校验，也不能替换仍交给安装器使用的文件；必须纳入隔离设备验收
 - `scripts/release_github.py` 的 init-feed/preflight/prepare/publish/feed 默认离线 dry-run。init-feed 独立于脏工作区、版本递增、源码已推送及 APK/Release；执行仍须 `--execute --confirm-repository InGnIJM/AI-Bagu`，先确认仓库与 Git 数据可访问，再将分支404视作缺失；只补固定清单文件，保留合法原字节，拒绝额外文件/链接/冲突，不强推
 - 所有 `--execute` 使用维护者已登录的 gh，prepare 也不是离线模式。仅发布阶段要求干净、已推送的精确源码；脚本不自动登录、提交／推送源码、改可见性/Pages配置或重建签名。init-feed 成功仅代表分支就绪，Pages 由维护者配置为 codex/update-feed 根目录

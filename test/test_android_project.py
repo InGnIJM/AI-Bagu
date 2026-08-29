@@ -670,6 +670,123 @@ def test_web_android_offline_assets_and_legacy_parse_contract():
     assert "button:focus," in html and "body.android-app" in html
 
 
+def _web_css_rules():
+    html = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    css = html.split("<style>", 1)[1].split("</style>", 1)[0]
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    rules = []
+    for order, (selectors, body) in enumerate(re.findall(r"([^{}]+)\{([^{}]+)\}", css)):
+        declarations = {
+            key.strip(): value.strip()
+            for declaration in body.split(";")
+            if ":" in declaration
+            for key, value in [declaration.split(":", 1)]
+        }
+        for selector in selectors.split(","):
+            selector = selector.strip()
+            if selector and not selector.startswith("@"):
+                rules.append((selector, declarations, order))
+    return rules
+
+
+def _simple_css_selector_matches(selector, node):
+    if any(token in selector for token in (":", "[", "]")):
+        return False
+    tag = re.match(r"^[a-zA-Z][\w-]*|^\*", selector)
+    if tag and tag.group() != "*" and node["tag"] != tag.group():
+        return False
+    ids = re.findall(r"#([\w-]+)", selector)
+    if ids and node.get("id") not in ids:
+        return False
+    return set(re.findall(r"\.([\w-]+)", selector)) <= node["classes"]
+
+
+def _css_selector_matches_path(selector, path):
+    if ">" in selector:
+        return False
+    parts = selector.split()
+    if not parts or not _simple_css_selector_matches(parts[-1], path[0]):
+        return False
+    ancestor = 1
+    for part in reversed(parts[:-1]):
+        while ancestor < len(path) and not _simple_css_selector_matches(part, path[ancestor]):
+            ancestor += 1
+        if ancestor == len(path):
+            return False
+        ancestor += 1
+    return True
+
+
+def _css_specificity(selector):
+    ids = len(re.findall(r"#[\w-]+", selector))
+    classes = len(re.findall(r"\.[\w-]+|\[[^]]+\]|:(?!:)[\w-]+", selector))
+    tags = sum(
+        bool(re.match(r"^[a-zA-Z][\w-]*", part))
+        for part in re.split(r"\s+|>", selector)
+        if part and part != "*"
+    )
+    return ids, classes, tags
+
+
+def _css_declarations_for(selector):
+    declarations = {}
+    for candidate, body, _ in _web_css_rules():
+        if candidate == selector:
+            declarations.update(body)
+    return declarations
+
+
+def _css_grid_tracks(value):
+    tracks, token, depth = [], [], 0
+    for char in value:
+        if char.isspace() and depth == 0:
+            if token:
+                tracks.append("".join(token))
+                token = []
+            continue
+        token.append(char)
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+    if token:
+        tracks.append("".join(token))
+    return [re.sub(r"\s+", "", track) for track in tracks]
+
+
+def test_pager_icon_font_is_not_overridden_by_page_counter_styles():
+    icon_path = [
+        {"tag": "span", "id": "", "classes": {"material-symbols-rounded"}},
+        {"tag": "button", "id": "q-prev", "classes": {"compact-btn"}},
+        {"tag": "div", "id": "q-pager", "classes": {"pager"}},
+        {"tag": "body", "id": "", "classes": {"android-app"}},
+    ]
+    candidates = [
+        (_css_specificity(selector), order, body["font-family"])
+        for selector, body, order in _web_css_rules()
+        if "font-family" in body and _css_selector_matches_path(selector, icon_path)
+    ]
+
+    assert max(candidates)[2] == "'Material Symbols Rounded'"
+
+
+def test_android_pager_uses_centered_single_row_tracks():
+    pager = _css_declarations_for("body.android-app .pager")
+    page_info = _css_declarations_for("#q-page-info")
+    button = _css_declarations_for("body.android-app .pager button")
+
+    assert not _css_declarations_for(".pager span")
+    assert _css_grid_tracks(pager["grid-template-columns"]) == [
+        "minmax(0,1fr)", "auto", "minmax(0,1fr)",
+    ]
+    assert page_info.get("text-align") == "center"
+    assert page_info.get("white-space") == "nowrap"
+    assert button.get("min-width") == "0"
+    assert button.get("width") == "100%"
+    assert button.get("justify-content") == "center"
+    assert button.get("white-space") == "nowrap"
+
+
 @pytest.mark.parametrize("selector", [
     "body.android-app .question-meta a",
     "body.android-app .markdown-body a:not(.answer-image-link)",

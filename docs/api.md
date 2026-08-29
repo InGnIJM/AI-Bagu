@@ -21,7 +21,7 @@
 | GET | `/assets/...` | 允许的本地字体和品牌图标，不是任意文件服务 |
 | GET | `/api/stats` | 统计及 `open_session_id` |
 | GET | `/api/session` | 当前 open 会话、全部本轮题目和未判题 |
-| GET | `/api/questions` | `q`、`cat`、`page`、`page_size` 分页查询 |
+| GET | `/api/questions` | `q` 搜索题目、答案和分类；`cat`、`page`、`page_size` 用于筛选和分页 |
 | POST | `/api/questions` | 新增题目；成功为 201 |
 | PUT | `/api/questions/:id` | 修改题目，不重置进度 |
 | DELETE | `/api/questions/:id` | 删除从未进入会话的题目 |
@@ -132,7 +132,7 @@ HTTP 请求体、认证或 Android 地址校验失败可能先返回普通 JSON 
 
 `PUT` 是提交完整题目字段，不是局部补丁；省略的 `answer`、`url` 会成为空字符串。`category + question` 唯一；新增/修改重复题返回 400。返回题目对象包含上述四字段及 `id`、`answer_html`、`level`、`times_seen`、`times_right`、`next_due`、`last_reviewed`。修改仅更改题目内容，不重置调度。
 
-查询参数：`q` 在题干、答案、分类、URL 中做文本搜索，`cat` 精确匹配分类；`page` 默认 1 且至少 1，`page_size` 默认 20，范围 1–100。响应为 `{items, total, page, page_size, pages, categories}`；题目按 ID 倒序，`categories` 是全题库分类列表。非法分页返回 400。
+查询参数：`q` 在题干、答案、分类中做文本搜索，`cat` 精确匹配分类；`page` 默认 1 且至少 1，`page_size` 默认 20，范围 1–100。响应为 `{items, total, page, page_size, pages, categories}`；题目按 ID 倒序，`categories` 是全题库分类列表。非法分页返回 400。
 
 删除成功返回 `{"deleted":true,"id":12}`；已有任意会话引用的题目返回 409，即使该会话已经关闭。不存在的数字题目 ID 在修改/删除时返回 400。
 

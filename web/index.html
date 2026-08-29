@@ -1270,7 +1270,14 @@
       gap: 12px;
       margin-top: 20px;
     }
-    .pager span { font-family: var(--font-mono); font-size: 13px; font-weight: 700; color: var(--color-muted-fg); }
+    #q-page-info {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--color-muted-fg);
+      text-align: center;
+      white-space: nowrap;
+    }
     .empty-state {
       text-align: center;
       color: var(--color-muted-fg);
@@ -1468,9 +1475,17 @@
     body.android-app .lib-ops button { justify-content: center; padding: 0 6px; }
     body.android-app .quiz-actions { grid-template-columns: minmax(0, 1fr); }
     body.android-app .review-grid { grid-template-columns: 1fr 1fr; }
-    body.android-app .pager { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; }
-    body.android-app .pager button { padding: 0 8px; }
-    body.android-app .pager span { text-align: center; }
+    body.android-app .pager { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; }
+    body.android-app .pager button {
+      width: 100%;
+      min-width: 0;
+      justify-content: center;
+      gap: 4px;
+      padding: 0 6px;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    body.android-app .pager .material-symbols-rounded { flex: 0 0 auto; font-size: 18px; }
     body.android-app .markdown-body pre, body.android-app .answer-table-wrap { max-width: 100%; }
     body.android-app .markdown-body pre { white-space: pre; overflow-wrap: normal; }
     body.android-app .answer-media img { max-width: 100%; height: auto; }
@@ -1507,6 +1522,9 @@
       body.android-app .card { padding: 16px 12px; }
       body.android-app .stats { gap: 6px; }
       body.android-app .stat .v { font-size: 18px; }
+      body.android-app .pager { gap: 6px; }
+      body.android-app .pager button { gap: 2px; padding: 0 2px; font-size: 12px; }
+      body.android-app .pager .material-symbols-rounded { font-size: 16px; }
     }
     @media (prefers-reduced-motion: reduce) {
       * { transition: none !important; animation: none !important; }
@@ -1889,7 +1907,7 @@
           <div class="manage-toolbar">
             <div class="field">
               <label for="q-search">搜索题目</label>
-              <input id="q-search" type="search" placeholder="题目、答案、分类或 URL">
+              <input id="q-search" type="search" placeholder="题目、答案或分类">
             </div>
             <div class="field">
               <label for="q-filter-cat">分类筛选</label>
