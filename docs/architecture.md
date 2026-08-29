@@ -47,6 +47,8 @@ Android Activity / WebView ── 受令牌保护的 loopback HTTP
 
 新 level 1 / 2 / 3 的倍率分别为 1 / 2 / 4。每次成功评分都令 `times_seen + 1`，设置 `last_reviewed = 今天`、`next_due = 今天 + 间隔`。统计中的“已掌握”为 `level >= 3`；因为 hard 也升级，level 不等同于连续答对次数。调度是本项目的简化规则，不是完整 SM-2 算法。
 
+统计接口保留兼容字段 `due`，表示新题与到期复习题的总和；`review_due` 只包含 `next_due` 非空且不晚于本地今天的题，`new_count` 只包含 `next_due` 为空的题。分类统计同时返回 `seen` 与 `mastered`，看板“分类掌握度”使用 `mastered / total`，不再用“至少刷过一次”冒充掌握度。
+
 ## SQLite 与版本迁移
 
 | 表 | 持久数据与约束 |

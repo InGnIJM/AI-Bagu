@@ -49,7 +49,7 @@
 
 ## 统计与会话
 
-`GET /api/stats` 返回 `total`、`due`、`mastered`、`by_cat`、`open_session_id`。`due` 包含到期题和新题，`mastered` 为 `level >= 3`；`by_cat` 每项为 `{category, total, seen, due_n}`，其中 `seen` 是复习过的题数。
+`GET /api/stats` 返回 `total`、`due`、`review_due`、`new_count`、`mastered`、`by_cat`、`open_session_id`。为兼容旧调用方，`due` 仍表示当前可抽题数（到期题加新题）；`review_due` 只统计已进入调度且不晚于本地今天的题，`new_count` 只统计 `next_due` 为空的新题，且 `due = review_due + new_count`。`mastered` 为 `level >= 3`；`by_cat` 每项为 `{category, total, seen, mastered, due_n}`，其中 `seen` 是至少复习过一次的题数，`mastered` 是该分类已掌握题数，`due_n` 是该分类当前可抽题数。
 
 `POST /api/draw` 的 `n` 建议传正整数，省略时为 5；`cat` 按完整分类名过滤，省略/空值表示全部分类。响应为 `{session_id, questions}`；没有可选题时返回 `{"session_id":null,"questions":[]}`，不会创建会话。
 

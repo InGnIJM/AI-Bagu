@@ -464,13 +464,42 @@ def test_grade_wrong_session_or_question(conn):
         bagu.grade(conn, sid, outsider, "good")
 
 
-def test_stats_counts(conn):
-    _seed(conn, 4)
-    sid, rows = bagu.draw(conn, 4)
-    bagu.grade(conn, sid, rows[0]["id"], "easy")
-    s = bagu.stats(conn)
-    assert s["total"] == 4 and s["due"] == 3 and s["mastered"] <= 4
-    assert s["by_cat"][0]["category"] == "测试"
+def test_stats_separates_new_review_due_and_mastered_by_category(conn):
+    _seed(conn, 5)
+    today = dt.date.today()
+    conn.execute(
+        "UPDATE questions SET category='A' WHERE id IN (1,2,3)"
+    )
+    conn.execute(
+        "UPDATE questions SET category='B' WHERE id IN (4,5)"
+    )
+    conn.execute(
+        "UPDATE questions SET times_seen=1, level=1, next_due=? WHERE id=2",
+        ((today - dt.timedelta(days=1)).isoformat(),),
+    )
+    conn.execute(
+        "UPDATE questions SET times_seen=2, level=3, next_due=? WHERE id=3",
+        (today.isoformat(),),
+    )
+    conn.execute(
+        "UPDATE questions SET times_seen=1, level=2, next_due=? WHERE id=4",
+        ((today + dt.timedelta(days=1)).isoformat(),),
+    )
+    conn.commit()
+
+    result = bagu.stats(conn)
+
+    assert result == {
+        "total": 5,
+        "due": 4,
+        "review_due": 2,
+        "new_count": 2,
+        "mastered": 1,
+        "by_cat": [
+            {"category": "A", "total": 3, "seen": 2, "mastered": 1, "due_n": 3},
+            {"category": "B", "total": 2, "seen": 1, "mastered": 0, "due_n": 1},
+        ],
+    }
 
 
 def test_skip_closes_without_scheduling(conn):
@@ -595,7 +624,8 @@ def test_main_full_flow(monkeypatch, tmp_path, capsys):
     bagu.main(["grade", sid, "1", "good"])
     bagu.main(["stats"])
     out = capsys.readouterr().out
-    assert "总题数: 2" in out
+    assert "总题数: 2 | 今日复习: 0 | 未学习: 1 | 可抽题: 1 | 已掌握(level>=3): 0" in out
+    assert "类别" in out and "已刷" in out and "已掌握" in out and "可抽" in out
     bagu.main(["list"])
     assert "问题0" in capsys.readouterr().out
 
@@ -2422,6 +2452,7 @@ def test_http_more_routes(conn, tmp_path, monkeypatch):
     assert ctype == "image/png"
     code, st, _ = bagu.handle_http("GET", "/api/stats", None, conn, tmp_path)
     assert code == 200 and st["open_session_id"] is None
+    assert st["due"] == 2 and st["review_due"] == 0 and st["new_count"] == 2
     code, sess, _ = bagu.handle_http("GET", "/api/session", None, conn, tmp_path)
     assert sess["session_id"] is None
     _, drawn, _ = bagu.handle_http("POST", "/api/draw", {"n": 1, "cat": "A"}, conn, tmp_path)
@@ -2548,7 +2579,7 @@ function $(id) { return nodes[id] || (nodes[id] = {
 const snapshots = [];
 const select = $('practice-cat');
 function snapshot() { snapshots.push({value: select.value, html: select.innerHTML, disabled: select.disabled}); }
-const stats = {by_cat: [{category: 'MySQL', total: 3, seen: 1}, {category: '网络 & <协议> "基础"', total: 2, seen: 0}]};
+const stats = {by_cat: [{category: 'MySQL', total: 3, seen: 1, mastered: 0}, {category: '网络 & <协议> "基础"', total: 2, seen: 0, mastered: 0}]};
 renderCats(stats); snapshot();
 select.value = 'MySQL'; renderCats(stats); snapshot();
 renderCats({by_cat: [stats.by_cat[1]]}); snapshot();
@@ -2584,6 +2615,103 @@ process.stdout.write(JSON.stringify(snapshots));
     assert Options(empty["html"]).values == [""]
     assert not refilled["disabled"]
     assert Options(refilled["html"]).values == options.values
+
+
+def test_dashboard_renders_review_new_mastered_and_round_progress():
+    html = (Path(__file__).parents[1] / "web/index.html").read_text(encoding="utf-8")
+    escape_source = html[html.index("    function escapeHtml"):html.index("    function safeHttpUrl")]
+    dashboard_source = html[html.index("    function dashboardCount"):html.index("    function currentQuestion")]
+    script = r'''
+const nodes = {};
+function makeClassList() { return {toggle(){}, add(){}, remove(){}}; }
+function $(id) { return nodes[id] || (nodes[id] = {
+  value: '', innerHTML: '', textContent: '', disabled: false,
+  classList: makeClassList(), setAttribute(){}, querySelectorAll(){ return []; }
+}); }
+const appStorage = {setItem(){}};
+function draw() {}
+let session = {
+  session_id: 's_test',
+  items: [{id:1},{id:2},{id:3},{id:4},{id:5}],
+  pending: [{id:4},{id:5}]
+};
+let statsState = {review_due:0};
+''' + escape_source + dashboard_source + r'''
+const stats = {
+  total: 9, due: 6, review_due: 2, new_count: 4, mastered: 1,
+  by_cat: [{category:'网络 & <协议>', total:3, seen:2, mastered:1, due_n:2}]
+};
+renderStats(stats);
+renderCats(stats);
+const active = {
+  total: $('st-total').textContent,
+  due: $('st-due').textContent,
+  fresh: $('st-new').textContent,
+  mastered: $('st-mastered').textContent,
+  round: $('st-round').textContent,
+  badge: $('side-round-badge').textContent,
+  categories: $('cats').innerHTML
+};
+session.pending = [];
+renderRoundProgress();
+const completedRound = {round:$('st-round').textContent, badge:$('side-round-badge').textContent};
+session = {session_id:null, items:[], pending:[]};
+renderStats(stats);
+const idle = {round:$('st-round').textContent, badge:$('side-round-badge').textContent};
+const legacyStats = {total:9, due:6, mastered:1,
+  by_cat:[{category:'旧分类', total:3, seen:2, due_n:2}]};
+renderStats(legacyStats);
+renderCats(legacyStats);
+const legacy = {due:$('st-due').textContent, fresh:$('st-new').textContent,
+  badge:$('side-round-badge').textContent, categories:$('cats').innerHTML};
+process.stdout.write(JSON.stringify({active,completedRound,idle,legacy}));
+'''
+    completed = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8")
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    active = dict(result["active"])
+    categories = active.pop("categories")
+    assert active == {
+        "total": 9,
+        "due": 2,
+        "fresh": 4,
+        "mastered": 1,
+        "round": "3/5",
+        "badge": "3/5题",
+    }
+    assert "1/3" in categories
+    assert "2/3" not in categories
+    assert "网络 &amp; &lt;协议&gt;" in categories
+    assert result["completedRound"] == {"round": "5/5", "badge": "5/5题"}
+    assert result["idle"] == {"round": "无", "badge": "2复习"}
+    assert result["legacy"]["due"] == "—"
+    assert result["legacy"]["fresh"] == "—"
+    assert result["legacy"]["badge"] == "—复习"
+    assert "—/3" in result["legacy"]["categories"]
+
+
+def test_dashboard_primary_touch_targets_keep_44px_minimum():
+    html = (Path(__file__).parents[1] / "web/index.html").read_text(encoding="utf-8")
+
+    assert re.search(r"\.sidebar-cats-toggle\s*\{[^}]*min-height:\s*44px", html, re.S)
+    assert re.search(r"\.cat button\s*\{[^}]*min-height:\s*44px", html, re.S)
+    assert re.search(r"\.mode-option\s*\{[^}]*min-height:\s*44px", html, re.S)
+
+
+def test_dashboard_header_uses_compact_matched_height():
+    html = (Path(__file__).parents[1] / "web/index.html").read_text(encoding="utf-8")
+
+    assert re.search(
+        r"\.stats-head h2\s*\{[^}]*height:\s*36px[^}]*font-size:\s*20px",
+        html,
+        re.S,
+    )
+    assert re.search(
+        r"\.round-status\s*\{[^}]*height:\s*36px[^}]*border-radius:\s*999px"
+        r"[^}]*box-shadow:\s*none",
+        html,
+        re.S,
+    )
 
 
 def test_web_draft_functions_persist_in_local_storage():
@@ -2806,8 +2934,9 @@ function $(id) { return nodes[id] || (nodes[id] = {
   classList: {add(){},remove(){}},
   addEventListener(event, callback) { handlers[id + ':' + event] = callback; }
 }); }
-let session = {session_id:'s_test'}, speechInput = null, revealGeneration = 0, lastVerdict;
 const question = {id:7, question:'问题', category:'测试', url:''};
+let session = {session_id:'s_test', items:[question], pending:[question]}, speechInput = null, revealGeneration = 0, lastVerdict;
+let statsCalls = 0, roundCalls = 0;
 function currentQuestion() { return question; }
 function currentSessionMode() { return 'answer'; }
 function prepareSubmission() { return {submission_id:'sub_test'}; }
@@ -2815,6 +2944,8 @@ function saveDraft() { return true; }
 function clearDraft() {} function cancelSpeechInput() {} function updateSpeechControls() {}
 function startJudgeProgress() {} function stopJudgeProgress() {} function appendJudgeDelta() {}
 function bindAnswerImageFallbacks() {} async function advanceQuestion() {}
+function renderRoundProgress() { roundCalls += 1; }
+async function refreshQuestionStats() { statsCalls += 1; }
 async function streamAnswer() { return result; }
 ''' + f"\nconst result = {json.dumps(out, ensure_ascii=False)};\n" + helpers + submit + r'''
 (async () => {
@@ -2822,7 +2953,8 @@ async function streamAnswer() { return result; }
   const first = $('verdict').innerHTML;
   renderRecoveredSubmission({question, result, session_id:'s_test'}, {flow:'answer'});
   process.stdout.write(JSON.stringify({first, recovered:$('verdict').innerHTML,
-    disabled:$('ans').disabled, next:$('btn-submit').dataset.mode}));
+    disabled:$('ans').disabled, next:$('btn-submit').dataset.mode,
+    statsCalls, roundCalls, pending:session.pending.length}));
 })().catch(e => { console.error(e); process.exit(1); });
 '''
     completed = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8")
@@ -2839,6 +2971,48 @@ async function streamAnswer() { return result; }
         assert bool(re.search(r"\bopen\b", detail.group(1))) is (rating != "easy")
         assert "<pre><code>example()</code></pre>" in markup
     assert result["disabled"] and result["next"] == "next"
+    assert result["statsCalls"] == 1 and result["roundCalls"] == 1
+    assert result["pending"] == 0
+
+
+def test_review_success_refreshes_dashboard_without_waiting_for_next_question():
+    html = (Path(__file__).parents[1] / "web/index.html").read_text(encoding="utf-8")
+    review = html[html.index("    async function reviewCurrentQuestion"):
+                  html.index("    function showView")]
+    script = r'''
+const nodes = {};
+function $(id) { return nodes[id] || (nodes[id] = {
+  innerHTML:'', textContent:'', disabled:false, dataset:{},
+  classList:{add(){},remove(){}},
+}); }
+const question = {id:7, question:'问题', category:'测试', url:''};
+let session = {session_id:'s_test', items:[question], pending:[question]};
+let speechInput = null, statsCalls = 0, roundCalls = 0;
+function currentQuestion() { return question; }
+function currentSessionMode() { return 'memorize'; }
+function prepareSubmission() { return {submission_id:'sub_test'}; }
+function clearDraft() {}
+function bindAnswerImageFallbacks() {}
+function setReviewButtonsDisabled() {}
+function updateSpeechControls() {}
+function showContextError(_context, message) { throw new Error(message); }
+function escapeHtml(value) { return String(value); }
+function answerMarkup() { return '' }
+function renderRoundProgress() { roundCalls += 1; }
+async function refreshQuestionStats() { statsCalls += 1; }
+async function api(method, path) {
+  if (method !== 'POST' || path !== '/api/review') throw new Error('unexpected request');
+  return {grade:'good', answer:'', answer_html:'', url:''};
+}
+''' + review + r'''
+(async()=>{
+  await reviewCurrentQuestion('good');
+  process.stdout.write(JSON.stringify({statsCalls,roundCalls,pending:session.pending.length}));
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+    completed = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8")
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {"statsCalls": 1, "roundCalls": 1, "pending": 0}
 
 
 def test_judge_failure_dialog_distinguishes_unconfigured_model_and_preserves_retry_state():

@@ -13,7 +13,7 @@
 | `python bagu.py import --code-only` | 先创建完整 SQLite 备份，只修复可匹配的旧答案代码格式 |
 | `python bagu.py import --format-only --dry-run` | 联网核对旧答案，预览可恢复的表格、引用、列表等格式，不写入修复结果 |
 | `python bagu.py import --format-only` | 完整 SQLite 备份后，只恢复正文与来源匹配的旧题库答案格式 |
-| `python bagu.py stats` | 打印总题数、今日可复习题数、已掌握题数，以及各分类的总数、已刷数、到期数 |
+| `python bagu.py stats` | 打印总题数、今日复习、未学习、可抽题和已掌握题数，以及各分类的总数、已刷、已掌握和可抽题数 |
 | `python bagu.py list` | 打印全部题目的 ID、分类和题干；不提供分页或搜索参数 |
 | `python bagu.py draw -n 5 --cat MySQL` | 开始一轮并打印题目；`-n` 默认 5，`--cat` 可省略，按完整分类名筛选 |
 | `python bagu.py grade <session_id> <题id> <评级>` | 对本轮指定题记录一次评级；评级仅接受 `again`、`hard`、`good`、`easy` |
@@ -53,7 +53,7 @@ python bagu.py skip
 - `grade` 必须带本轮 `session_id`；旧写法 `grade <题id> <评级>` 已废除。错会话、题目不在本轮、已评分或会话已关闭，均拒绝评分且不改调度。
 - CLI `grade` 没有 submission 重放参数。不要因没看到终端输出就盲目再次评分；必要时在网页查看当前会话状态。
 - 抽题只考虑新题（`next_due` 为空）和到期题，先取到期复习题，再随机补新题。可选题不足时实际数量会少于请求数；没有可选题时不创建会话。
-- `stats` 的“今日到期”包含新题；“已刷”指至少复习过一次；`level >= 3` 计入“已掌握”。
+- `stats` 的“今日复习”只统计已经进入调度且到期的题；“未学习”指 `next_due` 为空的新题，“可抽题”是两者之和。“已刷”指至少复习过一次；`level >= 3` 计入“已掌握”。
 
 | 评级 | 调度行为 |
 | --- | --- |

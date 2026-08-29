@@ -4010,21 +4010,38 @@ def serve(host="127.0.0.1", port=8765, root=None):
 
 
 def stats(conn):
+    today = dt.date.today().isoformat()
     total = conn.execute("SELECT COUNT(*) c FROM questions").fetchone()["c"]
     due = conn.execute(
         "SELECT COUNT(*) c FROM questions WHERE next_due IS NULL OR next_due <= ?",
-        (dt.date.today().isoformat(),),
+        (today,),
+    ).fetchone()["c"]
+    review_due = conn.execute(
+        "SELECT COUNT(*) c FROM questions WHERE next_due IS NOT NULL AND next_due <= ?",
+        (today,),
+    ).fetchone()["c"]
+    new_count = conn.execute(
+        "SELECT COUNT(*) c FROM questions WHERE next_due IS NULL"
     ).fetchone()["c"]
     mastered = conn.execute(
         "SELECT COUNT(*) c FROM questions WHERE level >= 3"
     ).fetchone()["c"]
     by_cat = conn.execute(
         """SELECT category, COUNT(*) total,
-                  SUM(CASE WHEN times_seen > 0 THEN 1 ELSE 0 END) seen,
-                  SUM(CASE WHEN next_due IS NULL OR next_due <= date('now') THEN 1 ELSE 0 END) due_n
-           FROM questions GROUP BY category ORDER BY total DESC"""
+                   SUM(CASE WHEN times_seen > 0 THEN 1 ELSE 0 END) seen,
+                   SUM(CASE WHEN level >= 3 THEN 1 ELSE 0 END) mastered,
+                   SUM(CASE WHEN next_due IS NULL OR next_due <= ? THEN 1 ELSE 0 END) due_n
+            FROM questions GROUP BY category ORDER BY total DESC""",
+        (today,),
     ).fetchall()
-    return {"total": total, "due": due, "mastered": mastered, "by_cat": [dict(r) for r in by_cat]}
+    return {
+        "total": total,
+        "due": due,
+        "review_due": review_due,
+        "new_count": new_count,
+        "mastered": mastered,
+        "by_cat": [dict(r) for r in by_cat],
+    }
 
 
 def main(argv=None):
@@ -4117,10 +4134,17 @@ def main(argv=None):
             print(f"已结束会话 {sid}")
         elif args.cmd == "stats":
             s = stats(conn)
-            print(f"总题数: {s['total']} | 今日到期: {s['due']} | 已掌握(level>=3): {s['mastered']}")
-            print(f"{'类别':<10}{'总数':>6}{'已刷':>6}{'到期':>6}")
+            print(
+                f"总题数: {s['total']} | 今日复习: {s['review_due']} | "
+                f"未学习: {s['new_count']} | 可抽题: {s['due']} | "
+                f"已掌握(level>=3): {s['mastered']}"
+            )
+            print(f"{'类别':<10}{'总数':>6}{'已刷':>6}{'已掌握':>8}{'可抽':>6}")
             for r in s["by_cat"]:
-                print(f"{r['category']:<10}{r['total']:>6}{r['seen'] or 0:>6}{r['due_n'] or 0:>6}")
+                print(
+                    f"{r['category']:<10}{r['total']:>6}{r['seen'] or 0:>6}"
+                    f"{r['mastered'] or 0:>8}{r['due_n'] or 0:>6}"
+                )
         elif args.cmd == "list":
             for r in conn.execute("SELECT id, category, question FROM questions"):
                 print(f"#{r['id']} [{r['category']}] {r['question']}")

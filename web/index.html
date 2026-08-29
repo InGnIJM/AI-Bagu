@@ -312,6 +312,7 @@
     }
     .sidebar-cats-toggle {
       width: 100%;
+      min-height: 44px;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -408,6 +409,7 @@
       margin-bottom: 4px;
     }
     .cat button {
+      min-height: 44px;
       text-align: left;
       border: 0;
       background: transparent;
@@ -454,6 +456,37 @@
     }
 
     /* 看板数据统计 Bento 网格 */
+    .stats-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .stats-head h2 {
+      display: flex;
+      align-items: center;
+      height: 36px;
+      min-height: 36px;
+      margin: 0;
+      font-size: 20px;
+      line-height: 36px;
+    }
+    .round-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 36px;
+      min-height: 36px;
+      padding: 0 12px;
+      border: 2px solid var(--color-border);
+      border-radius: 999px;
+      background: var(--color-accent);
+      box-shadow: none;
+      font-size: 11.5px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .round-status strong { font-family: var(--font-mono); font-size: 13px; }
     .stats {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
@@ -746,7 +779,7 @@
       border: 2px solid var(--color-border);
     }
     .mode-option {
-      min-height: 42px;
+      min-height: 44px;
       border: 2px solid transparent;
       border-radius: 10px;
       background: transparent;
@@ -1372,6 +1405,7 @@
       }
       .stats, .row, .actions { grid-template-columns: 1fr 1fr; }
       .stats { grid-template-columns: 1fr 1fr; }
+      .stats-head h2 { font-size: 20px; }
       h2.q, .idle-hero h2 { font-size: 22px; }
       .manage-head { flex-direction: column; align-items: stretch; }
       .manage-actions { display: grid; grid-template-columns: 1fr 1fr; }
@@ -1394,6 +1428,8 @@
     body.android-app .brand-title h1 { font-size: 18px; }
     body.android-app .brand-title p { font-size: 10px; }
     body.android-app .bento-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+    body.android-app .stats-head h2 { font-size: 18px; }
+    body.android-app .round-status { padding: 0 10px; }
     body.android-app .stats { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
     body.android-app .stat { padding: 10px 6px; box-shadow: var(--shadow-hard-sm); }
     body.android-app .stat .k { font-size: 10px; letter-spacing: 0; }
@@ -1559,12 +1595,16 @@
            右侧主舞台 (MAIN STAGE)
            ========================================================================= -->
       <main class="bento-main">
+        <div class="stats-head">
+          <h2>学习概览</h2>
+          <div class="round-status"><span>本轮进度</span><strong id="st-round">无</strong></div>
+        </div>
         <!-- 看板数据统计 -->
         <section class="stats" aria-label="学习进度">
           <div class="stat"><div class="k">总题库</div><div class="v" id="st-total">—</div></div>
-          <div class="stat"><div class="k">今日到期</div><div class="v" id="st-due">—</div></div>
+          <div class="stat"><div class="k">今日复习</div><div class="v" id="st-due">—</div></div>
+          <div class="stat"><div class="k">未学习</div><div class="v" id="st-new">—</div></div>
           <div class="stat"><div class="k">已掌握</div><div class="v" id="st-mastered">—</div></div>
-          <div class="stat"><div class="k">本轮进度</div><div class="v" id="st-round">无</div></div>
         </section>
 
         <!-- 作答主视图 -->
@@ -1694,7 +1734,7 @@
 
         <!-- 模型配置库列表视图 -->
         <section id="view-overview" class="card hidden" aria-labelledby="overview-title">
-          <h2 id="overview-title">学习概览</h2>
+          <h2 id="overview-title">分类掌握度</h2>
           <p class="help">看看各分类的学习进度，也可以点选分类开始练习。</p>
           <div id="overview-categories"></div>
         </section>
@@ -2075,6 +2115,7 @@
       custom: { base: "", model: "" }
     };
     let session = { session_id: null, items: [], pending: [] };
+    let statsState = { review_due: 0 };
     let modelsState = { models: [], active_id: "", presets: [] };
     let questionState = { items: [], total: 0, page: 1, page_size: 20, pages: 1, categories: [] };
     let editingId = null;
@@ -3256,6 +3297,9 @@
           (memorize ? "" : `<div style="margin-top:10px">${answerMarkup(out)}</div>`);
         bindAnswerImageFallbacks(box);
         box.classList.remove("hidden");
+        session.pending = session.pending.filter((item) => item.id !== q.id);
+        renderRoundProgress();
+        try { await refreshQuestionStats(); } catch (_) { /* 下一题时完整刷新会重新校准。 */ }
         if (memorize) {
           $("review-actions").classList.add("hidden");
           $("btn-review-next").classList.remove("hidden");
@@ -3320,15 +3364,27 @@
       return true;
     };
 
-    function renderStats(s) {
-      $("st-total").textContent = s.total;
-      $("st-due").textContent = s.due;
-      $("st-mastered").textContent = s.mastered;
+    function dashboardCount(value) {
+      return Number.isFinite(value) ? value : "—";
+    }
+
+    function renderRoundProgress() {
       const n = session.pending.length;
       const t = (session.items || []).length;
       const roundText = session.session_id ? `${t - n}/${t}` : "无";
       $("st-round").textContent = roundText;
-      $("side-round-badge").textContent = session.session_id ? `${t - n}/${t}题` : `${s.due}到期`;
+      $("side-round-badge").textContent = session.session_id
+        ? `${t - n}/${t}题`
+        : `${dashboardCount(statsState.review_due)}复习`;
+    }
+
+    function renderStats(s) {
+      statsState = s;
+      $("st-total").textContent = s.total;
+      $("st-due").textContent = dashboardCount(s.review_due);
+      $("st-new").textContent = dashboardCount(s.new_count);
+      $("st-mastered").textContent = s.mastered;
+      renderRoundProgress();
       $("empty-bank-help").classList.toggle("hidden", s.total !== 0);
       $("btn-draw").disabled = s.total === 0;
       $("backup-session-warning").textContent = session.session_id
@@ -3359,13 +3415,14 @@
       if (countEl) countEl.textContent = `${list.length}`;
       if (!list.length) { box.innerHTML = "<p class='help'>暂无分类</p>"; return; }
       box.innerHTML = list.map((c) => {
-        const pct = c.total ? Math.round(100 * (c.seen || 0) / c.total) : 0;
+        const mastered = Number.isFinite(c.mastered) ? c.mastered : null;
+        const pct = c.total && mastered !== null ? Math.round(100 * mastered / c.total) : 0;
         const name = c.category;
         const safeName = escapeHtml(name);
         return `<div class="cat">
           <div class="cat-head">
             <button type="button" data-cat="${safeName}"><span class="material-symbols-rounded" style="font-size:15px; color:#6366F1;">folder</span>${safeName}</button>
-            <span class="n">${c.seen || 0}/${c.total}</span>
+            <span class="n">${mastered === null ? "—" : mastered}/${c.total}</span>
           </div>
           <div class="bar"><span style="width:${pct}%"></span></div>
         </div>`;
@@ -3854,6 +3911,9 @@
         $("btn-dont-know").classList.add("hidden");
         $("btn-submit").dataset.mode = "next";
         $("btn-submit").textContent = "下一题";
+        session.pending = session.pending.filter((item) => item.id !== q.id);
+        renderRoundProgress();
+        try { await refreshQuestionStats(); } catch (_) { /* 下一题时完整刷新会重新校准。 */ }
       } catch (e) {
         stopJudgeProgress();
         $("btn-submit").textContent = "重新评判";
