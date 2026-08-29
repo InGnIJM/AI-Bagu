@@ -8,6 +8,89 @@ def update_source():
     return web_section("// Android updater:", "// Speech stays outside")
 
 
+def test_shared_dialog_is_plain_text_accessible_and_restores_focus():
+    result = run_web_js(WEB_DOM + f"""
+const nativeStore={{}},isAndroidApp=true;let session={{session_id:null}},judgeTimer=null,nativeBusy='',speechInput=null;
+const origin=$('origin');origin.focus=()=>document.activeElement=origin;origin.focus();
+for(const id of ['app-dialog-primary','app-dialog-secondary']) $(id).focus=()=>document.activeElement=$(id);
+{update_source()}
+showAppDialog({{kind:'error',title:'模型配置错误',message:'<img src=x onerror=alert(1)>',solution:'核对 API Key 后重试。',feedbackId:'n_0123456789abcdef0123456789abcdef',secondaryLabel:'取消',returnFocus:origin}});
+const opened={{hidden:$('app-dialog-backdrop').classList.contains('hidden'),kind:$('app-dialog').dataset.kind,
+ title:$('app-dialog-title').textContent,message:$('app-dialog-message').textContent,
+ solution:$('app-dialog-solution-text').textContent,feedback:$('app-dialog-feedback').textContent,
+ primary:document.activeElement.id}};
+handleAppDialogKeydown({{key:'Tab',shiftKey:false,preventDefault(){{}}}});
+const tabbed=document.activeElement.id;
+handleAppDialogKeydown({{key:'Escape',preventDefault(){{}}}});
+process.stdout.write(JSON.stringify({{opened,tabbed,closed:$('app-dialog-backdrop').classList.contains('hidden'),focus:document.activeElement.id}}));
+""")
+    assert result["opened"] == {
+        "hidden": False, "kind": "error", "title": "模型配置错误",
+        "message": "<img src=x onerror=alert(1)>", "solution": "核对 API Key 后重试。",
+        "feedback": "反馈编号：n_0123456789abcdef0123456789abcdef", "primary": "app-dialog-primary",
+    }
+    assert result["tabbed"] == "app-dialog-secondary"
+    assert result["closed"] and result["focus"] == "origin"
+
+
+def test_update_available_uses_compact_editorial_dialog_and_details_action():
+    result = run_web_js(WEB_DOM + f"""
+const nativeStore={{}},isAndroidApp=true;let session={{session_id:null}},judgeTimer=null,nativeBusy='',speechInput=null;
+let view='';function showView(value){{view=value;}}$('update-card').scrollIntoView=()=>{{}};
+for(const id of ['app-dialog-primary','app-dialog-secondary']) $(id).focus=()=>document.activeElement=$(id);
+{update_source()}
+handleUpdateResult({{detail:{{revision:1,noticeId:'process:check',status:'available',enabled:true,candidate:{{id:'4:hash',versionName:'0.1.0-beta.4',versionCode:4,size:5242880,notes:'修复安装确认并优化错误提示。'}}}}}});
+const shown={{hidden:$('app-dialog-backdrop').classList.contains('hidden'),kind:$('app-dialog').dataset.kind,
+ title:$('app-dialog-title').textContent,version:$('app-dialog-version').textContent,size:$('app-dialog-size').textContent,
+ notes:$('app-dialog-notes').textContent,secondary:$('app-dialog-secondary').textContent,primary:$('app-dialog-primary').textContent}};
+activateAppDialogPrimary();
+process.stdout.write(JSON.stringify({{shown,view,closed:$('app-dialog-backdrop').classList.contains('hidden')}}));
+""")
+    assert result["shown"] == {
+        "hidden": False, "kind": "update", "title": "发现新版本",
+        "version": "0.1.0-beta.4", "size": "5.0 MiB", "notes": "修复安装确认并优化错误提示。",
+        "secondary": "稍后", "primary": "查看更新详情",
+    }
+    assert result["view"] == "settings" and result["closed"]
+
+
+def test_manual_error_preempts_update_dialog_and_automatic_failure_stays_quiet():
+    result = run_web_js(WEB_DOM + f"""
+const nativeStore={{}},isAndroidApp=true;let session={{session_id:null}},judgeTimer=null,nativeBusy='',speechInput=null;
+for(const id of ['app-dialog-primary','app-dialog-secondary']) $(id).focus=()=>document.activeElement=$(id);
+{update_source()}
+const candidate={{id:'4:hash',versionName:'v4',size:1,notes:'notes'}};
+handleUpdateResult({{detail:{{revision:1,noticeId:'notice-1',operationId:'auto_1',status:'available',candidate}}}});
+showOperationError({{title:'无法开始练习',message:'当前有轮次正在运行',solution:'返回练习并完成或结束当前轮次。'}});
+const error={{kind:$('app-dialog').dataset.kind,title:$('app-dialog-title').textContent}};
+closeAppDialog();
+handleUpdateResult({{detail:{{revision:2,operationId:'auto_2',status:'error',message:'自动检查未完成',lastCheck:{{status:'error',errorCode:1001,channels:{{}}}}}}}});
+process.stdout.write(JSON.stringify({{error,automaticHidden:$('app-dialog-backdrop').classList.contains('hidden')}}));
+""")
+    assert result == {"error": {"kind": "error", "title": "无法开始练习"}, "automaticHidden": True}
+
+
+@pytest.mark.parametrize("context,title,solution", [
+    ("session", "练习操作失败", "轮次"),
+    ("model", "模型配置操作失败", "API Key"),
+    ("question", "题库操作失败", "题库"),
+    ("file", "文件操作失败", "文件"),
+    ("speech", "语音输入失败", "输入法"),
+    ("diagnostics", "诊断日志操作失败", "日志"),
+    ("update", "更新操作失败", "更新"),
+])
+def test_each_active_operation_error_context_has_actionable_dialog(context, title, solution):
+    result = run_web_js(WEB_DOM + f"""
+const nativeStore={{}},isAndroidApp=true;let session={{session_id:null}},judgeTimer=null,nativeBusy='',speechInput=null;
+{update_source()}
+showContextError('{context}','synthetic failure');
+process.stdout.write(JSON.stringify({{kind:$('app-dialog').dataset.kind,title:$('app-dialog-title').textContent,
+ message:$('app-dialog-message').textContent,solution:$('app-dialog-solution-text').textContent}}));
+""")
+    assert result["kind"] == "error" and result["title"] == title
+    assert result["message"] == "synthetic failure" and solution in result["solution"]
+
+
 def test_update_events_ignore_stale_revision_and_render_notes_as_plain_text():
     result = run_web_js(WEB_DOM + f"""
 const nativeStore={{}},isAndroidApp=true;let session={{session_id:null}},judgeTimer=null,nativeBusy='',speechInput=null;
@@ -17,7 +100,7 @@ handleUpdateResult({{detail:{{revision:3,operationId:'new',status:'available',ca
 handleUpdateResult({{detail:{{revision:2,operationId:'old',status:'latest',enabled:true,message:'old'}}}});
 const first=$('update-status').textContent;dismissUpdateNotice();
 handleUpdateResult({{detail:{{revision:4,operationId:'new',status:'ready',candidate,enabled:true,ready:true}}}});
-process.stdout.write(JSON.stringify({{first,notes:$('update-notes').textContent,hidden:$('update-notice').classList.contains('hidden'),ready:!$('btn-update-install').disabled}}));
+process.stdout.write(JSON.stringify({{first,notes:$('update-notes').textContent,hidden:$('app-dialog-backdrop').classList.contains('hidden'),ready:!$('btn-update-install').disabled}}));
 """)
     assert result["first"] == "检查未完整成功"
     assert result["notes"] == "<script>inert</script>"
@@ -71,7 +154,7 @@ def test_update_check_renders_only_known_text_safe_fields_and_does_not_log_nativ
 const nativeStore={{}},isAndroidApp=true;let session={{session_id:null}},judgeTimer=null,nativeBusy='',speechInput=null;
 {update_source()}
 handleUpdateResult({{detail:{{revision:1,operationId:'auto_123',status:'error',message:'自动检查未完成',lastCheck:{{diagnosticId:'n_0123456789abcdef0123456789abcdef',startedAt:1,completedAt:2,status:'error',errorCode:1001,channels:{{beta:{{status:'error',errorCode:1001,httpStatus:503,durationMs:1,url:'https://untrusted.example/',message:'<script>bad</script>'}},evil:{{status:'available',message:'shown-never'}}}}}}}}}});
-process.stdout.write(JSON.stringify({{card:$('update-card').classList.contains('hidden'),notice:$('update-notice').classList.contains('hidden'),detail:$('update-check-detail').textContent,records:webRecords}}));
+process.stdout.write(JSON.stringify({{card:$('update-card').classList.contains('hidden'),notice:$('app-dialog-backdrop').classList.contains('hidden'),detail:$('update-check-detail').textContent,records:webRecords}}));
 """)
     assert result["card"] is False and result["notice"] is True
     assert "HTTP 错误（HTTP 503）" in result["detail"]
@@ -119,11 +202,11 @@ function page() {{ {update_source()} return {{event:handleUpdateResult,dismiss:d
 const candidate={{id:'first',versionName:'v1',size:1}};
 let p=page();p.event({{detail:{{revision:1,noticeId:'process-1:check-1',candidate,status:'available'}}}});p.dismiss();
 p=page();p.event({{detail:{{revision:2,noticeId:'process-1:check-1',candidate,status:'ready',ready:true}}}});
-const rotationHidden=$('update-notice').classList.contains('hidden');
+const rotationHidden=$('app-dialog-backdrop').classList.contains('hidden');
 p.event({{detail:{{revision:3,noticeId:'process-1:check-2',candidate,status:'available'}}}});
-const nextCheckVisible=!$('update-notice').classList.contains('hidden');p.dismiss();
+const nextCheckVisible=!$('app-dialog-backdrop').classList.contains('hidden');p.dismiss();
 p=page();p.event({{detail:{{revision:1,noticeId:'process-2:check-0',candidate,status:'available'}}}});
-process.stdout.write(JSON.stringify({{rotationHidden,nextCheckVisible,nextProcessVisible:!$('update-notice').classList.contains('hidden')}}));
+process.stdout.write(JSON.stringify({{rotationHidden,nextCheckVisible,nextProcessVisible:!$('app-dialog-backdrop').classList.contains('hidden')}}));
 """)
     assert result == {"rotationHidden": True, "nextCheckVisible": True, "nextProcessVisible": True}
 

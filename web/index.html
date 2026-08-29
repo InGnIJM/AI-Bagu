@@ -640,51 +640,97 @@
 
     .hidden { display: none !important; }
 
-    .judge-failure-backdrop {
+    .app-dialog-backdrop {
       position: fixed;
       inset: 0;
-      z-index: 20;
+      z-index: 100;
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 20px;
+      padding: max(20px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(20px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
       background: rgba(15, 23, 42, .56);
     }
-    .judge-failure-dialog {
-      width: min(100%, 460px);
+    .app-dialog {
+      position: relative;
+      width: min(100%, 480px);
+      max-height: min(720px, calc(100vh - 40px));
+      overflow-y: auto;
       padding: 24px;
       border: 2px solid var(--color-border);
       border-radius: 16px;
-      background: var(--color-surface);
+      background: #FFFFFF;
       box-shadow: var(--shadow-hard-lg);
     }
-    .judge-failure-dialog-head {
+    .app-dialog::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 10px;
+      background: #DC2626;
+      border-radius: 13px 0 0 13px;
+    }
+    .app-dialog[data-kind="update"]::before { background: var(--color-accent); }
+    .app-dialog-head {
       display: flex;
       align-items: flex-start;
       gap: 12px;
     }
-    .judge-failure-dialog-icon {
+    .app-dialog-icon {
       flex: 0 0 auto;
       color: #DC2626;
       font-size: 28px;
     }
-    .judge-failure-dialog h2 {
+    .app-dialog[data-kind="update"] .app-dialog-icon { color: var(--color-foreground); }
+    .app-dialog-eyebrow {
+      margin: 0 0 4px !important;
+      color: var(--color-muted-fg);
+      font: 700 12px/1.2 var(--font-mono);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .app-dialog h2 {
       margin: 0;
       font-size: 19px;
       line-height: 1.3;
     }
-    .judge-failure-dialog p {
+    .app-dialog p {
       margin: 12px 0 0;
       color: var(--color-muted-fg);
       line-height: 1.65;
       word-break: break-word;
     }
-    .judge-failure-actions {
+    #app-dialog-message { max-height: 11rem; overflow-y: auto; padding-right: 4px; }
+    .app-dialog-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .app-dialog-meta span {
+      padding: 5px 9px;
+      border: 1px solid var(--color-border);
+      border-radius: 999px;
+      background: var(--color-accent-soft, #FEF9C3);
+      color: var(--color-foreground);
+      font: 700 12px/1.2 var(--font-mono);
+    }
+    .app-dialog-solution {
+      margin-top: 16px;
+      padding: 12px 14px;
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      background: var(--color-muted);
+    }
+    .app-dialog-solution strong { display: block; font-size: 13px; }
+    .app-dialog-solution p { margin-top: 4px; color: var(--color-foreground); }
+    .app-dialog-feedback { font: 600 12px/1.5 var(--font-mono); }
+    .app-dialog-notes { white-space: pre-wrap; }
+    .app-dialog-actions {
       display: flex;
       justify-content: flex-end;
       flex-wrap: wrap;
       gap: 10px;
       margin-top: 20px;
+    }
+    @media (max-width: 520px) {
+      .app-dialog { padding: 20px 18px 18px 24px; }
+      .app-dialog-actions { display: grid; grid-template-columns: 1fr; }
+      .app-dialog-actions button { width: 100%; }
     }
 
     /* 模式切换器 */
@@ -1401,7 +1447,6 @@
     .update-notes { white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0; }
     .update-check-detail { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 8px; }
     .update-progress { width: 100%; margin-top: 12px; accent-color: var(--color-accent); }
-    #update-notice { border-color: var(--color-ink, #0F172A); background: var(--color-accent, #FDE047); }
     body.android-app #view-overview .sidebar-cats-card { margin-top: 14px; }
     .backup-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 16px; }
     body.android-app .mobile-nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; padding: 8px 10px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); background: var(--color-background); border-top: 2px solid var(--color-border); }
@@ -1514,14 +1559,6 @@
            右侧主舞台 (MAIN STAGE)
            ========================================================================= -->
       <main class="bento-main">
-        <aside class="card hidden" id="update-notice" aria-label="应用更新通知">
-          <p id="update-notice-title"></p>
-          <div class="update-actions">
-            <button type="button" id="btn-update-details">查看更新</button>
-            <button type="button" class="secondary" id="btn-update-later">稍后</button>
-          </div>
-        </aside>
-        
         <!-- 看板数据统计 -->
         <section class="stats" aria-label="学习进度">
           <div class="stat"><div class="k">总题库</div><div class="v" id="st-total">—</div></div>
@@ -1640,23 +1677,6 @@
             
             <p class="error hidden" id="q-err" role="alert"></p>
 
-            <div class="judge-failure-backdrop hidden" id="judge-failure-dialog" role="alertdialog" aria-modal="true" aria-labelledby="judge-failure-title" aria-describedby="judge-failure-message">
-              <div class="judge-failure-dialog">
-                <div class="judge-failure-dialog-head">
-                  <span class="material-symbols-rounded filled judge-failure-dialog-icon" aria-hidden="true">error</span>
-                  <h2 id="judge-failure-title">模型评判失败</h2>
-                </div>
-                <p id="judge-failure-message"></p>
-                <div class="judge-failure-actions">
-                  <button class="secondary hidden" type="button" id="btn-judge-failure-config">
-                    <span class="material-symbols-rounded" aria-hidden="true">tune</span>
-                    前往模型配置
-                  </button>
-                  <button class="cta" type="button" id="btn-judge-failure-close">关闭</button>
-                </div>
-              </div>
-            </div>
-            
             <!-- AI 评卷进度与流式输出 -->
             <div id="judge-progress" class="judge-progress hidden">
               <div class="judge-progress-head">
@@ -1899,6 +1919,33 @@
 
   </div>
 
+  <div class="app-dialog-backdrop hidden" id="app-dialog-backdrop" role="alertdialog" aria-modal="true" aria-labelledby="app-dialog-title" aria-describedby="app-dialog-message app-dialog-solution-text" tabindex="-1">
+    <section class="app-dialog compact-editorial" id="app-dialog" data-kind="error">
+      <div class="app-dialog-head">
+        <span class="material-symbols-rounded filled app-dialog-icon" id="app-dialog-icon" aria-hidden="true">error</span>
+        <div>
+          <p class="app-dialog-eyebrow" id="app-dialog-eyebrow">操作未完成</p>
+          <h2 id="app-dialog-title">发生错误</h2>
+        </div>
+      </div>
+      <div class="app-dialog-meta hidden" id="app-dialog-meta">
+        <span id="app-dialog-version"></span>
+        <span id="app-dialog-size"></span>
+      </div>
+      <p id="app-dialog-message"></p>
+      <p class="app-dialog-notes hidden" id="app-dialog-notes"></p>
+      <div class="app-dialog-solution hidden" id="app-dialog-solution">
+        <strong id="app-dialog-solution-label">解决办法</strong>
+        <p id="app-dialog-solution-text"></p>
+      </div>
+      <p class="app-dialog-feedback hidden" id="app-dialog-feedback"></p>
+      <div class="app-dialog-actions">
+        <button class="secondary hidden" type="button" id="app-dialog-secondary">取消</button>
+        <button class="cta" type="button" id="app-dialog-primary">关闭</button>
+      </div>
+    </section>
+  </div>
+
   <nav class="mobile-nav android-only" aria-label="底部导航">
     <button type="button" id="mobile-nav-quiz" data-mobile-view="quiz" class="active" aria-current="page"><span class="material-symbols-rounded" aria-hidden="true">play_circle</span><span>练习</span></button>
     <button type="button" id="mobile-nav-questions" data-mobile-view="questions"><span class="material-symbols-rounded" aria-hidden="true">menu_book</span><span>题库</span></button>
@@ -2043,11 +2090,110 @@
     let nativeBusy = "";
 
     // Android updater: no URL/path inputs, and no feed content is interpreted as HTML.
+    let appDialogState = null;
+    function appDialogText(value, fallback) {
+      const text = typeof value === "string" ? value.trim() : "";
+      return text || fallback || "";
+    }
+    function appDialogFocusable() {
+      return [$('app-dialog-primary'), $('app-dialog-secondary')].filter((button) => !button.classList.contains('hidden') && !button.disabled);
+    }
+    function showAppDialog(options) {
+      const value = options && typeof options === "object" ? options : {};
+      const kind = value.kind === "update" ? "update" : "error";
+      if (kind === "update" && appDialogState && appDialogState.kind === "error") return false;
+      const previousFocus = value.returnFocus || (document.activeElement && typeof document.activeElement.focus === "function" ? document.activeElement : null);
+      appDialogState = {
+        kind,
+        primaryAction: typeof value.primaryAction === "function" ? value.primaryAction : null,
+        secondaryAction: typeof value.secondaryAction === "function" ? value.secondaryAction : null,
+        returnFocus: previousFocus
+      };
+      $('app-dialog-backdrop').setAttribute('role', kind === "error" ? 'alertdialog' : 'dialog');
+      $('app-dialog').dataset.kind = kind;
+      $('app-dialog-icon').textContent = kind === "update" ? "system_update" : "error";
+      $('app-dialog-eyebrow').textContent = appDialogText(value.eyebrow, kind === "update" ? "应用更新" : "操作未完成");
+      $('app-dialog-title').textContent = appDialogText(value.title, kind === "update" ? "发现新版本" : "发生错误");
+      $('app-dialog-message').textContent = appDialogText(value.message, kind === "update" ? "已有可用更新。" : "操作未完成，请稍后重试。");
+      const version = appDialogText(value.version), size = appDialogText(value.size);
+      $('app-dialog-version').textContent = version;
+      $('app-dialog-version').classList.toggle('hidden', !version);
+      $('app-dialog-size').textContent = size;
+      $('app-dialog-size').classList.toggle('hidden', !size);
+      $('app-dialog-meta').classList.toggle('hidden', !version && !size);
+      const notes = appDialogText(value.notes);
+      $('app-dialog-notes').textContent = notes;
+      $('app-dialog-notes').classList.toggle('hidden', !notes);
+      const solution = appDialogText(value.solution);
+      $('app-dialog-solution-label').textContent = appDialogText(value.solutionLabel, "解决办法");
+      $('app-dialog-solution-text').textContent = solution;
+      $('app-dialog-solution').classList.toggle('hidden', !solution);
+      const feedback = typeof value.feedbackId === "string" && /^[a-z]_[a-f0-9]{8,32}$/.test(value.feedbackId) ? "反馈编号：" + value.feedbackId : "";
+      $('app-dialog-feedback').textContent = feedback;
+      $('app-dialog-feedback').classList.toggle('hidden', !feedback);
+      $('app-dialog-primary').textContent = appDialogText(value.primaryLabel, "关闭");
+      $('app-dialog-primary').classList.remove('hidden');
+      const secondary = appDialogText(value.secondaryLabel);
+      $('app-dialog-secondary').textContent = secondary;
+      $('app-dialog-secondary').classList.toggle('hidden', !secondary);
+      $('app-dialog-backdrop').classList.remove('hidden');
+      $('app-dialog-primary').focus();
+      return true;
+    }
+    function showOperationError(options) {
+      const value = Object.assign({}, options || {}, {kind: "error"});
+      return showAppDialog(value);
+    }
+    const APP_ERROR_CONTEXTS = {
+      session: {title: "练习操作失败", solution: "当前轮次不会被自动结束。请返回练习，完成或手动结束现有轮次后重试。"},
+      model: {title: "模型配置操作失败", solution: "核对模型 ID、Base URL、API Key 与网络连接，测试通过后重试。"},
+      question: {title: "题库操作失败", solution: "请保留当前输入，检查题库内容或文件格式后重试。"},
+      file: {title: "文件操作失败", solution: "原数据不会被自动改写。请检查文件格式、大小与系统文件权限后重试。"},
+      speech: {title: "语音输入失败", solution: "请检查麦克风权限与网络，或改用输入法语音输入；已有回答会保留。"},
+      diagnostics: {title: "诊断日志操作失败", solution: "请保持应用在前台，检查系统文件保存权限后重新导出日志。"},
+      update: {title: "更新操作失败", solution: "请保持应用在前台，检查网络与安装权限后重新检查更新。"}
+    };
+    function showContextError(context, message, options) {
+      const copy = APP_ERROR_CONTEXTS[context] || APP_ERROR_CONTEXTS.session;
+      return showOperationError(Object.assign({title: copy.title, message: appDialogText(message, "操作未完成。"), solution: copy.solution}, options || {}));
+    }
+    function closeAppDialog(restoreFocus = true) {
+      if (!appDialogState) return;
+      const previous = appDialogState;
+      appDialogState = null;
+      $('app-dialog-backdrop').classList.add('hidden');
+      if (restoreFocus && previous.returnFocus && typeof previous.returnFocus.focus === "function") previous.returnFocus.focus();
+    }
+    function activateAppDialogPrimary() {
+      if (!appDialogState) return;
+      const action = appDialogState.primaryAction;
+      closeAppDialog();
+      if (action) action();
+    }
+    function activateAppDialogSecondary() {
+      if (!appDialogState) return;
+      const action = appDialogState.secondaryAction;
+      closeAppDialog();
+      if (action) action();
+    }
+    function handleAppDialogKeydown(event) {
+      if (!appDialogState || !event) return;
+      if (event.key === "Escape") { event.preventDefault(); activateAppDialogSecondary(); return; }
+      if (event.key !== "Tab") return;
+      const buttons = appDialogFocusable();
+      if (!buttons.length) return;
+      event.preventDefault();
+      const current = buttons.indexOf(document.activeElement);
+      const next = event.shiftKey ? (current <= 0 ? buttons.length - 1 : current - 1) : (current + 1) % buttons.length;
+      buttons[next].focus();
+    }
     let updateState = { revision: -1, status: "idle", enabled: true };
     let updateDispatch = "";
+    let updateDispatchAction = "";
     let dismissedUpdate = "";
     try { if (isAndroidApp) dismissedUpdate = appStorage.getItem("bagu-update-dismissed") || ""; } catch (_) { /* Notice dismissal is optional UI state. */ }
     let updateSequence = 0;
+    let presentedUpdateNotice = "";
     let updateReservation = "", updateReservationTimer = null;
     let pendingUpdateWork = 0, pendingDraw = 0;
     const retiredUpdateReservations = new Set();
@@ -2137,17 +2283,57 @@
         $("update-candidate-title").textContent = "新版本 " + candidate.versionName;
         $("update-size").textContent = "安装包大小：" + updateBytes(candidate.size);
         $("update-notes").textContent = candidate.notes || "";
-        $("update-notice-title").textContent = "八股助手 " + candidate.versionName + " 可用，当前练习不受影响。";
       }
-      $("update-notice").classList.toggle("hidden", !candidate || dismissedUpdate === updateNoticeKey());
+      const notice = updateNoticeKey();
+      if (candidate && dismissedUpdate !== notice && presentedUpdateNotice !== notice) {
+        if (showUpdateAvailableDialog(candidate)) presentedUpdateNotice = notice;
+      } else if ((!candidate || dismissedUpdate === notice) && appDialogState && appDialogState.kind === "update") closeAppDialog(false);
+      else if (!candidate && !appDialogState) $('app-dialog-backdrop').classList.add('hidden');
+    }
+    function showUpdateAvailableDialog(candidate) {
+      if (!candidate) return false;
+      return showAppDialog({
+        kind: "update", title: "发现新版本",
+        message: "八股助手 " + appDialogText(candidate.versionName, "新版本") + " 已准备好供你查看，当前练习不会被中断。",
+        version: appDialogText(candidate.versionName, "新版本"), size: updateBytes(candidate.size), notes: appDialogText(candidate.notes),
+        solutionLabel: "下一步", solution: "先查看更新详情，再由你决定是否下载和安装。",
+        secondaryLabel: "稍后", secondaryAction: dismissUpdateNotice,
+        primaryLabel: "查看更新详情", primaryAction: openUpdateDetails
+      });
+    }
+    function openUpdateDetails() {
+      dismissedUpdate = updateNoticeKey();
+      try { appStorage.setItem("bagu-update-dismissed", dismissedUpdate); } catch (_) {}
+      showView("settings");
+      if ($('update-card') && typeof $('update-card').scrollIntoView === "function") $('update-card').scrollIntoView();
     }
     function handleUpdateResult(event) {
       const data = event && event.detail;
       if (!isAndroidApp || !data || !Number.isSafeInteger(data.revision) || data.revision <= updateState.revision) return;
+      const completedAction = updateDispatch && data.operationId === updateDispatch && !data.busy ? updateDispatchAction : "";
       updateState = data;
       // Native revisions are process-monotonic; older events never restore stale controls.
-      if (!updateDispatch || data.operationId === updateDispatch || !data.busy) updateDispatch = "";
+      if (!updateDispatch || data.operationId === updateDispatch || !data.busy) { updateDispatch = ""; updateDispatchAction = ""; }
       renderUpdateState();
+      if (completedAction && updateActionFailed(completedAction, data)) {
+        const checkId = data.lastCheck && updateSafeDiagnosticId(data.lastCheck.diagnosticId);
+        const diagnosticId = updateSafeDiagnosticId(data.diagnostic_id) || checkId;
+        showContextError("update", data.message || "更新操作未完成。", {
+          feedbackId: diagnosticId,
+          primaryLabel: "重新检查",
+          primaryAction: () => dispatchUpdate("check")
+        });
+      }
+    }
+    function updateActionFailed(action, data) {
+      if (!data || action === "automatic" || action === "cancel") return false;
+      const cancelled = typeof data.message === "string" && data.message.includes("取消");
+      if (cancelled) return false;
+      if (action === "check") return Boolean(data.lastCheck && ["error", "partial-error", "interrupted"].includes(data.lastCheck.status));
+      if (action === "download") return !["downloading", "cancelling", "ready"].includes(data.status);
+      if (action === "install") return ["ready", "available", "recovery", "error"].includes(data.status);
+      if (action === "recover") return Boolean(data.recovery || data.status === "recovery");
+      return false;
     }
     function hydrateUpdateState() {
       if (!isAndroidApp || typeof nativeStore.getUpdateState !== "function") return;
@@ -2157,12 +2343,14 @@
     function dismissUpdateNotice() {
       dismissedUpdate = updateNoticeKey();
       try { appStorage.setItem("bagu-update-dismissed", dismissedUpdate); } catch (_) { /* Still dismiss this page's notice. */ }
+      if (appDialogState && appDialogState.kind === "update") closeAppDialog();
       renderUpdateState();
     }
     function dispatchUpdate(action) {
       if (!isAndroidApp || updateDispatch || (updateState.busy && action !== "cancel")) return;
       const op = updateOperationId(), candidate = updateState.candidate;
       updateDispatch = op;
+      updateDispatchAction = action;
       renderUpdateState();
       try {
         let accepted = true;
@@ -2173,10 +2361,14 @@
         else if (candidate && action === "download") accepted = nativeStore.downloadUpdate(candidate.id, op);
         else if (candidate && action === "install") accepted = nativeStore.installUpdate(candidate.id, op);
         else accepted = false;
-        if (accepted === false) { updateDispatch = ""; hydrateUpdateState(); renderUpdateState(); }
+        if (accepted === false) {
+          updateDispatch = ""; updateDispatchAction = ""; hydrateUpdateState(); renderUpdateState();
+          showContextError("update", "系统未接受这次更新请求。", {primaryLabel: "重新检查", primaryAction: () => dispatchUpdate("check")});
+        }
       } catch (_) {
-        updateDispatch = ""; renderUpdateState();
+        updateDispatch = ""; updateDispatchAction = ""; renderUpdateState();
         $("update-status").textContent = "更新操作未启动，请稍后再试。";
+        showOperationError({title: "更新操作未启动", message: "无法调用系统更新服务。", solution: "请保持应用在前台，稍后重新检查更新。", primaryLabel: "重新检查", primaryAction: () => dispatchUpdate("check")});
       }
     }
     window.baguUpdateInstallState = function () {
@@ -2205,6 +2397,7 @@
     function showSpeechError(message) {
       $("speech-error").textContent = message;
       $("speech-error").classList.remove("hidden");
+      showContextError("speech", message, {returnFocus: $("btn-speech")});
     }
     function updateSpeechControls() {
       const active = Boolean(speechInput);
@@ -2404,6 +2597,7 @@
     function setNativeMessage(message, error) {
       $("native-message").textContent = message;
       $("native-message").classList.toggle("error", Boolean(error));
+      if (error) showContextError("file", message);
     }
     function setNativeBusy(operation) {
       nativeBusy = operation;
@@ -2430,7 +2624,7 @@
       } catch (_) {
         setNativeBusy("");
         if (operation === "diagnostics") setDiagnosticMessage("无法打开日志导出，请更新应用或重试。", true);
-        setNativeMessage("无法打开文件选择器，请重试。", true);
+        else setNativeMessage("无法打开文件选择器，请重试。", true);
       }
     }
     async function handleNativeResult(event) {
@@ -2468,6 +2662,7 @@
     function setDiagnosticMessage(message, error) {
       $("diagnostics-message").textContent = message;
       $("diagnostics-message").classList.toggle("error", Boolean(error));
+      if (error) showContextError("diagnostics", message, {returnFocus: $("btn-diagnostics-export")});
     }
     async function exportDiagnostics() {
       if (nativeBusy) return;
@@ -2569,9 +2764,10 @@
         const result = await api("POST", "/api/backup/restore", body);
         await handleNativeResult({ detail: Object.assign({ operation: "import", status: "ok" }, result) });
       } catch (error) {
-        setNativeMessage(!submitted && error.name === "AbortError" ? "已取消读取文件，原数据未改变。" : submitted
+        const cancelled = !submitted && error.name === "AbortError";
+        setNativeMessage(cancelled ? "已取消读取文件，原数据未改变。" : submitted
           ? "未能确认导入结果，请先刷新并核对题库与进度；不要重复导入。"
-          : "文件读取或校验失败，原数据未改变；请检查文件格式和大小。", true);
+          : "文件读取或校验失败，原数据未改变；请检查文件格式和大小。", !cancelled);
       } finally { setNativeBusy(""); }
     }
     async function exportDesktopArchive(mode) {
@@ -2789,8 +2985,7 @@
         appStorage.setItem(draftKey(session.session_id, q.id), $("ans").value);
         return true;
       } catch (_) {
-        $("q-err").textContent = "草稿保存失败，请保留当前页面并缩短回答后重试。";
-        $("q-err").classList.remove("hidden");
+        showContextError("session", "草稿保存失败。", {solution: "请保留当前页面，缩短回答后重试；尚未提交评判。", returnFocus: $("ans")});
         return false;
       }
     }
@@ -2853,8 +3048,7 @@
     function prepareSubmission(sid, qid, flow) {
       try { return ensureActiveSubmission(sid, qid, flow); }
       catch (_) {
-        $("q-err").textContent = "提交状态保存失败，尚未提交。请保留回答并重试。";
-        $("q-err").classList.remove("hidden");
+        showContextError("session", "提交状态保存失败，尚未提交。", {solution: "请保留当前回答并重试；本次操作尚未写入评分。", returnFocus: $("btn-submit")});
         return null;
       }
     }
@@ -3029,8 +3223,7 @@
       } catch (e) {
         if (generation !== revealGeneration) return;
         box.textContent = e.message;
-        $("q-err").textContent = e.message;
-        $("q-err").classList.remove("hidden");
+        showContextError("session", e.message, {solution: "检查当前轮次状态后重试；显示答案不会自动计分。", returnFocus: $("btn-dont-know")});
       }
     }
 
@@ -3073,8 +3266,7 @@
           $("btn-submit").textContent = "下一题";
         }
       } catch (e) {
-        $("q-err").textContent = e.message;
-        $("q-err").classList.remove("hidden");
+        showContextError("session", e.message, {solution: "当前题尚未完成自评，请确认轮次仍在进行后重试。", returnFocus: $("btn-review-next")});
       } finally {
         $("btn-skip").disabled = false;
         if (!completed) {
@@ -3253,7 +3445,11 @@
         showView("quiz");
         await refresh();
       } catch (e) {
-        alert(e.message);
+        showContextError("session", e.message, {
+          title: "无法开始练习",
+          solution: "如果已有轮次，请返回练习并完成或结束它；否则刷新后重试。",
+          primaryLabel: "返回练习", primaryAction: () => showView("quiz"), returnFocus: $("btn-draw")
+        });
         await refresh();
       } finally { finish(); }
     }
@@ -3279,34 +3475,28 @@
       if (current && presets[current]) sel.value = current;
     }
 
-    let judgeFailureReturnFocus = null;
-
     function isModelConfigurationError(message) {
       return String(message || "").trim() === "未配置模型";
     }
 
     function showJudgeFailure(message) {
       const unconfigured = isModelConfigurationError(message);
-      judgeFailureReturnFocus = $("btn-submit");
-      $("judge-failure-title").textContent = unconfigured ? "未配置评卷模型" : "模型评判失败";
-      $("judge-failure-message").textContent = unconfigured
-        ? "模型未配置。请前往模型配置库补充模型或 API Key 后重试。"
-        : (String(message || "").trim() || "模型评判时发生未知错误，请稍后重试。");
-      $("btn-judge-failure-config").classList.toggle("hidden", !unconfigured);
-      $("btn-judge-failure-close").textContent = unconfigured ? "稍后处理" : "关闭";
-      $("judge-failure-dialog").classList.remove("hidden");
-      (unconfigured ? $("btn-judge-failure-config") : $("btn-judge-failure-close")).focus();
+      showOperationError({
+        title: unconfigured ? "未配置评卷模型" : "模型评判失败",
+        message: unconfigured ? "当前没有可用的评卷模型配置。" : (String(message || "").trim() || "模型评判时发生未知错误。"),
+        solution: unconfigured ? "前往模型配置库，补充模型、API Key 与服务地址并测试通过后重试。" : "检查网络和当前模型配置后重新评判；你的回答草稿仍然保留。",
+        primaryLabel: unconfigured ? "前往模型配置" : "关闭",
+        primaryAction: unconfigured ? openJudgeFailureModelConfig : null,
+        secondaryLabel: unconfigured ? "稍后处理" : "",
+        returnFocus: $("btn-submit")
+      });
     }
 
     function closeJudgeFailure() {
-      $("judge-failure-dialog").classList.add("hidden");
-      const returnFocus = judgeFailureReturnFocus;
-      judgeFailureReturnFocus = null;
-      if (returnFocus) returnFocus.focus();
+      if (appDialogState && appDialogState.kind === "error") closeAppDialog();
     }
 
     async function openJudgeFailureModelConfig() {
-      closeJudgeFailure();
       showView("lib");
       await renderLibrary();
     }
@@ -3420,8 +3610,7 @@
               await api("POST", "/api/models/" + card.dataset.id + "/activate");
               await renderLibrary();
             } catch (e) {
-              $("lib-err").textContent = e.message;
-              $("lib-err").classList.remove("hidden");
+              showContextError("model", e.message, {returnFocus: card});
             }
           });
         });
@@ -3441,14 +3630,12 @@
                 await renderLibrary();
               }
             } catch (err) {
-              $("lib-err").textContent = err.message;
-              $("lib-err").classList.remove("hidden");
+              showContextError("model", err.message, {returnFocus: btn});
             }
           });
         });
       } catch (e) {
-        $("lib-err").textContent = e.message;
-        $("lib-err").classList.remove("hidden");
+        showContextError("model", e.message, {returnFocus: $("btn-new-model")});
       }
     }
 
@@ -3458,6 +3645,10 @@
       ok.classList.add("hidden");
       err.classList.add("hidden");
       if (!message) return;
+      if (kind === "error") {
+        showContextError("question", message);
+        return;
+      }
       const target = kind === "success" ? ok : err;
       target.textContent = message;
       target.classList.remove("hidden");
@@ -3607,8 +3798,7 @@
         forgetSessionMode(sid);
         await refresh();
       } catch (e) {
-        $("q-err").textContent = e.message;
-        $("q-err").classList.remove("hidden");
+        showContextError("session", e.message, {solution: "本轮仍保持进行中。请稍后重试，不要重复提交已完成的评分。", returnFocus: $("btn-skip")});
       }
     });
 
@@ -3619,8 +3809,9 @@
     });
     
     $("btn-review-next").addEventListener("click", advanceQuestion);
-    $("btn-judge-failure-close").addEventListener("click", closeJudgeFailure);
-    $("btn-judge-failure-config").addEventListener("click", openJudgeFailureModelConfig);
+    $("app-dialog-primary").addEventListener("click", activateAppDialogPrimary);
+    $("app-dialog-secondary").addEventListener("click", activateAppDialogSecondary);
+    document.addEventListener("keydown", handleAppDialogKeydown);
     
     $("btn-submit").addEventListener("click", async () => {
       if (speechInput) return;
@@ -3665,8 +3856,6 @@
         $("btn-submit").textContent = "下一题";
       } catch (e) {
         stopJudgeProgress();
-        $("q-err").textContent = e.message;
-        $("q-err").classList.remove("hidden");
         $("btn-submit").textContent = "重新评判";
         saveDraft();
         showJudgeFailure(e.message);
@@ -3785,8 +3974,7 @@
         showQuestionMessage("success", wasEditing ? "题目已更新。" : "题目已新增。");
         editingQuestionId = null;
       } catch (e) {
-        error.textContent = e.message;
-        error.classList.remove("hidden");
+        showContextError("question", e.message, {returnFocus: button});
       } finally {
         button.disabled = false;
         button.textContent = "保存题目";
@@ -3866,8 +4054,7 @@
       } catch (e) {
         testedOk = false;
         $("btn-save").disabled = true;
-        $("cfg-err").textContent = e.message;
-        $("cfg-err").classList.remove("hidden");
+        showContextError("model", e.message, {title: "模型配置验证失败", returnFocus: $("btn-test")});
       } finally {
         $("btn-test").disabled = false;
       }
@@ -3891,8 +4078,7 @@
         showView("lib");
         await renderLibrary();
       } catch (e) {
-        $("cfg-err").textContent = e.message;
-        $("cfg-err").classList.remove("hidden");
+        showContextError("model", e.message, {returnFocus: $("btn-save")});
         $("btn-save").disabled = false;
       }
     });
@@ -3928,8 +4114,6 @@
       $("btn-update-download").addEventListener("click", () => dispatchUpdate("download"));
       $("btn-update-cancel").addEventListener("click", () => dispatchUpdate("cancel"));
       $("btn-update-install").addEventListener("click", () => dispatchUpdate("install"));
-      $("btn-update-later").addEventListener("click", dismissUpdateNotice);
-      $("btn-update-details").addEventListener("click", () => { showView("settings"); $("update-card").scrollIntoView(); });
       try { $("update-current-version").textContent = "当前版本：" + JSON.parse(nativeStore.getAppInfo()).versionName; } catch (_) { /* Older host remains usable. */ }
       hydrateUpdateState();
       $("settings-model").appendChild($("model-bar"));

@@ -2843,6 +2843,8 @@ async function streamAnswer() { return result; }
 
 def test_judge_failure_dialog_distinguishes_unconfigured_model_and_preserves_retry_state():
     html = (Path(__file__).parents[1] / "web/index.html").read_text(encoding="utf-8")
+    dialogs = html[html.index("    // Android updater:"):
+                   html.index("    let updateState")]
     helpers = html[html.index("    function isModelConfigurationError"):
                    html.index("    function renderModelBar")]
     submit = html[html.index('    $("btn-submit").addEventListener("click", async () => {'):
@@ -2861,6 +2863,7 @@ function makeClassList() {
 function $(id) { return nodes[id] || (nodes[id] = {
   value: '回答', innerHTML: '', textContent: '', disabled: false, dataset: {},
   classList: makeClassList(),
+  setAttribute(name, value) { this[name] = String(value); },
   focus() { focused = id; },
   addEventListener(event, callback) { handlers[id + ':' + event] = callback; }
 }); }
@@ -2876,47 +2879,52 @@ function bindAnswerImageFallbacks() {} function judgeResultMarkup() { return '';
 function showView(view) { currentView = view; }
 async function renderLibrary() { libraryRenders += 1; }
 async function streamAnswer() { throw new Error('未配置模型'); }
-''' + helpers + submit + r'''
+''' + dialogs + helpers + submit + r'''
 (async () => {
   document.activeElement = $('btn-submit');
   await handlers['btn-submit:click']();
   const configured = {
-    title:$('judge-failure-title').textContent,
-    message:$('judge-failure-message').textContent,
-    dialogHidden:$('judge-failure-dialog').classList.contains('hidden'),
-    configHidden:$('btn-judge-failure-config').classList.contains('hidden'),
+    title:$('app-dialog-title').textContent,
+    message:$('app-dialog-message').textContent,
+    solution:$('app-dialog-solution-text').textContent,
+    dialogHidden:$('app-dialog-backdrop').classList.contains('hidden'),
+    configHidden:$('app-dialog-primary').classList.contains('hidden'),
     retry:$('btn-submit').textContent, error:$('q-err').textContent,
     drafts, focused
   };
-  await openJudgeFailureModelConfig();
+  activateAppDialogPrimary();
   const routed = {view:currentView, libraryRenders,
-    dialogHidden:$('judge-failure-dialog').classList.contains('hidden'), focused};
+    dialogHidden:$('app-dialog-backdrop').classList.contains('hidden'), focused};
   showJudgeFailure('服务暂时不可用');
-  const generic = {title:$('judge-failure-title').textContent,
-    message:$('judge-failure-message').textContent,
-    configHidden:$('btn-judge-failure-config').classList.contains('hidden')};
+  const generic = {title:$('app-dialog-title').textContent,
+    message:$('app-dialog-message').textContent,
+    solution:$('app-dialog-solution-text').textContent,
+    secondaryHidden:$('app-dialog-secondary').classList.contains('hidden')};
   closeJudgeFailure();
   process.stdout.write(JSON.stringify({configured, routed, generic, returnedFocus:focused}));
 })().catch((error) => { console.error(error); process.exit(1); });
 '''
-    completed = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8")
+    completed = subprocess.run(["node", "-"], input=script, capture_output=True, text=True, encoding="utf-8")
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)
     assert result["configured"] == {
         "title": "未配置评卷模型",
-        "message": "模型未配置。请前往模型配置库补充模型或 API Key 后重试。",
+        "message": "当前没有可用的评卷模型配置。",
+        "solution": "前往模型配置库，补充模型、API Key 与服务地址并测试通过后重试。",
         "dialogHidden": False,
         "configHidden": False,
         "retry": "重新评判",
-        "error": "未配置模型",
+        "error": "",
         "drafts": 2,
-        "focused": "btn-judge-failure-config",
+        "focused": "app-dialog-primary",
     }
     assert result["routed"] == {
         "view": "lib", "libraryRenders": 1, "dialogHidden": True, "focused": "btn-submit"
     }
     assert result["generic"] == {
-        "title": "模型评判失败", "message": "服务暂时不可用", "configHidden": True
+        "title": "模型评判失败", "message": "服务暂时不可用",
+        "solution": "检查网络和当前模型配置后重新评判；你的回答草稿仍然保留。",
+        "secondaryHidden": True,
     }
     assert result["returnedFocus"] == "btn-submit"
 

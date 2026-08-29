@@ -161,9 +161,9 @@ def test_setup_signing_rejects_an_isolated_partial_identity(tmp_path):
 def test_verify_rejects_missing_companion_metadata_before_sdk_tools(tmp_path):
     """Catches Verify accepting a delivery set that omits the promised certificate/install metadata."""
     root = make_isolated_release_script_root(tmp_path)
-    delivery = root / "dist/android/0.1.0-beta.2/public"
+    delivery = root / "dist/android/0.1.0-beta.4/public"
     delivery.mkdir(parents=True)
-    apk = delivery / "bagu-0.1.0-beta.2-public-arm64-v8a.apk"
+    apk = delivery / "bagu-0.1.0-beta.4-public-arm64-v8a.apk"
     apk.write_bytes(b"test-apk")
     (delivery / "SHA256SUMS").write_text(
         f"{hashlib.sha256(apk.read_bytes()).hexdigest()} *{apk.name}\n", encoding="utf-8"
@@ -337,7 +337,7 @@ def web_section(start, end):
 
 
 def run_web_js(source):
-    completed = subprocess.run(["node", "-e", source], capture_output=True, text=True, encoding="utf-8")
+    completed = subprocess.run(["node", "-"], input=source, capture_output=True, text=True, encoding="utf-8")
     assert completed.returncode == 0, completed.stderr
     return json.loads(completed.stdout)
 
@@ -525,10 +525,12 @@ const crypto={{randomUUID:()=> '12345678-1234-4234-8234-123456789abc'}};
 $('ans').value='未保存的回答';
 {source}
 const saved=saveDraft(); const submission=prepareSubmission('s_one',7,'answer');
-process.stdout.write(JSON.stringify({{saved,submission,answer:$('ans').value,message:$('q-err').textContent}}));
+process.stdout.write(JSON.stringify({{saved,submission,answer:$('ans').value,message:window.__lastContextError.message,
+ context:window.__lastContextError.context}}));
 """)
     assert result["saved"] is False and result["submission"] is None
     assert result["answer"] == "未保存的回答"
+    assert result["context"] == "session"
     assert "private storage details" not in result["message"] and "保存" in result["message"]
 
 
@@ -545,6 +547,9 @@ function $(id) {
 }
 const document={querySelector:s=>s==='.app' ? $('app'):null,querySelectorAll:()=>[],activeElement:null};
 const window={};
+function showContextError(context,message,options={}) {
+ window.__lastContextError={context,message,options};
+}
 """
 
 
@@ -696,19 +701,30 @@ def test_android_manifest_limits_permissions_and_launch_surface():
     assert path.is_file(), "Android manifest not implemented"
     manifest = ET.parse(path).getroot()
     assert {p.get(NS + "name") for p in manifest.findall("uses-permission")} == {
-        "android.permission.INTERNET", "android.permission.RECORD_AUDIO", "android.permission.REQUEST_INSTALL_PACKAGES"}
+        "android.permission.INTERNET", "android.permission.RECORD_AUDIO", "android.permission.REQUEST_INSTALL_PACKAGES",
+        "android.permission.QUERY_ADVANCED_PROTECTION_MODE"}
     assert [action.get(NS + "name") for action in manifest.findall("queries/intent/action")] == [
         "android.speech.RecognitionService"]
     app = manifest.find("application")
     assert app.get(NS + "allowBackup") == "false"
     assert app.get(NS + "networkSecurityConfig") == "@xml/network_security_config"
-    activity = app.find("activity")
+    activities = {activity.get(NS + "name"): activity for activity in app.findall("activity")}
+    assert set(activities) == {".MainActivity", ".UpdateInstallActivity"}
+    activity = activities[".MainActivity"]
     assert activity.get(NS + "exported") == "true"
     assert activity.get(NS + "resizeableActivity") == "true"
     filters = activity.findall("intent-filter")
     assert len(filters) == 1
     assert [a.get(NS + "name") for a in filters[0].findall("action")] == ["android.intent.action.MAIN"]
     assert not filters[0].findall("data"), "Do not accept external deep-link launches"
+    callback = activities[".UpdateInstallActivity"]
+    assert callback.get(NS + "exported") == "false"
+    assert callback.get(NS + "excludeFromRecents") == "true"
+    assert callback.get(NS + "noHistory") == "true"
+    assert callback.get(NS + "theme") == "@style/Theme.Bagu.InstallCallback"
+    assert not callback.findall("intent-filter")
+    providers = {provider.get(NS + "name") for provider in app.findall("provider")}
+    assert providers == {".ImportProvider"}, "APK bytes must be handed to a PackageInstaller session, not a provider URI"
 
 
 def test_android_build_graph_declares_bounded_generated_sources():
