@@ -2,17 +2,17 @@
   "schema_version": 1,
   "channel": "beta",
   "release": {
-    "versionName": "0.1.0-beta.3",
-    "versionCode": 3,
+    "versionName": "0.1.0-beta.4",
+    "versionCode": 4,
     "distribution": "public",
     "packageName": "io.github.ingnijm.baguhelper",
     "minSdk": 29,
     "abi": "arm64-v8a",
-    "apkUrl": "https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.3/bagu-0.1.0-beta.3-public-arm64-v8a.apk",
-    "size": 29936357,
-    "sha256": "8a177050afc4eaf5132bd0186292787ab3c5aacc30b7ba40836dd575af9734b3",
-    "releaseUrl": "https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.3",
-    "publishedAt": "2026-08-28T14:12:39Z",
-    "notes": "本版完善 Android 更新检查的通道专属失败原因与 HTTP 状态展示，并将反馈编号和诊断导出接入更新流程。\n进程重启后的检查状态会给出安全摘要；自动检查失败不会打断练习，手动检查可查看简短原因和反馈编号。\n发布前会检查更新 feed、Pages 配置及两通道匿名访问，避免将不完整或错误来源当作可用更新。\n公开发行包保持空题库。下载和安装均须用户明确确认，仍支持既有题库和进度迁移。"
+    "apkUrl": "https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.4/bagu-0.1.0-beta.4-public-arm64-v8a.apk",
+    "size": 29956897,
+    "sha256": "72688b17e48243e121b9f3cabe47a6fafa9a8561aceceb7590bf1eeeedcd225a",
+    "releaseUrl": "https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.4",
+    "publishedAt": "2026-08-29T08:14:01Z",
+    "notes": "# 八股助手 0.1.0-beta.4\n\n这是尚未公开发布的 beta.4 候选说明。公开发布、远端更新清单和 Git Tag 需要另行确认。\n\n## 主要变化\n\n- 修复 Android 15 及以上系统中安装确认页可能被系统静默拦截的问题。\n- 安装更新改用受保护的 `PackageInstaller.Session` 回调，并新增脱敏确认阶段诊断。\n- 主动操作失败统一使用可访问弹窗，明确显示错误信息、解决办法和可用操作。\n- 更新可用提示采用紧凑的 Compact Editorial 卡片，先查看详情，再决定是否下载。\n\n## 安全与数据\n\n- 不自动结束练习、不自动重试写操作，也不自动下载或安装更新。\n- 安装成功仍以后续启动核对实际 versionCode 为准。\n- public 包首次安装为空题库；同包名、同签名覆盖升级不会主动清除应用私有数据。"
   }
 }
