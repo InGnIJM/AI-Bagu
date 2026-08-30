@@ -576,6 +576,121 @@ def test_reuses_ids_across_insertion_aliases_changes_and_never_reuses_deleted(tm
     }
 
 
+def test_insertion_cannot_hide_a_wording_change_without_an_alias(tmp_path):
+    preparer = load_preparer()
+    source_root = make_source(
+        tmp_path,
+        "## Section\n- [ ] Alpha question\n- [ ] Beta question\n",
+    )
+    workspace = tmp_path / "workspace"
+    overrides = direct_overrides(["q.agent.01.001", "q.agent.01.002"])
+    run_prepare(
+        preparer,
+        source_root,
+        workspace,
+        overrides,
+        expected_questions=2,
+    )
+    catalog_path = workspace / "catalog" / "private-catalog.json"
+    map_path = workspace / "catalog" / "stable-ids.json"
+    catalog_before = catalog_path.read_bytes()
+    map_before = map_path.read_bytes()
+
+    (source_root / "Agent面经" / "01_Agent基础" / "01_问题版.md").write_text(
+        (
+            "## Section\n"
+            "- [ ] Inserted question\n"
+            "- [ ] Alpha question\n"
+            "- [ ] Beta question revised\n"
+        ),
+        encoding="utf-8",
+    )
+    del overrides["questions"]["q.agent.01.002"]
+    overrides["questions"].update(
+        {
+            "q.agent.01.003": {
+                "category": "general",
+                "kind": "review",
+                "retired": False,
+                "answer": "Inserted answer.",
+            },
+            "q.agent.01.004": {
+                "category": "general",
+                "kind": "review",
+                "retired": False,
+                "answer": "Revised answer.",
+            },
+        }
+    )
+
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            source_root,
+            workspace,
+            overrides,
+            expected_questions=3,
+        )
+
+    assert "identity_changed" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert catalog_path.read_bytes() == catalog_before
+    assert map_path.read_bytes() == map_before
+
+
+@pytest.mark.parametrize(
+    ("stored_id", "next_number"),
+    [
+        ("q.backend.99.777", 778),
+        ("q.agent.01.1", 2),
+        ("q.agent.01.001", 1),
+        ("q.agent.01.001", 3),
+    ],
+)
+def test_rejects_cross_topic_malformed_or_inconsistent_stable_map_entries(
+    tmp_path, stored_id, next_number
+):
+    preparer = load_preparer()
+    source_root = make_source(tmp_path, "## Section\n- [ ] Question\n")
+    workspace = tmp_path / "workspace"
+    overrides = direct_overrides(["q.agent.01.001"])
+    run_prepare(
+        preparer,
+        source_root,
+        workspace,
+        overrides,
+        expected_questions=1,
+    )
+    catalog_path = workspace / "catalog" / "private-catalog.json"
+    map_path = workspace / "catalog" / "stable-ids.json"
+    catalog_before = catalog_path.read_bytes()
+    stable_map = read_json(map_path)
+    stable_map["topics"]["agent.01"]["entries"][0]["stable_id"] = stored_id
+    stable_map["topics"]["agent.01"]["next_question_number"] = next_number
+    write_json(map_path, stable_map)
+    map_before = map_path.read_bytes()
+    if stored_id != "q.agent.01.001":
+        overrides["questions"][stored_id] = overrides["questions"].pop(
+            "q.agent.01.001"
+        )
+
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            source_root,
+            workspace,
+            overrides,
+            expected_questions=1,
+        )
+
+    assert "invalid_stable_map" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert catalog_path.read_bytes() == catalog_before
+    assert map_path.read_bytes() == map_before
+
+
 @pytest.mark.parametrize(
     ("case", "archive", "questions", "remove_file", "code"),
     [
@@ -790,6 +905,161 @@ def test_failure_report_and_template_are_redacted_and_outputs_are_atomic(tmp_pat
         assert value not in template_bytes
     report = json.loads(report_bytes)
     assert all(set(blocker) <= {"code", "path", "stable_id"} for blocker in report["blockers"])
+
+
+def test_blocker_coordinates_never_echo_nonportable_override_keys(tmp_path):
+    preparer = load_preparer()
+    builder = load_builder()
+    source_root = make_source(tmp_path, "## Section\n- [ ] Question\n")
+    workspace = tmp_path / "workspace"
+    overrides = direct_overrides(["q.agent.01.001"])
+    private_path = "C:\\PRIVATE\\secret-source.md"
+    private_url = "https://private.example.test/secret-source"
+    overrides["questions"][private_path] = {
+        "category": "general",
+        "kind": "review",
+        "retired": False,
+        "answer": "Secret answer.",
+    }
+    overrides["identity_aliases"]["a" * 64] = private_url
+
+    with pytest.raises(preparer.CatalogPreparationError):
+        run_prepare(
+            preparer,
+            source_root,
+            workspace,
+            overrides,
+            expected_questions=1,
+        )
+
+    report_path = workspace / "reports" / "normalization-report.json"
+    report_bytes = report_path.read_bytes()
+    for private_value in (b"C:", b"PRIVATE", b"private.example.test", b"secret-source"):
+        assert private_value not in report_bytes
+    report = read_json(report_path)
+    for blocker in report["blockers"]:
+        if "stable_id" in blocker:
+            assert len(blocker["stable_id"]) <= builder.MAX_STABLE_ID_LENGTH
+            assert builder.STABLE_ID_PATTERN.fullmatch(blocker["stable_id"])
+        if "path" in blocker:
+            assert ":" not in blocker["path"]
+            assert not blocker["path"].startswith(("/", "\\"))
+
+
+@pytest.mark.parametrize(
+    "diagnostic_name",
+    ["overrides-template.json", "normalization-report.json"],
+)
+def test_source_drift_during_diagnostic_writes_blocks_pair_promotion(
+    tmp_path, monkeypatch, diagnostic_name
+):
+    preparer = load_preparer()
+    source_root = make_source(tmp_path, "## Section\n- [ ] Question\n")
+    workspace = tmp_path / "workspace"
+    overrides = direct_overrides(["q.agent.01.001"])
+    run_prepare(
+        preparer,
+        source_root,
+        workspace,
+        overrides,
+        expected_questions=1,
+    )
+    catalog_path = workspace / "catalog" / "private-catalog.json"
+    map_path = workspace / "catalog" / "stable-ids.json"
+    catalog_before = catalog_path.read_bytes()
+    map_before = map_path.read_bytes()
+    original_atomic_json = preparer._atomic_json
+    mutated = False
+
+    def mutate_after_write(path, value):
+        nonlocal mutated
+        original_atomic_json(path, value)
+        if Path(path).name == diagnostic_name and not mutated:
+            mutated = True
+            (source_root / "README.md").write_text(
+                "# Fixture source changed during diagnostics\n", encoding="utf-8"
+            )
+
+    monkeypatch.setattr(preparer, "_atomic_json", mutate_after_write)
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            source_root,
+            workspace,
+            overrides,
+            expected_questions=1,
+        )
+
+    assert "source_changed" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert read_json(workspace / "reports" / "normalization-report.json")[
+        "status"
+    ] == "blocked"
+    assert catalog_path.read_bytes() == catalog_before
+    assert map_path.read_bytes() == map_before
+
+
+@pytest.mark.parametrize(
+    "failed_target", ["stable-ids.json", "private-catalog.json"]
+)
+def test_pair_promotion_failure_restores_both_prior_outputs(
+    tmp_path, monkeypatch, failed_target
+):
+    preparer = load_preparer()
+    source_root = make_source(tmp_path, "## Section\n- [ ] First question\n")
+    workspace = tmp_path / "workspace"
+    overrides = direct_overrides(["q.agent.01.001"])
+    run_prepare(
+        preparer,
+        source_root,
+        workspace,
+        overrides,
+        expected_questions=1,
+    )
+    catalog_path = workspace / "catalog" / "private-catalog.json"
+    map_path = workspace / "catalog" / "stable-ids.json"
+    catalog_before = catalog_path.read_bytes()
+    map_before = map_path.read_bytes()
+
+    (source_root / "Agent面经" / "01_Agent基础" / "01_问题版.md").write_text(
+        "## Section\n- [ ] First question\n- [ ] Second question\n",
+        encoding="utf-8",
+    )
+    overrides["questions"]["q.agent.01.002"] = {
+        "category": "general",
+        "kind": "review",
+        "retired": False,
+        "answer": "Second answer.",
+    }
+    original_replace = preparer.os.replace
+    injected = False
+
+    def fail_one_pair_replace(source, destination):
+        nonlocal injected
+        if Path(destination).name == failed_target and not injected:
+            injected = True
+            raise OSError("injected pair promotion failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(preparer.os, "replace", fail_one_pair_replace)
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            source_root,
+            workspace,
+            overrides,
+            expected_questions=2,
+        )
+
+    assert "output_promotion_failed" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert read_json(workspace / "reports" / "normalization-report.json")[
+        "status"
+    ] == "blocked"
+    assert catalog_path.read_bytes() == catalog_before
+    assert map_path.read_bytes() == map_before
 
 
 def test_outputs_are_byte_deterministic_and_cli_supports_fixture_arguments(tmp_path):

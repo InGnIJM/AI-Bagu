@@ -39,6 +39,10 @@ TOPIC_NUMBER_PATTERN = re.compile(r"^(\d+)(?:[_ .-].*)?$")
 MARKDOWN_LINK_PATTERN = re.compile(r"\]\(([^)\s]+)")
 SCHEME_URL_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s<>)\]]+")
 HASH_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+STABLE_TOPIC_PATTERN = re.compile(r"(agent|backend)\.\d{2,}\Z")
+STORED_QUESTION_ID_PATTERN = re.compile(
+    r"q\.(agent|backend)\.(\d{2,})\.(\d{3,})\Z"
+)
 MAX_BLOCKERS = 1_000
 
 OVERRIDE_FIELDS = {"schema_version", "identity_aliases", "topics", "questions"}
@@ -98,8 +102,9 @@ class _Blockers:
             safe_path = _safe_report_path(path)
             if safe_path:
                 item["path"] = safe_path
-        if stable_id is not None and isinstance(stable_id, str):
-            item["stable_id"] = stable_id[: builder.MAX_STABLE_ID_LENGTH]
+        safe_stable_id = _safe_report_stable_id(stable_id)
+        if safe_stable_id:
+            item["stable_id"] = safe_stable_id
         if item not in self.items:
             self.items.append(item)
 
@@ -117,11 +122,23 @@ def _safe_report_path(value):
     return value[:1_024]
 
 
+def _safe_report_stable_id(value):
+    if not isinstance(value, str):
+        return None
+    value = unicodedata.normalize("NFC", value)
+    if (
+        len(value) > builder.MAX_STABLE_ID_LENGTH
+        or not builder.STABLE_ID_PATTERN.fullmatch(value)
+    ):
+        return None
+    return value
+
+
 def _canonical_json(value):
     return builder._canonical_json(value)
 
 
-def _atomic_json(path, value):
+def _stage_bytes(path, contents):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -130,13 +147,59 @@ def _atomic_json(path, value):
     temporary_path = Path(temporary)
     try:
         with os.fdopen(descriptor, "wb") as stream:
-            stream.write(_canonical_json(value))
+            stream.write(contents)
             stream.flush()
             os.fsync(stream.fileno())
+        return temporary_path
+    except BaseException:
+        if temporary_path.exists():
+            temporary_path.unlink()
+        raise
+
+
+def _atomic_bytes(path, contents):
+    temporary_path = _stage_bytes(path, contents)
+    try:
         os.replace(temporary_path, path)
     finally:
         if temporary_path.exists():
             temporary_path.unlink()
+
+
+def _atomic_json(path, value):
+    _atomic_bytes(path, _canonical_json(value))
+
+
+def _stage_json(path, value):
+    return _stage_bytes(path, _canonical_json(value))
+
+
+def _discard_staged(paths):
+    for path in paths:
+        if path is not None and path.exists():
+            path.unlink()
+
+
+def _promote_catalog_pair(staged_pairs):
+    previous = {
+        target: target.read_bytes() if target.exists() else None
+        for _, target in staged_pairs
+    }
+    promoted = []
+    try:
+        for staged, target in staged_pairs:
+            os.replace(staged, target)
+            promoted.append(target)
+    except OSError:
+        for target in reversed(promoted):
+            old_bytes = previous[target]
+            if old_bytes is None:
+                target.unlink(missing_ok=True)
+            else:
+                _atomic_bytes(target, old_bytes)
+        raise
+    finally:
+        _discard_staged([staged for staged, _ in staged_pairs])
 
 
 def _reject_duplicate_keys(pairs):
@@ -366,6 +429,7 @@ def _load_stable_map(path, blockers):
         for topic_key, topic in value["topics"].items():
             if (
                 not isinstance(topic_key, str)
+                or not STABLE_TOPIC_PATTERN.fullmatch(topic_key)
                 or not isinstance(topic, dict)
                 or set(topic) != STABLE_TOPIC_FIELDS
                 or type(topic.get("next_question_number")) is not int
@@ -375,11 +439,20 @@ def _load_stable_map(path, blockers):
                 valid = False
                 break
             ids = set()
+            numbers = []
             for entry in topic["entries"]:
+                stable_id = entry.get("stable_id") if isinstance(entry, dict) else None
+                stable_match = (
+                    STORED_QUESTION_ID_PATTERN.fullmatch(stable_id)
+                    if isinstance(stable_id, str)
+                    else None
+                )
                 if (
                     not isinstance(entry, dict)
                     or set(entry) != STABLE_ENTRY_FIELDS
-                    or not isinstance(entry.get("stable_id"), str)
+                    or stable_match is None
+                    or f"{stable_match.group(1)}.{stable_match.group(2)}" != topic_key
+                    or int(stable_match.group(3)) < 1
                     or not HASH_PATTERN.fullmatch(entry.get("question_sha256", ""))
                     or not _safe_report_path(entry.get("source_path"))
                     or type(entry.get("last_ordinal")) is not int
@@ -390,7 +463,11 @@ def _load_stable_map(path, blockers):
                     valid = False
                     break
                 ids.add(entry["stable_id"])
+                numbers.append(int(stable_match.group(3)))
             if not valid:
+                break
+            if topic["next_question_number"] != max(numbers, default=0) + 1:
+                valid = False
                 break
     if not valid:
         blockers.add("invalid_stable_map")
@@ -486,17 +563,40 @@ def _assign_stable_ids(topics, prior_map, aliases, prior_by_id, blockers):
             old_topic["next_question_number"],
             max((_numeric_id(entry["stable_id"]) + 1 for entry in old_entries), default=1),
         )
+
+        def unmatched_by_gap(sequence, get_stable_id):
+            next_anchors = [None] * len(sequence)
+            following = None
+            for index in range(len(sequence) - 1, -1, -1):
+                next_anchors[index] = following
+                stable_id = get_stable_id(sequence[index])
+                if stable_id in assigned_ids:
+                    following = stable_id
+            grouped = {}
+            preceding = None
+            for index, value in enumerate(sequence):
+                stable_id = get_stable_id(value)
+                if stable_id in assigned_ids:
+                    preceding = stable_id
+                    continue
+                grouped.setdefault((preceding, next_anchors[index]), []).append(value)
+            return grouped
+
+        old_by_gap = unmatched_by_gap(
+            sorted(old_entries, key=lambda entry: entry["last_ordinal"]),
+            lambda entry: entry["stable_id"],
+        )
+        new_by_gap = unmatched_by_gap(
+            topic["questions"], lambda item: item.get("stable_id")
+        )
+        changed_by_item = {}
+        for gap, new_items in new_by_gap.items():
+            old_items = old_by_gap.get(gap, [])
+            for item, changed in zip(new_items, old_items):
+                changed_by_item[id(item)] = changed
+
         for item in still_unmatched:
-            changed = next(
-                (
-                    entry
-                    for entry in old_entries
-                    if entry["stable_id"] not in assigned_ids
-                    and entry["source_path"] == item["source_path"]
-                    and entry["last_ordinal"] == item["last_ordinal"]
-                ),
-                None,
-            )
+            changed = changed_by_item.get(id(item))
             if changed is not None:
                 item["stable_id"] = changed["stable_id"]
                 assigned_ids.add(item["stable_id"])
@@ -908,6 +1008,18 @@ def prepare_catalog(
     template = _make_template(
         topics, valid_topics, valid_questions, alias_suggestions
     )
+    staged_pairs = []
+    if blockers.total == 0:
+        try:
+            staged_pairs.append(
+                (_stage_json(stable_map_path, candidate_map), stable_map_path)
+            )
+            staged_pairs.append((_stage_json(catalog_path, catalog), catalog_path))
+        except OSError:
+            _discard_staged([staged for staged, _ in staged_pairs])
+            staged_pairs = []
+            blockers.add("output_preparation_failed")
+
     report = {
         "schema_version": 1,
         "status": "ready" if blockers.total == 0 else "blocked",
@@ -925,11 +1037,32 @@ def prepare_catalog(
     }
     _atomic_json(template_path, template)
     _atomic_json(report_path, report)
+
+    reported_blockers = blockers.total
+    try:
+        final_files = builder._scan_sources(root)
+    except builder.PackBuildError:
+        final_files = None
+    if final_files != files_before:
+        blockers.add("source_changed")
     if blockers.total:
+        _discard_staged([staged for staged, _ in staged_pairs])
+        if blockers.total != reported_blockers:
+            report["status"] = "blocked"
+            report["counts"]["blockers"] = blockers.total
+            report["blockers"] = blockers.items
+            _atomic_json(report_path, report)
         raise CatalogPreparationError(report)
 
-    _atomic_json(stable_map_path, candidate_map)
-    _atomic_json(catalog_path, catalog)
+    try:
+        _promote_catalog_pair(staged_pairs)
+    except OSError:
+        blockers.add("output_promotion_failed")
+        report["status"] = "blocked"
+        report["counts"]["blockers"] = blockers.total
+        report["blockers"] = blockers.items
+        _atomic_json(report_path, report)
+        raise CatalogPreparationError(report)
     return report
 
 
