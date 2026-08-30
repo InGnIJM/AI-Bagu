@@ -2,7 +2,7 @@
 
 [文档导航](README.md) · [用户指南](user-guide.md) · [HTTP API](api.md) · [架构与数据](architecture.md)
 
-本文描述当前源码的桌面命令及 Hermes 调用约定。命令在仓库根目录执行；默认数据库为 `bagu.py` 同目录下的 `bagu.db`，与桌面网页共用，不是 Android 私有题库。公开 beta.4 对应的旧源码尚不含题包/专题功能；下面的 CLI 协议本次保持兼容。
+本文描述当前源码的桌面命令及 Hermes 调用约定。命令在仓库根目录执行；默认数据库为 `bagu.py` 同目录下的 `bagu.db`，与桌面网页共用，不是 Android 私有题库。当前公开 beta.5（code 5）已包含题包/专题功能；历史 beta.4 不包含这些功能。下面的 CLI 协议保持兼容。
 
 ## 命令一览
 

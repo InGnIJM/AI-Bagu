@@ -2,7 +2,7 @@
 
 [文档导航](README.md) · [CLI](cli.md) · [用户指南](user-guide.md) · [架构与数据](architecture.md)
 
-本文描述当前源码的 HTTP、备份、诊断和原生更新契约，迁移操作见[数据迁移与更新](data-transfer-and-updates.md)。其中题包、面经专题、SQLite/备份 v3 是 2026-08-30 尚未发布的开发源码能力；公开 beta.4（源码 `ac53f34`）不提供这些新路由。桌面默认地址为 `http://127.0.0.1:8765`，可用 `python bagu.py serve --port 8765` 启动；Android 使用独立私有数据库和随机本机端口。这不是账号服务或公网 API。
+本文描述当前源码的 HTTP、备份、诊断和原生更新契约，迁移操作见[数据迁移与更新](data-transfer-and-updates.md)。当前公开 beta.5（code 5）已包含题包、面经专题、SQLite/备份 v3 及相应路由；历史 beta.4（源码 `ac53f34`）为 SQLite/备份 v2，不提供这些路由。桌面默认地址为 `http://127.0.0.1:8765`，可用 `python bagu.py serve --port 8765` 启动；Android 使用独立私有数据库和随机本机端口。这不是账号服务或公网 API。
 
 ## 通用约定与安全
 
@@ -196,11 +196,11 @@ CSV 请求为 `{"content":"category,question,answer,url\n..."}`，不是 multipa
 
 核心 `inspect_backup(data)` 和 Android 原生档案预览不访问数据库；但 HTTP inspect 沿用普通 API 的公共入口，处理前会调用 `get_conn`／`init_db`，缺失的数据库可能被创建、旧库可能被迁移。因此 HTTP 预览不是“绝对不写库”的数据库迁移预演，也不具备下方诊断接口的数据库故障隔离保证。
 
-当前源码新导出备份 schema v3，严格只含 `manifest.json`、`questions.json`、`packs.json`、`experiences.json`：
+beta.5 新导出的备份为 schema v3，严格只含 `manifest.json`、`questions.json`、`packs.json`、`experiences.json`：
 
 - `questions` 模式保存本地题、题包题/来源、题包 revision/hash 元数据、专题/章节顺序和 `include_in_review`，不保存调度；目标已有进度保留，新题从零开始。
 - `progress` 在同一内容快照上保存 review 题调度，并按稳定身份覆盖目标进度；prepare 的调度固定为零/null。
-- v1/v2 两成员档案继续按历史契约读取，v1 按 progress 处理；公开 beta.4 只认识这两个旧版本，不能读取 v3。
+- v1/v2 两成员档案继续按历史契约读取，v1 按 progress 处理；历史 beta.4 只认识这两个旧版本，不能读取 v3。
 
 两种 v3 模式均为一个 SQLite 读快照，不含模型配置、Key、草稿、会话、submission、评分分析或历史答案快照。备份 schema 与 SQLite `user_version=3` 是两个独立版本号。
 
