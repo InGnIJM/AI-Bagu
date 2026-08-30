@@ -43,7 +43,8 @@ def local_preflight(root=None):
         return command(["git", *args], cwd=root).decode("utf-8").strip()
     status = git("status", "--porcelain", "--untracked-files=all")
     dirty = [line for line in status.splitlines()
-             if not line.startswith("?? .tmp-plan-baseline/")]
+             if not (line.startswith("?? .tmp-plan-baseline/") or
+                     line.startswith('?? ".tmp-plan-baseline/'))]
     if dirty:
         raise ValueError("dirty checkout: explicitly review and commit source before preparing a release")
     check_origin(root)

@@ -621,6 +621,13 @@ def test_local_preflight_ignores_only_approved_plan_baseline_untracked_files(tmp
 
     monkeypatch.setattr(module, "command", command)
     assert module.local_preflight(tmp_path)[1] == "a" * 40
+    status = '?? ".tmp-plan-baseline/面经.tmp"\n'
+    assert module.local_preflight(tmp_path)[1] == "a" * 40
     status = "?? .tmp-plan-baseline/private.tmp\n?? unrelated.tmp\n"
     with pytest.raises(ValueError, match="dirty"):
         module.local_preflight(tmp_path)
+    for status in ('?? ".tmp-plan-baseline-evil/private.tmp"\n',
+                   '?? "unrelated/面经.tmp"\n',
+                   " M .tmp-plan-baseline/tracked.tmp\n"):
+        with pytest.raises(ValueError, match="dirty"):
+            module.local_preflight(tmp_path)
