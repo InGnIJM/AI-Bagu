@@ -8,9 +8,9 @@
 | --- | --- |
 | 在电脑启动，完成第一轮练习 | [快速开始](../README.md#快速开始) |
 | 配模型、用语音、管理题库/题包、导入 CSV、处理报错 | [使用指南](user-guide.md) |
-| 使用当前源码的面经模拟与 `.bagu-pack` | [面经模拟与题包](user-guide.md#面经模拟与题包) |
+| 使用 beta.5 的面经模拟与 `.bagu-pack` | [面经模拟与题包](user-guide.md#面经模拟与题包) |
 | 在 Android 安装、更新或保留数据 | [Android 指南](android-beta.md#安装更新与备份) |
-| 下载公开 APK、查看更新清单 | [beta.4 Release](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.4)、[更新源状态](data-transfer-and-updates.md#已上线的版本与更新清单) |
+| 下载公开 APK 和面经题包、查看更新清单 | [beta.5 Release](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.5)、[更新源状态](data-transfer-and-updates.md#已上线的版本与更新清单) |
 | 了解备份包含什么、恢复会覆盖什么 | [备份与恢复](user-guide.md#备份与恢复) |
 | 查看界面及配图来源 | [README 界面示例](../README.md)、[图片说明](images/README.md) |
 
@@ -28,17 +28,17 @@
 
 ## 版本与文档范围
 
-截至 2026-08-29，公开预发布版为 [v0.1.0-beta.4](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.4)，versionCode 为 `4`，来自精确提交 `ac53f341342c2266079af72e23b953aa3ae43459`。已提供免登录 APK 下载及 Beta 更新清单，Stable 清单为成功的空通道。普通用户不需要配置 GitHub CLI 或 Pages。
+截至 2026-08-31，公开预发布版为 [v0.1.0-beta.5](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.5)，versionCode 为 `5`，来自精确提交 `2b847013f185781b817b6458743ae08e383e8849`。Release 分别提供空种子 APK 与 `ai-bagu-2026-autumn-interviews-r1.bagu-pack` 题包附件；APK 不内置或自动下载题包。Beta 更新清单已指向 beta.5，Stable 清单仍是成功的空通道。普通用户不需要配置 GitHub CLI 或 Pages。
 
-该版本包含语音、评分答案来源及 SQLite v2、双端导入导出、答案格式恢复、诊断日志、Android 安装确认修复、统一错误弹窗与发布工具。以下范围须区分：
+该版本包含既有语音、评分答案来源、诊断与更新功能，并升级为 SQLite／备份 v3，加入面经模拟和桌面／Android 题包导入。以下范围须区分：
 
-- **公开 APK**：以该 Tag、六项附件及[beta.4 验收记录](validation.md#beta4-公开发布)为准；源码合入或文档更新不等于手机已安装新版。
+- **公开附件**：以 beta.5 Tag 的 APK、题包和校验附件为准；APK 与题包是独立字节，安装 APK 后仍需由用户选择题包并确认导入。
 - **发布后文档**：发布状态同步可能晚于 APK 对应提交，不改变已签名附件字节或 Tag 指向。
-- **版本配置**：公开 beta.4 的构建配置为 `0.1.0-beta.4 / 4 / beta`；复现发布必须使用对应 Tag、稳定签名和发布回执，不能把任意开发树当作公开版本。
+- **版本配置**：公开 beta.5 的构建配置为 `0.1.0-beta.5 / 5 / beta`；复现发布必须使用对应 Tag、稳定签名和发布回执，不能把任意开发树当作公开版本。
 
-2026-08-30 的题包与专题模拟开发最初在未提交工作树上完成验证，当前已形成专用发布分支上的提交检查点，并进入 beta.5 的本地发布验收。它**尚未形成新的 Tag、公开 Release 或已安装 APK**；已公开的 beta.4 仍是 SQLite v2 / 备份 v2，也不认识题包。正式题包字节、私有审校清单和源面经仍不进入 Git 或 APK；公开仓库只保存题包身份、数量和 SHA-256 描述。验证范围见[当前源码验收记录](validation.md#2026-08-30面经题包与专题模拟当前开发源码)。
+题包与专题模拟最初在开发分支完成本地验收，现已随 beta.5 正式公开。27 专题／748 题 r1 题包仅作为 Release 附件提供，正式字节、私有审校清单和源面经不进入 Git 或 APK；公开仓库只保存题包身份、数量和 SHA-256 描述。题包答案由 AI 生成，维护者已复核并接受为正式参考答案，但并非原帖作者或面试公司的标准答案。
 
-[历史验收记录](validation.md)集中保存每个阶段的测试、APK 哈希、模拟器与未覆盖项。beta.4 已完成构建、Release、匿名附件与 Pages 验证，但报告问题的 API36 物理手机和厂商系统安装仍待反馈。较早章节中的“未发布／未验收”只描述当时的对象，不撤销，也不套用到新版本。
+[历史验收记录](validation.md)集中保存每个阶段的测试、APK 哈希、模拟器与未覆盖项。beta.4 的六附件 Release 保留为历史版本；beta.5 已完成公开 Release 与附件校验，但尚未执行设备安装或仪器测试，不能把构建和静态校验等同于真机验收。较早章节中的“未发布／未验收”只描述当时的对象，不撤销，也不套用到新版本。
 
 ## 设计依据与历史计划
 
@@ -53,7 +53,7 @@
 | [会话与网页实现计划](superpowers/plans/2026-08-26-session-web.md) | 历史实施步骤，不应逐段复制成当前实现 |
 | [多模型实现计划](superpowers/plans/2026-08-26-model-profiles.md) | 历史实施步骤，旧接口及存储示例需核对 |
 | [Android Beta 实现计划](superpowers/plans/2026-08-27-android-beta.md) | 当时的实施与验收过程，不证明新包已验收 |
-| [面经题包与专题模拟计划](superpowers/plans/2026-08-29-interview-pack-simulation.md) | 当前开发源码的实现契约与任务状态；不包含真实面经、私有清单或首包 |
+| [面经题包与专题模拟计划](superpowers/plans/2026-08-29-interview-pack-simulation.md) | beta.5 功能的历史实现契约与任务记录；不包含真实面经、私有清单或正式题包字节 |
 
 ## 文档维护约定
 
