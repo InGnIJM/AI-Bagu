@@ -5,7 +5,8 @@ param(
     [string]$Mode,
     [string]$JavaHome = 'C:\Program Files\Java\jdk-17.0.10',
     [string]$BuildPython = 'E:\Anaconda\python.exe',
-    [string]$ReadElf = 'C:\Program Files\mingw64\bin\readelf.exe'
+    [string]$ReadElf = 'C:\Program Files\mingw64\bin\readelf.exe',
+    [string]$QuestionPack
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,6 +36,11 @@ if ($Mode -ne 'SetupSigning') {
     $DeliveryDir = Join-Path $RepoRoot ("dist\android\{0}\{1}" -f $Version.versionName, $Flavor)
     $DeliveryName = "bagu-$($Version.versionName)-$Flavor-arm64-v8a.apk"
     $DeliveryApk = Join-Path $DeliveryDir $DeliveryName
+    $QuestionPackDescriptor = Join-Path $RepoRoot ("docs\releases\{0}-question-pack.json" -f $Version.versionName)
+}
+
+if (-not [string]::IsNullOrWhiteSpace($QuestionPack) -and $Mode -ne 'Build') {
+    throw 'QuestionPack is accepted only by public Build.'
 }
 
 function Require-File([string]$Path, [string]$Label) {
@@ -270,10 +276,14 @@ function Invoke-ContentVerification([string]$ApkPath, [string]$Flavor) {
     Invoke-Tool $BuildPython $arguments
 }
 
-function Write-DeliveryMetadata([string]$ApkPath, [string]$Fingerprint) {
+function Write-DeliveryMetadata([string]$ApkPath, [string]$Fingerprint, [string]$PackPath) {
     if ($Flavor -ne 'public' -or $Fingerprint -ne $StableFingerprint) { throw 'Only trusted public APKs get release metadata' }
-    Invoke-Tool $BuildPython @((Join-Path $PSScriptRoot 'release_metadata.py'), 'prepare', $DeliveryDir,
+    $arguments = @((Join-Path $PSScriptRoot 'release_metadata.py'), 'prepare', $DeliveryDir,
         '--notes', (Join-Path $RepoRoot "docs\releases\$($Version.versionName).md"))
+    if (-not [string]::IsNullOrWhiteSpace($PackPath)) {
+        $arguments += @('--question-pack', $PackPath)
+    }
+    Invoke-Tool $BuildPython $arguments
 }
 
 function New-AsciiToolCopy([string]$ApkPath) {
@@ -296,11 +306,29 @@ function Invoke-DeliveryVerification {
     Require-File (Join-Path $DeliveryDir 'certificate-sha256.txt') 'certificate-sha256.txt'
     Require-File (Join-Path $DeliveryDir 'INSTALL.md') 'INSTALL.md'
     Invoke-Tool $BuildPython @((Join-Path $PSScriptRoot 'release_metadata.py'), 'verify', $DeliveryDir)
-    $sumPattern = '^([0-9a-f]{64}) \*' + [regex]::Escape($DeliveryName) + '$'
-    $expectedHash = ([regex]::Match((Get-Content -LiteralPath (Join-Path $DeliveryDir 'SHA256SUMS') -Raw -Encoding UTF8), $sumPattern, [System.Text.RegularExpressions.RegexOptions]::Multiline)).Groups[1].Value
-    $actualHash = Get-Sha256 $DeliveryApk
-    if ($expectedHash.Length -ne 64 -or $actualHash -ne $expectedHash) {
-        throw 'SHA256SUMS 与精确交付 APK 不匹配。'
+    $sumBytes = Get-Content -LiteralPath (Join-Path $DeliveryDir 'SHA256SUMS') -Raw -Encoding ASCII
+    $sumLines = $sumBytes -split "`n"
+    if ($sumLines.Count -lt 2 -or $sumLines[-1] -ne '') {
+        throw 'SHA256SUMS 必须以 LF 结尾并包含至少一个条目。'
+    }
+    $seenSumNames = @{}
+    foreach ($line in $sumLines[0..($sumLines.Count - 2)]) {
+        $match = [regex]::Match($line, '^([0-9a-f]{64}) \*([A-Za-z0-9][A-Za-z0-9._-]*)$')
+        if (-not $match.Success) {
+            throw "SHA256SUMS 条目格式无效：$line"
+        }
+        $expectedHash = $match.Groups[1].Value
+        $assetName = $match.Groups[2].Value
+        if ($seenSumNames.ContainsKey($assetName)) {
+            throw "SHA256SUMS 含重复条目：$assetName"
+        }
+        $seenSumNames[$assetName] = $true
+        $assetPath = Join-Path $DeliveryDir $assetName
+        Require-File $assetPath "SHA256SUMS 资产 $assetName"
+        $actualHash = Get-Sha256 $assetPath
+        if ($actualHash -ne $expectedHash) {
+            throw "SHA256SUMS 与精确交付资产不匹配：$assetName"
+        }
     }
     $metadataFingerprint = (Get-Content -LiteralPath (Join-Path $DeliveryDir 'certificate-sha256.txt') -Raw -Encoding UTF8).Trim()
     if ($metadataFingerprint -notmatch '^[0-9a-f]{64}$' -or $metadataFingerprint -ne $StableFingerprint) {
@@ -355,6 +383,17 @@ switch ($Mode) {
         }
     }
     { $_ -in @('Build', 'BuildInternal') } {
+        if ($Mode -eq 'Build') {
+            $hasDescriptor = Test-Path -LiteralPath $QuestionPackDescriptor -PathType Leaf
+            if ($hasDescriptor -and [string]::IsNullOrWhiteSpace($QuestionPack)) {
+                throw 'This version requires -QuestionPack before any Gradle build.'
+            }
+            if (-not [string]::IsNullOrWhiteSpace($QuestionPack)) {
+                Require-File $BuildPython '题包验证 Python'
+                Invoke-Tool $BuildPython @((Join-Path $PSScriptRoot 'release_metadata.py'), 'bind', $QuestionPack,
+                    '--version', (Join-Path $RepoRoot 'version.json'))
+            }
+        }
         Set-ProjectEnvironment
         $identity = Assert-ExistingSigningIdentity
         if ($identity -ne $StableFingerprint) { throw 'Build requires the existing trusted release identity' }
@@ -381,7 +420,7 @@ switch ($Mode) {
         New-Item -ItemType Directory -Path $DeliveryDir -Force | Out-Null
         Copy-Item -LiteralPath $builtApk -Destination $DeliveryApk
         if ($Flavor -eq 'public') {
-            Write-DeliveryMetadata $DeliveryApk $fingerprint
+            Write-DeliveryMetadata $DeliveryApk $fingerprint $QuestionPack
             Invoke-DeliveryVerification
         } else {
             Write-Host 'Internal local-use APK only; no public release metadata generated.'

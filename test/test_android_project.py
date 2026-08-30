@@ -218,9 +218,9 @@ def test_setup_signing_rejects_an_isolated_partial_identity(tmp_path):
 def test_verify_rejects_missing_companion_metadata_before_sdk_tools(tmp_path):
     """Catches Verify accepting a delivery set that omits the promised certificate/install metadata."""
     root = make_isolated_release_script_root(tmp_path)
-    delivery = root / "dist/android/0.1.0-beta.4/public"
+    delivery = root / "dist/android/0.1.0-beta.5/public"
     delivery.mkdir(parents=True)
-    apk = delivery / "bagu-0.1.0-beta.4-public-arm64-v8a.apk"
+    apk = delivery / "bagu-0.1.0-beta.5-public-arm64-v8a.apk"
     apk.write_bytes(b"test-apk")
     (delivery / "SHA256SUMS").write_text(
         f"{hashlib.sha256(apk.read_bytes()).hexdigest()} *{apk.name}\n", encoding="utf-8"
@@ -243,6 +243,111 @@ def test_verify_rejects_missing_companion_metadata_before_sdk_tools(tmp_path):
 
     assert result.returncode != 0
     assert "certificate-sha256" in result.stdout + result.stderr
+
+
+def test_verify_independently_hashes_every_checksum_row_before_apk_tools(tmp_path):
+    """Catches Verify checking only the APK row after Python directory validation."""
+    root = make_isolated_release_script_root(tmp_path)
+    (root / "version.json").write_text(json.dumps({
+        "versionName": "0.1.0-beta.5", "versionCode": 5, "channel": "beta",
+    }), encoding="utf-8")
+    delivery = root / "dist/android/0.1.0-beta.5/public"
+    delivery.mkdir(parents=True)
+    apk = delivery / "bagu-0.1.0-beta.5-public-arm64-v8a.apk"
+    pack = delivery / "ai-bagu-synthetic-interviews-r1.bagu-pack"
+    apk.write_bytes(b"test-apk")
+    pack.write_bytes(b"test-pack")
+    (delivery / "SHA256SUMS").write_bytes((
+        f"{'0' * 64} *{pack.name}\n"
+        f"{hashlib.sha256(apk.read_bytes()).hexdigest()} *{apk.name}\n"
+    ).encode("ascii"))
+    (delivery / "certificate-sha256.txt").write_text("a" * 64 + "\n", encoding="ascii")
+    (delivery / "INSTALL.md").write_text(
+        f'adb install "{apk.name}"\n', encoding="utf-8"
+    )
+    (delivery / "RELEASE_NOTES.md").write_text("synthetic\n", encoding="utf-8")
+    (delivery / "update.json").write_text("{}\n", encoding="utf-8")
+    # Isolate this assertion from Python validation: Verify must still hash every row itself.
+    (root / "scripts/release_metadata.py").write_text(
+        "raise SystemExit(0)\n", encoding="utf-8"
+    )
+    for path in (
+        root / ".toolchains/gradle-9.1.0/bin/gradle.bat",
+        root / ".android-sdk/build-tools/36.0.0/aapt.exe",
+        root / ".android-sdk/build-tools/36.0.0/apksigner.bat",
+        root / ".android-sdk/build-tools/36.0.0/zipalign.exe",
+        root / "readelf.exe",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+         str(root / "scripts/android.ps1"), "-Mode", "Verify",
+         "-BuildPython", sys.executable, "-ReadElf", str(root / "readelf.exe")],
+        cwd=root, capture_output=True, text=True, encoding="utf-8",
+    )
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "SHA256SUMS" in combined and pack.name in combined
+    assert "apksigner" not in combined.lower()
+
+
+def test_question_pack_parameter_is_rejected_outside_public_build(tmp_path):
+    root = make_isolated_release_script_root(tmp_path)
+    pack = tmp_path / "synthetic.bagu-pack"
+    pack.write_bytes(b"synthetic")
+
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+         str(root / "scripts/android.ps1"), "-Mode", "Plan", "-QuestionPack", str(pack)],
+        cwd=root, capture_output=True, text=True, encoding="utf-8",
+    )
+
+    assert result.returncode != 0
+    assert "QuestionPack" in result.stdout + result.stderr
+
+
+def test_public_build_rejects_bad_question_pack_before_environment_or_gradle(tmp_path):
+    root = make_isolated_release_script_root(tmp_path)
+    shutil.copy2(ROOT / "scripts/release_metadata.py", root / "scripts/release_metadata.py")
+    shutil.copy2(ROOT / "bagu.py", root / "bagu.py")
+    (root / "version.json").write_text(json.dumps({
+        "versionName": "0.1.0-beta.5", "versionCode": 5, "channel": "beta",
+    }), encoding="utf-8")
+    original = make_interview_pack_fixture()
+    pack_name = "synthetic-interviews-r1.bagu-pack"
+    pack = tmp_path / pack_name
+    pack.write_bytes(original + b"tampered")
+    descriptor = {
+        "schema_version": 1,
+        "versionName": "0.1.0-beta.5",
+        "file_name": pack_name,
+        "sha256": hashlib.sha256(original).hexdigest(),
+        "pack_id": "android-private-pack",
+        "revision": 1,
+        "display_version": "1.0",
+        "question_count": 1,
+        "experience_count": 1,
+    }
+    descriptor_path = root / "docs/releases/0.1.0-beta.5-question-pack.json"
+    descriptor_path.parent.mkdir(parents=True)
+    descriptor_path.write_bytes(
+        (json.dumps(descriptor, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    )
+
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+         str(root / "scripts/android.ps1"), "-Mode", "Build",
+         "-BuildPython", sys.executable, "-QuestionPack", str(pack)],
+        cwd=root, capture_output=True, text=True, encoding="utf-8",
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "question-pack hash" in combined
+    assert "JDK17" not in combined and "Gradle" not in combined
 
 
 def test_gitignore_keeps_android_private_material_and_generated_state_untracked(tmp_path):

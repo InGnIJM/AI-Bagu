@@ -102,7 +102,8 @@ def test_public_build_plan_never_invokes_internal_seed_or_old_version():
     ], cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
-    assert plan["versionCode"] == 4
+    assert plan["versionCode"] == 5
     assert plan["flavor"] == "public"
     assert plan["tasks"] == [":app:assemblePublicRelease", ":app:testPublicDebugUnitTest", ":app:lintPublicRelease"]
-    assert plan["deliveryName"] == "bagu-0.1.0-beta.4-public-arm64-v8a.apk"
+    assert plan["deliveryName"] == "bagu-0.1.0-beta.5-public-arm64-v8a.apk"
+    assert "questionPack" not in plan
