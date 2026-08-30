@@ -8,7 +8,7 @@
 
 ### 安装与首次使用
 
-当前公开版本为 [0.1.0-beta.4（预发布，code 4）](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.4)，面向 Android 10 及以上、arm64-v8a（64 位 ARM）设备。[直接下载公开 APK](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.4/bagu-0.1.0-beta.4-public-arm64-v8a.apk)，无需登录；Release 同时提供 `SHA256SUMS`、签名指纹与安装说明。在手机文件管理器中打开，按系统提示仅为该来源允许安装未知应用；完成后可关闭该许可。
+当前公开版本为 [0.1.0-beta.5（预发布，code 5）](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.5)，面向 Android 10 及以上、arm64-v8a（64 位 ARM）设备。[直接下载公开 APK](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.5/bagu-0.1.0-beta.5-public-arm64-v8a.apk)，无需登录；Release 同时提供独立的 [2026 秋招面经题包](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.5/ai-bagu-2026-autumn-interviews-r1.bagu-pack)、`SHA256SUMS`、签名指纹与安装说明。在手机文件管理器中打开 APK，按系统提示仅为该来源允许安装未知应用；完成后可关闭该许可。
 
 安装后直接打开「八股助手」，不需要电脑常驻、ADB、外部浏览器或自行安装 Python。底部导航为「练习 / 题库 / 概览 / 设置」。具体操作见[使用指南](user-guide.md)。
 
@@ -18,7 +18,7 @@
 
 *此图展示真实使用界面，未核验对应 APK 版本，不代表语音、更新或其他后续功能已完成设备验收。*
 
-public 构建首次启动为空题库，可新增题目、导入自己的 CSV 或另一端的 `.bagu-backup`；历史 internal Beta 的种子题不属于本次公开附件。已发布 beta.4 使用 SQLite/备份 v2，不认识 `.bagu-pack` 或面经专题；当前源码的新能力不会自动出现在已安装应用。已有应用数据不会被种子覆盖。题库、配置、进度与草稿位于应用私有目录，不自动同步电脑。
+public APK 首次启动仍为空题库，可新增题目、导入自己的 CSV、另一端的 `.bagu-backup`，或明确选择 Release 中单独下载的 `.bagu-pack`。beta.5 使用 SQLite/备份 v3 并支持面经专题，但题包不内置 APK、种子或更新 feed；历史 internal Beta 的种子题也不属于本次公开附件。已有应用数据不会被种子覆盖。题库、配置、进度与草稿位于应用私有目录，不自动同步电脑。
 
 已有题库的背题、自评与已保存答案可离线使用；远程图片和 AI 评卷需要网络。模型地址仅允许 HTTPS，模型请求会发送题目、回答及参考资料。语音可用性取决于安装包是否包含该功能，以及系统是否提供识别服务。
 
@@ -28,11 +28,11 @@ public 构建首次启动为空题库，可新增题目、导入自己的 CSV �
 2. 核对更新包的来源、包名、签名和版本。使用同包名、同签名的覆盖更新，不要先卸载。
 3. 安装后检查原题库、进度、模型配置和草稿。若被要求卸载或提示签名冲突，先停止，不要用强制降级处理。
 
-`.bagu-backup` 不包含模型配置、API Key、草稿、会话或评分分析。**卸载会删除全部应用私有数据**，跨卸载只能恢复备份实际包含的内容。恢复可能覆盖现有内容；先结束当前练习并另存当前备份。公开 beta.4 的 v2 只迁移普通题；当前源码的 v3 还迁移题包快照、专题结构、日常开关和稳定 ID 进度。具体范围、预览确认、上限与未知结果处理见[数据迁移](data-transfer-and-updates.md#电脑与手机之间迁移)。
+`.bagu-backup` 不包含模型配置、API Key、草稿、会话或评分分析。**卸载会删除全部应用私有数据**，跨卸载只能恢复备份实际包含的内容。恢复可能覆盖现有内容；先结束当前练习并另存当前备份。beta.5 的 v3 会迁移题包快照、专题结构、日常开关和稳定 ID 进度，并继续读取 v1/v2；beta.4 及更早版本使用旧格式，不能读取 v3。具体范围、预览确认、上限与未知结果处理见[数据迁移](data-transfer-and-updates.md#电脑与手机之间迁移)。
 
-### 当前源码的本地面经题包（未发布）
+### 本地面经题包
 
-当前 Android 源码在设置中增加 `.bagu-pack` 选择入口，但没有新的公开 APK、内置首包或下载商店。流程复用系统 SAF：原生 Activity 只读取一次不超过 20 MiB 的文件并持有不可变副本，调用本地 canonical 校验器；allowlist 预览留在原生状态并只显示于原生确认框。JS/WebView 不接收这份预览，也不接收 raw/body/archive/base64/hash、题目、答案或准备提示；操作完成后只接收 allowlist 过滤、脱敏的结果状态/字段。
+beta.5 在设置中提供 `.bagu-pack` 选择入口；正式 r1 题包是 Release 的独立附件，但没有内置首包、在线商店或自动题包下载。流程复用系统 SAF：原生 Activity 只读取一次不超过 20 MiB 的文件并持有不可变副本，调用本地 canonical 校验器；allowlist 预览留在原生状态并只显示于原生确认框。JS/WebView 不接收这份预览，也不接收 raw/body/archive/base64/hash、题目、答案或准备提示；操作完成后只接收 allowlist 过滤、脱敏的结果状态/字段。
 
 用户在原生确认框明确确认后，原生层才把同一缓存字节交给安装核心；不会重读 URI，也不允许 JS 替换正文。取消、返回、校验/版本冲突或完成会消费/清理待处理状态。Activity 因配置变化重建时可保留内存快照并重新显示确认，但不会隐式安装；进程死亡后只识别到未完成标记并取消，必须重新选择文件。旧 WebView/宿主没有 `importInterviewPack()` 时页面只提示更新，不退回 JS 文件读取。
 
@@ -40,11 +40,11 @@ public 构建首次启动为空题库，可新增题目、导入自己的 CSV �
 
 ### 应用内更新
 
-已有更新入口的 beta.2／beta.3 可在「设置 → 应用更新 → 检查更新」发现 beta.4；下载用户不需要 GitHub 账号。自动检查默认开启，前台通常每 24 小时尝试一次，但不自动下载／安装；下载须点击，应用进入后台会取消下载。安装前须结束练习、评卷、语音和文件工作，来源权限授权返回后也要再次点击安装。只有后续启动核对实际安装版本才报告成功。
+已有更新入口的 beta.2／beta.3／beta.4 可在「设置 → 应用更新 → 检查更新」发现 beta.5；下载用户不需要 GitHub 账号。自动检查默认开启，前台通常每 24 小时尝试一次，但不自动下载／安装；下载须点击，应用进入后台会取消下载。安装前须结束练习、评卷、语音和文件工作，来源权限授权返回后也要再次点击安装。只有后续启动核对实际安装版本才报告成功。
 
 beta.4 已将 APK 安装交接迁移到系统 `PackageInstaller.Session`，并为 Android 15+ 的确认回调显式授予 creator BAL、增加非导出回调、session 恢复、`confirm` 脱敏诊断及 Android 16.1+ 开发者验证固定诊断。正式 APK 已完成签名、清单、空题库、ABI、16 KiB 对齐、附件和更新源验证；报告问题的 API36 真机、小米 HyperOS 及 vivo／ColorOS 的取消、重试、覆盖升级和数据保留验收仍未执行，不能把自动化扩大为所有手机均通过。
 
-beta.4 将用户主动操作失败显示为带解决办法的弹窗；后台自动检查失败仍只在设置页显示。进程中断后的旧检查不会重放，缺失摘要按未知状态；可复用「问题诊断」导出日志。Beta 清单已指向 beta.4，Stable 为 `release:null`，属于成功读取而非失败。旧包具备的诊断细节取决于实际构建，操作和发布准备见[专项指南](data-transfer-and-updates.md)。
+beta.4 引入的主动操作错误弹窗和更新安装修复继续保留；后台自动检查失败仍只在设置页显示。进程中断后的旧检查不会重放，缺失摘要按未知状态；可复用「问题诊断」导出日志。Beta 清单现已指向 beta.5，Stable 为 `release:null`，属于成功读取而非失败。旧包具备的诊断细节取决于实际构建，操作和发布准备见[专项指南](data-transfer-and-updates.md)。
 
 旧 internal 包若没有该入口，需要先手动取得同包名、同签名且版本号更高的可信 APK，覆盖升级一次，不要先卸载。稳定／测试通道选择、取消、缓存恢复和验收限制见[Android 应用更新](data-transfer-and-updates.md#android-应用更新)。
 
@@ -52,11 +52,11 @@ beta.4 将用户主动操作失败显示为带解决办法的弹窗；后台自�
 
 ## 版本与验收边界
 
-已发布 beta.4 来自提交 `ac53f341342c2266079af72e23b953aa3ae43459`，标签为 `v0.1.0-beta.4`，包含语音输入、评分答案来源、SQLite v2、双端迁移、答案格式恢复、诊断日志、安装确认修复和统一错误弹窗。旧 beta.1／beta.2／beta.3 包不会因更新源码自动获得新功能。
+已发布 beta.5 来自提交 `2b847013f185781b817b6458743ae08e383e8849`，标签为 `v0.1.0-beta.5`，在 beta.4 能力上增加 SQLite/备份 v3、本地题包导入、面经模拟和七附件发布。旧 beta.1／beta.2／beta.3／beta.4 包不会因更新源码自动获得新功能；需要覆盖升级到 code 5。
 
-2026-08-30 当前发布分支已实现 SQLite/备份 v3 与本地题包导入，并配置为 beta.5/code 5，但尚未提交 Tag、发布 Release 或安装设备。已在本地构建并校验 public ARM64 空种子签名 APK，SHA-256 为 `e64f60598fc2451f3f568befecd123845c5c43c00eb5fcc9a5e3529cb40ce1e9`；同目录正式题包 SHA-256 为 `47aa6b28768be85322924df4a7c17199bf248660997cd10247066821d6d23864`。它们仍是本地验证产物，不是公开 beta.4 的替代附件，也没有进入线上更新清单。精确范围见[验收记录](validation.md#2026-08-30面经题包与专题模拟当前开发源码)。
+公开 public ARM64 APK 为空种子，SHA-256 为 `e64f60598fc2451f3f568befecd123845c5c43c00eb5fcc9a5e3529cb40ce1e9`；独立正式题包 SHA-256 为 `47aa6b28768be85322924df4a7c17199bf248660997cd10247066821d6d23864`。七附件、匿名下载及 Beta Pages code 5 已验证，Stable 清单保持不变；APK 尚未安装到设备。精确范围见[验收记录](validation.md#beta5-公开发布面经题包与专题模拟)。
 
-已公开的 beta.4 完成了正式 public 构建、精确附件、匿名下载及 Pages 校验；此前 beta.3 在隔离 API29/API36 环境完成过应用内升级链路，但 beta.4 的新安装确认修复尚未在报告问题的 API36 物理手机运行。未完成范围见[beta.4 验收记录](validation.md#beta4-公开发布)，用户截图不替代这些检查。
+beta.4 的正式 public 构建、匿名下载及 Pages 校验保留为历史记录；此前 beta.3 在隔离 API29/API36 环境完成过应用内升级链路，但 beta.4 以来的安装确认修复及 beta.5 题包生命周期仍未在报告问题的 API36 物理手机运行。未完成范围见[beta.5 验收记录](validation.md#beta5-公开发布面经题包与专题模拟)，用户截图不替代这些检查。
 
 复现 beta.4 应使用 Tag `v0.1.0-beta.4` 对应的独立、干净源码、六项附件和本地验证回执；发布后的文档同步提交不改变 Tag 或已签名 APK。历史包仍保留各自[验收记录](validation.md)。
 
@@ -100,7 +100,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\android.ps1 -Mode 
 
 `<正式题包路径>` 是待替换的本地文件路径，不应原样执行；脚本先校验题包身份、revision、数量和哈希，题包只作为独立附件复制，不会嵌入 APK。没有版本化题包描述的历史版本可省略此参数。经授权需要内部题库时，显式使用 `-Mode BuildInternal`；它不接受题包参数。当前脚本按版本和 flavor 分目录，目标 APK 已存在时拒绝覆盖，应检查已有交付物，而不是删除它后强行重建。不要套用旧文档中“一次构建两种包、覆盖固定中文文件名”的步骤。
 
-beta.5 公开发布准备使用 `release_github.py prepare --execute --question-pack "<正式题包路径>"`，会建立精确 commit、题包／描述身份和七附件哈希回执；若该准备自己产生的目录被中断，会保留为 `public.interrupted-<UUID>` 后重建，而不是直接认证中断文件。未经该流程拥有的目录会停止并要求人工检查。完整 dry-run、gh 登录前提、明确发布确认和 feed 重试见[维护者发布指南](data-transfer-and-updates.md#维护者发布预检准备与执行)。
+beta.5 的公开发布准备阶段使用了 `release_github.py prepare --execute --question-pack "<正式题包路径>"`，建立精确 commit、题包／描述身份和七附件哈希回执；若同类准备自己产生的目录被中断，会保留为 `public.interrupted-<UUID>` 后重建，而不是直接认证中断文件。未经该流程拥有的目录会停止并要求人工检查。完整 dry-run、gh 登录前提、明确发布确认和 feed 重试见[维护者发布指南](data-transfer-and-updates.md#维护者发布预检准备与执行)。
 
 public 的当前输出约定：
 
