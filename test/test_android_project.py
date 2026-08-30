@@ -52,14 +52,26 @@ def load_release_verifier():
     return module
 
 
-def make_packaged_seed(path, *, public=False, private_entry=None):
+def make_packaged_seed(path, *, public=False, private_entry=None, pack_state=False):
     bagu.prepare_mobile_database(path)
-    if not public:
+    if not public or pack_state:
         conn = bagu.get_conn(path)
-        conn.execute(
-            "INSERT INTO questions(category,question,answer,url) VALUES(?,?,?,?)",
-            ("Android", "发布校验题", "只验证打包种子", "https://example.test/release"),
-        )
+        if not public:
+            conn.execute(
+                "INSERT INTO questions(category,question,answer,url) VALUES(?,?,?,?)",
+                ("Android", "发布校验题", "只验证打包种子", "https://example.test/release"),
+            )
+        if pack_state:
+            conn.execute(
+                """INSERT INTO question_packs(
+                       pack_id,name,revision,display_version,source_snapshot_sha256,
+                       question_count,experience_count,questions_sha256,experiences_sha256,
+                       manifest_sha256,include_in_review,installed_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ("private-pack", "私有面经包", 1, "1.0", "1" * 64, 0, 0,
+                 "2" * 64, "3" * 64, "4" * 64, 1,
+                 "2026-08-30T00:00:00Z", "2026-08-30T00:00:00Z"),
+            )
         conn.commit()
         conn.close()
     app_archive = io.BytesIO()
@@ -81,6 +93,51 @@ def make_packaged_seed(path, *, public=False, private_entry=None):
             archive.writestr(private_entry, b"must-not-ship")
     add_pinned_native_payloads(apk)
     return apk
+
+
+def make_interview_pack_fixture():
+    questions = [{
+        "stable_id": "android-review-1",
+        "question": "Explain a transaction.",
+        "category": "database",
+        "kind": "review",
+        "answer": "PRIVATE_PACK_ANSWER_SENTINEL",
+        "review_status": "reviewed",
+        "retired": False,
+        "sources": [{"path": "private/interview.md", "url": "https://example.test/interview"}],
+    }]
+    experiences = [{
+        "stable_id": "android-experience-1",
+        "kind": "interview",
+        "direction": "backend",
+        "company": "Acme",
+        "position": "engineer",
+        "stage": "technical",
+        "sections": [{
+            "stable_id": "android-round-1", "order": 1, "title": "Round one",
+            "recommended": True, "question_ids": ["android-review-1"],
+        }],
+    }]
+    canonical = lambda value: json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    question_bytes = canonical(questions)
+    experience_bytes = canonical(experiences)
+    manifest = {
+        "format": "bagu-pack", "schema_version": 1,
+        "pack_id": "android-private-pack", "name": "Android private pack",
+        "revision": 1, "display_version": "1.0",
+        "source_snapshot_sha256": "1" * 64,
+        "question_count": 1, "experience_count": 1,
+        "questions_sha256": hashlib.sha256(question_bytes).hexdigest(),
+        "experiences_sha256": hashlib.sha256(experience_bytes).hexdigest(),
+    }
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("manifest.json", canonical(manifest))
+        archive.writestr("questions.json", question_bytes)
+        archive.writestr("experiences.json", experience_bytes)
+    return output.getvalue()
 
 
 def add_pinned_native_payloads(apk):
@@ -266,6 +323,59 @@ def test_release_archive_verifier_rejects_private_state(tmp_path):
 
     with pytest.raises(ValueError, match="private|私有|settings"):
         verifier.verify_apk_contents(apk, "internal")
+
+
+@pytest.mark.parametrize("private_entry", [
+    "interviews.bagu-pack",
+    "lib/arm64-v8a/interviews.BAGU-PACK",
+    "META-INF/nested/interviews.bagu-pack",
+])
+def test_release_archive_verifier_rejects_pack_members_in_every_apk_path(tmp_path, private_entry):
+    verifier = load_release_verifier()
+    apk = make_packaged_seed(tmp_path / "seed.db", private_entry=private_entry)
+
+    with pytest.raises(ValueError, match="private interview pack"):
+        verifier.verify_apk_contents(apk, "internal")
+
+
+@pytest.mark.parametrize("private_entry", [
+    "assets/private/package-catalog.json",
+    "docs/PRIVATE/catalog-index.JSON",
+    "docs/private/release_catalog.v2.json",
+    "docs/private-interview-catalog.json",
+    "docs/private-catalog.json",
+])
+def test_release_archive_verifier_rejects_only_precise_private_catalog_members(tmp_path, private_entry):
+    verifier = load_release_verifier()
+    apk = make_packaged_seed(tmp_path / "seed.db", private_entry=private_entry)
+
+    with pytest.raises(ValueError, match="private catalog"):
+        verifier.verify_apk_contents(apk, "internal")
+
+
+@pytest.mark.parametrize("legal_entry", [
+    "docs/package-catalog.json",
+    "docs/interviewing-catalog.json",
+    "docs/privately-owned-catalog.json",
+    "docs/private/mycatalog.json",
+    "docs/private-notes/catalog.json",
+])
+def test_release_archive_verifier_does_not_treat_catalog_substrings_as_private(tmp_path, legal_entry):
+    verifier = load_release_verifier()
+    apk = make_packaged_seed(tmp_path / "seed.db", private_entry=legal_entry)
+
+    assert verifier.verify_apk_contents(apk, "internal")["questions"] == 1
+
+
+@pytest.mark.parametrize("flavor", ["public", "internal"])
+def test_release_archive_verifier_rejects_nonempty_pack_seed_state(tmp_path, flavor):
+    verifier = load_release_verifier()
+    apk = make_packaged_seed(
+        tmp_path / "seed.db", public=flavor == "public", pack_state=True
+    )
+
+    with pytest.raises(ValueError, match="pack|experience|题包|专题"):
+        verifier.verify_apk_contents(apk, flavor)
 
 
 def test_release_archive_verifier_allows_only_the_expected_chaquopy_runtime_assets(tmp_path):
@@ -872,6 +982,7 @@ def test_native_bridge_exposes_only_the_agreed_storage_file_and_speech_contract(
         ("String", "getItem", "String key"), ("void", "setItem", "String key, String value"),
         ("void", "removeItem", "String key"), ("String", "keys", ""),
         ("void", "exportBackup", ""), ("void", "exportQuestionBank", ""), ("void", "importBackup", ""),
+        ("void", "importInterviewPack", ""),
         ("void", "saveCsvTemplate", "String csv"),
         ("void", "exportDiagnostics", ""), ("void", "reportDiagnostic", "String json"),
         ("String", "getAppInfo", ""),
@@ -885,6 +996,77 @@ def test_native_bridge_exposes_only_the_agreed_storage_file_and_speech_contract(
         ("void", "cancelUpdate", "String operationId"),
         ("boolean", "installUpdate", "String candidateId, String operationId"),
     }
+
+
+def test_android_pack_picker_callbacks_are_operation_scoped_and_saved_state_has_only_a_marker():
+    source = (ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/MainActivity.java").read_text(encoding="utf-8")
+    pending = (ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/PendingImport.java").read_text(encoding="utf-8")
+
+    assert "documentRequestCode" in source
+    assert "nextDocumentRequestCode" in source
+    assert "request != state.documentRequestCode" in source
+    assert "PACK_DOCUMENT_REQUEST" in source
+    assert 'saved.putString("documentPendingImportKind"' in source
+    assert 'saved.putByteArray' not in source
+    assert 'saved.putSerializable' not in source
+    assert "pendingImport.snapshot()" not in source[source.index("onSaveInstanceState"):]
+    dispatch = source[source.index("private void flushResults"):source.index("private void publishImeVisibility")]
+    assert "pendingImport" not in dispatch and "snapshot" not in dispatch and "preview" not in dispatch
+    assert "Set.of(" not in pending
+
+
+def test_android_csv_picker_enters_the_shared_native_operation_arbiter():
+    source = (ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/MainActivity.java").read_text(encoding="utf-8")
+    chooser = source[source.index("onShowFileChooser"):source.index("root.addView(web")]
+
+    assert 'openDocument("csv", null)' in chooser
+    assert 'claimDocument(operation)' in source
+
+
+def test_android_diagnostics_and_other_file_operations_share_update_busy_and_lease_gate():
+    source = (ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/MainActivity.java").read_text(encoding="utf-8")
+    guard = source[source.index("void openDocument"):source.index("if (\"template\".equals(operation)")]
+
+    assert "updater != null && !updater.fileOperationIdle()" in guard
+    assert '!"diagnostics".equals(operation) && updater' not in guard
+
+
+def test_android_native_operation_arbiter_claims_before_ui_post_and_tracks_update_completion():
+    arbiter = ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/NativeOperationArbiter.java"
+    assert arbiter.is_file(), "native file/update arbiter not implemented"
+    assert ".isBlank()" not in arbiter.read_text(encoding="utf-8")
+    bridge = (ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/NativeBridge.java").read_text(encoding="utf-8")
+    activity = (ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/MainActivity.java").read_text(encoding="utf-8")
+    updater = (ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/UpdateController.java").read_text(encoding="utf-8")
+
+    assert "fileIdle() && updater" not in bridge
+    assert "owner.requestDocument(operation, content)" in bridge
+    assert "owner.checkForUpdate(operationId)" in bridge
+    assert "owner.downloadUpdate(candidateId, operationId)" in bridge
+    assert "owner.installUpdate(candidateId, operationId)" in bridge
+    assert "NativeOperationArbiter arbiter" in activity
+    assert "NativeOperationArbiter.process()" in activity
+    assert "documentLease" in activity and "releaseDocument" in activity
+    destroy = activity[activity.index("@Override protected void onDestroy") :]
+    assert "state.releaseAll()" not in destroy
+    assert "if (!state.working) state.releaseDocument" in destroy
+    assert "NativeOperationLeaseTracker leaseTracker" in updater
+    assert "leaseTracker.observe(state)" in updater
+    assert "aliases" not in updater and "aliasTrackedLease" not in updater
+
+
+def test_android_update_lease_requires_observed_active_before_terminal_release():
+    tracker = ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/NativeOperationLeaseTracker.java"
+    assert tracker.is_file(), "update lease state tracker not implemented"
+    source = tracker.read_text(encoding="utf-8")
+    updater = (ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/UpdateController.java").read_text(encoding="utf-8")
+
+    assert "seenActive" in source
+    assert 'tracked.operationId.equals(state.get("operationId"))' in source
+    assert "acceptedActionWindow && matchingOperation" in source
+    assert "NativeOperationLeaseTracker" in updater
+    assert "engine::state" in updater
+    assert "trackedLease" not in updater
 
 
 @pytest.fixture
@@ -973,6 +1155,45 @@ def test_runtime_backup_round_trip_uses_private_database(runtime):
     with pytest.raises(ValueError):
         module.restore_archive(b"bad zip")
     assert len(bagu.parse_backup(module.export_archive())) == 1
+
+
+def test_runtime_interview_pack_preview_and_install_use_canonical_private_database(runtime):
+    module, private, _, _ = runtime
+    launch(runtime)
+    payload = make_interview_pack_fixture()
+
+    summary = json.loads(module.inspect_interview_pack(payload))
+
+    assert summary["pack_id"] == "android-private-pack"
+    assert summary["status"] == "new" and summary["question_count"] == 1
+    assert "PRIVATE_PACK_ANSWER_SENTINEL" not in json.dumps(summary)
+    installed = json.loads(module.install_interview_pack(payload))
+    assert installed["pack_id"] == "android-private-pack"
+    connection = bagu.get_conn(private / "data/bagu.db")
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM question_packs WHERE pack_id='android-private-pack'"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM questions WHERE pack_id='android-private-pack'"
+        ).fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_runtime_interview_pack_preview_rejects_open_session_without_mutation(runtime):
+    module, private, _, _ = runtime
+    launch(runtime)
+    connection = bagu.get_conn(private / "data/bagu.db")
+    try:
+        sid, _ = bagu.draw(connection, 1)
+        before = list(connection.iterdump())
+        with pytest.raises(bagu.SessionOpenError):
+            module.inspect_interview_pack(make_interview_pack_fixture())
+        assert list(connection.iterdump()) == before
+        assert bagu.get_open_session(connection)["id"] == sid
+    finally:
+        connection.close()
 
 
 def test_runtime_migration_uses_injected_version_and_validates_before_restore(runtime):

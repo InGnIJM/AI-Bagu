@@ -37,6 +37,7 @@ final class UpdateController {
     private boolean recoveryPrompt;
     private WeakReference<AlertDialog> recoveryDialog=new WeakReference<>(null);
     private PreparedInstall prepared;
+    private final NativeOperationLeaseTracker leaseTracker=new NativeOperationLeaseTracker();
     private static final class PreparedInstall {
         final String operationId;final String candidateId;final int sessionId;
         PreparedInstall(String operationId,String candidateId,int sessionId){this.operationId=operationId;this.candidateId=candidateId;this.sessionId=sessionId;}
@@ -108,28 +109,49 @@ final class UpdateController {
     void foreground(MainActivity activity){
         if(owner.get()!=activity||!activity.updateForeground())return;
         activity.publishUpdate(state());
-        checkOperation("auto_"+UUID.randomUUID().toString(),true);
+        activity.checkForAutomaticUpdate("auto_"+UUID.randomUUID().toString());
     }
     void background(MainActivity activity){
         if(owner.get()!=activity)return;
-        engine.cancel("background_"+UUID.randomUUID().toString());
+        String cancellation="background_"+UUID.randomUUID().toString();
+        engine.cancel(cancellation);
         Map<String,Object> state=engine.state();
         String op=(String)state.get("operationId");
         if(abandonPrepared(op))engine.cancelInstallation(op,"应用已离开前台，请返回后再次点击安装。");
     }
     private void publish(Map<String,Object> state){
+        completeTrackedLease(state);
         MainActivity activity=owner.get();
         if(activity!=null&&activity.updateForeground()) {
             activity.publishUpdate(UpdateIO.json(state));
             // Cache restoration can complete after the first foreground/page-ready callback.
-            if("startup".equals(state.get("operationId")))checkOperation("auto_"+UUID.randomUUID().toString(),true);
+            if("startup".equals(state.get("operationId")))activity.checkForAutomaticUpdate("auto_"+UUID.randomUUID().toString());
         }
     }
     private boolean checkOperation(String op,boolean automatic){return engine.check(op,automatic);}
     String state(){return UpdateIO.json(engine.state());}
+    boolean fileOperationIdle(){Map<String,Object> value=engine.state();return !Boolean.TRUE.equals(value.get("busy"))&&!Boolean.TRUE.equals(value.get("installerLease"));}
     void automatic(boolean value,String op){engine.automatic(value,op);}
-    boolean check(String op){return checkOperation(op,false);}
-    boolean download(String id,String op){return engine.download(id,op);}
+    boolean check(String op,NativeOperationArbiter.Lease lease,Runnable release){
+        return startTracked(op,lease,release,()->checkOperation(op,false));
+    }
+    boolean checkAutomatic(String op,NativeOperationArbiter.Lease lease,Runnable release){
+        return startTracked(op,lease,release,()->checkOperation(op,true));
+    }
+    boolean download(String id,String op,NativeOperationArbiter.Lease lease,Runnable release){
+        return startTracked(op,lease,release,()->engine.download(id,op));
+    }
+
+    private boolean startTracked(String op,NativeOperationArbiter.Lease lease,Runnable release,
+            java.util.function.BooleanSupplier start) {
+        long baseline=((Number)engine.state().get("revision")).longValue();
+        return leaseTracker.start(op,lease,release,baseline,start,engine::state);
+    }
+
+    private void completeTrackedLease(Map<String,Object> state) {
+        leaseTracker.observe(state);
+    }
+
     void cancel(String op){
         UpdatePolicy.validateOperationId(op);
         if(Boolean.TRUE.equals(engine.state().get("recovery"))) {
@@ -155,7 +177,9 @@ final class UpdateController {
             main.post(()->{MainActivity activity=owner.get();if(activity!=null)activity.cancelUpdatePreparation("已取消安装准备。");});
         }
     }
-    boolean install(String id,String op){return engine.install(id,op);}
+    boolean install(String id,String op,NativeOperationArbiter.Lease lease,Runnable release){
+        return startTracked(op,lease,release,()->engine.install(id,op));
+    }
     boolean installCurrent(String op,String id){return engine.installCurrent(op,id);}
     void blocked(String op,String reason){if(abandonPrepared(op))engine.installBlocked(op,reason);}
     boolean launchInstaller(MainActivity activity,String op,UpdatePolicy.Release candidate) {

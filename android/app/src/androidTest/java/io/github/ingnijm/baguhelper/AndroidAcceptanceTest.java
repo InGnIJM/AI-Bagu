@@ -31,6 +31,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.io.File;
 import java.util.TreeMap;
+import java.security.MessageDigest;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 import org.json.JSONObject;
 import org.json.JSONArray;
 import static org.junit.Assert.*;
@@ -93,6 +96,16 @@ public final class AndroidAcceptanceTest {
         return null;
     }
 
+    private static Object field(Object owner, String name) {
+        try {
+            java.lang.reflect.Field value = owner.getClass().getDeclaredField(name);
+            value.setAccessible(true);
+            return value.get(owner);
+        } catch (ReflectiveOperationException error) {
+            throw new AssertionError("Acceptance boundary unavailable: " + name, error);
+        }
+    }
+
     private String js(String expression) throws Exception {
         AtomicReference<String> result = new AtomicReference<>();
         CountDownLatch done = new CountDownLatch(1);
@@ -120,6 +133,41 @@ public final class AndroidAcceptanceTest {
         PyObject globals = builtins.callAttr("dict");
         builtins.callAttr("exec", new String(out.toByteArray(), StandardCharsets.UTF_8), globals);
         return globals.callAttr("__getitem__", function).call().toString();
+    }
+
+    private static String sha256(byte[] value) throws Exception {
+        StringBuilder result = new StringBuilder();
+        for (byte item : MessageDigest.getInstance("SHA-256").digest(value)) {
+            result.append(String.format(java.util.Locale.ROOT, "%02x", item & 0xff));
+        }
+        return result.toString();
+    }
+
+    private static byte[] interviewPackFixture() throws Exception {
+        byte[] questions = ("[{\"answer\":\"PRIVATE_PACK_ANSWER_SENTINEL\",\"category\":\"database\","
+            + "\"kind\":\"review\",\"question\":\"Explain a transaction.\",\"retired\":false,"
+            + "\"review_status\":\"reviewed\",\"sources\":[{\"path\":\"private/interview.md\","
+            + "\"url\":\"https://example.test/interview\"}],\"stable_id\":\"android-review-1\"}]")
+            .getBytes(StandardCharsets.UTF_8);
+        byte[] experiences = ("[{\"company\":\"Acme\",\"direction\":\"backend\",\"kind\":\"interview\","
+            + "\"position\":\"engineer\",\"sections\":[{\"order\":1,\"question_ids\":[\"android-review-1\"],"
+            + "\"recommended\":true,\"stable_id\":\"android-round-1\",\"title\":\"Round one\"}],"
+            + "\"stable_id\":\"android-experience-1\",\"stage\":\"technical\"}]")
+            .getBytes(StandardCharsets.UTF_8);
+        String manifest = "{\"display_version\":\"1.0\",\"experience_count\":1,\"experiences_sha256\":\""
+            + sha256(experiences) + "\",\"format\":\"bagu-pack\",\"name\":\"Android private pack\","
+            + "\"pack_id\":\"android-private-pack\",\"question_count\":1,\"questions_sha256\":\""
+            + sha256(questions) + "\",\"revision\":1,\"schema_version\":1,\"source_snapshot_sha256\":\""
+            + "1".repeat(64) + "\"}";
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (ZipOutputStream archive = new ZipOutputStream(output)) {
+            for (Object[] member : new Object[][]{{"manifest.json", manifest.getBytes(StandardCharsets.UTF_8)},
+                    {"questions.json", questions}, {"experiences.json", experiences}}) {
+                archive.putNextEntry(new ZipEntry((String)member[0]));
+                archive.write((byte[])member[1]); archive.closeEntry();
+            }
+        }
+        return output.toByteArray();
     }
 
     private void clickDom(String id) throws Exception {
@@ -517,5 +565,69 @@ public final class AndroidAcceptanceTest {
         device.findObject(By.text("确认导入")).click();
         await("same validated snapshot restored", "window.__qaFileResult && window.__qaFileResult.status==='ok'", 10000);
         qa("assert_snapshot");
+    }
+
+    @Test public void interviewPackSafPreviewOwnsExactBytesAcrossRecreationAndRedactsWebEvent() throws Exception {
+        UiDevice device = UiDevice.getInstance(instrumentation);
+        byte[] pack = interviewPackFixture();
+        File valid = new File(activity.getExternalFilesDir(null), "task6-private.bagu-pack");
+        Files.write(valid.toPath(), pack);
+        device.executeShellCommand("cp " + valid.getAbsolutePath() + " /sdcard/Download/task6-private.bagu-pack");
+        js("showView('settings');window.__qaFileResult=null;window.addEventListener('bagu-native-result',function(e){if(e.detail.operation==='pack-import')window.__qaFileResult=e.detail;});document.getElementById('btn-pack-import').click();");
+        pickQaDocument("task6-private.bagu-pack");
+        assertTrue("Validated pack requires native confirmation", device.wait(androidx.test.uiautomator.Until.hasObject(By.text("确认安装")), 10000));
+        assertEquals("null", js("window.__qaFileResult"));
+        Object retainedState = field(activity, "state");
+        Object retainedLease = field(retainedState, "documentLease");
+        assertNotNull("pending confirmation retains its native operation lease", retainedLease);
+
+        // Replacing the provider file after inspection cannot replace the retained snapshot.
+        Files.write(valid.toPath(), "invalid replacement PRIVATE_URI_SENTINEL".getBytes(StandardCharsets.UTF_8));
+        device.executeShellCommand("cp " + valid.getAbsolutePath() + " /sdcard/Download/task6-private.bagu-pack");
+        scenario.recreate();
+        scenario.onActivity(value -> { activity = value; web = findWebView(value.getWindow().getDecorView()); });
+        assertSame("configuration recreation retains the same lease owner", retainedLease,
+            field(field(activity, "state"), "documentLease"));
+        await("recreated pack page", "typeof showView==='function' && /^[0-9]+$/.test(document.getElementById('st-total').textContent)", 30000);
+        assertTrue("Recreation asks again without implicit install", device.wait(androidx.test.uiautomator.Until.hasObject(By.text("确认安装")), 10000));
+        js("showView('settings');window.__qaFileResult=null;window.addEventListener('bagu-native-result',function(e){if(e.detail.operation==='pack-import')window.__qaFileResult=e.detail;});");
+        assertEquals("false", js("BaguNative.checkForUpdate('pack-import-busy')"));
+        device.findObject(By.text("确认安装")).click();
+        await("same retained pack installed", "window.__qaFileResult && window.__qaFileResult.status==='ok'", 15000);
+        String event = js("JSON.stringify(window.__qaFileResult)");
+        for (String secret : new String[]{"PRIVATE_PACK_ANSWER_SENTINEL", "PRIVATE_URI_SENTINEL", "private/interview.md", "content://", "archive_base64", "questions_sha256"}) {
+            assertFalse("Native event must redact pack content: " + secret, event.contains(secret));
+        }
+        assertEquals("true", js("window.__qaFileResult.pack_id==='android-private-pack' && window.__qaFileResult.revision===1 && window.__qaFileResult.question_count===1 && window.__qaFileResult.experience_count===1"));
+        assertEquals("installed", RuntimeHost.inspectInterviewPack(pack).getString("status"));
+        assertNull("completion releases the exact retained lease", field(field(activity, "state"), "documentLease"));
+    }
+
+    @Test public void interviewPackPickerCancelCorruptionBackAndBusyBoundariesReleaseCleanly() throws Exception {
+        UiDevice device = UiDevice.getInstance(instrumentation);
+        js("showView('settings');window.__qaFileResult=null;window.addEventListener('bagu-native-result',function(e){if(e.detail.operation==='pack-import')window.__qaFileResult=e.detail;});document.getElementById('btn-pack-import').click();");
+        waitPicker(); device.pressBack();
+        await("pack picker cancellation", "window.__qaFileResult && window.__qaFileResult.status==='cancelled'", 10000);
+
+        File corrupt = new File(activity.getExternalFilesDir(null), "task6-corrupt.bagu-pack");
+        Files.write(corrupt.toPath(), "not a pack PRIVATE_CORRUPT_SENTINEL".getBytes(StandardCharsets.UTF_8));
+        device.executeShellCommand("cp " + corrupt.getAbsolutePath() + " /sdcard/Download/task6-corrupt.bagu-pack");
+        js("window.__qaFileResult=null;document.getElementById('btn-pack-import').click();");
+        pickQaDocument("task6-corrupt.bagu-pack");
+        await("pack corruption rejection", "window.__qaFileResult && window.__qaFileResult.status==='error'", 10000);
+        assertEquals("false", js("JSON.stringify(window.__qaFileResult).includes('PRIVATE_CORRUPT_SENTINEL')"));
+
+        File valid = new File(activity.getExternalFilesDir(null), "task6-cancel-preview.bagu-pack");
+        Files.write(valid.toPath(), interviewPackFixture());
+        device.executeShellCommand("cp " + valid.getAbsolutePath() + " /sdcard/Download/task6-cancel-preview.bagu-pack");
+        js("window.__qaFileResult=null;document.getElementById('btn-pack-import').click();");
+        pickQaDocument("task6-cancel-preview.bagu-pack");
+        assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(By.text("确认安装")), 10000));
+        js("BaguNative.importBackup();BaguNative.exportDiagnostics();");
+        assertTrue("Conflicting file calls cannot dismiss pack confirmation", device.hasObject(By.text("确认安装")));
+        device.pressBack();
+        await("pack confirmation back cancellation", "window.__qaFileResult && window.__qaFileResult.status==='cancelled'", 10000);
+        assertFalse(device.hasObject(By.text("确认安装")));
+        assertEquals("true", js("!document.getElementById('btn-pack-import').disabled"));
     }
 }

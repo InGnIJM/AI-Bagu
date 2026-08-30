@@ -61,16 +61,26 @@ public final class NativeBridge {
     @JavascriptInterface public void reportDiagnostic(String json) { AndroidDiagnostics.reportWeb(json); }
     @JavascriptInterface public void exportQuestionBank() { open("export-questions", null); }
     @JavascriptInterface public void importBackup() { open("import", null); }
+    @JavascriptInterface public void importInterviewPack() { open("pack-import", null); }
     @JavascriptInterface public void saveCsvTemplate(String csv) { open("template", csv); }
     @JavascriptInterface public void startSpeech(String requestId) { speech("start", requestId); }
     @JavascriptInterface public void stopSpeech(String requestId) { speech("stop", requestId); }
     @JavascriptInterface public void cancelSpeech(String requestId) { speech("cancel", requestId); }
     @JavascriptInterface public String getUpdateState() { return updater.state(); }
     @JavascriptInterface public void setAutomaticUpdates(boolean enabled, String operationId) { updater.automatic(enabled, operationId); }
-    @JavascriptInterface public boolean checkForUpdate(String operationId) { return updater.check(operationId); }
-    @JavascriptInterface public boolean downloadUpdate(String candidateId, String operationId) { return updater.download(candidateId, operationId); }
+    @JavascriptInterface public boolean checkForUpdate(String operationId) {
+        MainActivity owner = activity.get();
+        return owner != null && owner.checkForUpdate(operationId);
+    }
+    @JavascriptInterface public boolean downloadUpdate(String candidateId, String operationId) {
+        MainActivity owner = activity.get();
+        return owner != null && owner.downloadUpdate(candidateId, operationId);
+    }
     @JavascriptInterface public void cancelUpdate(String operationId) { updater.cancel(operationId); }
-    @JavascriptInterface public boolean installUpdate(String candidateId, String operationId) { return updater.install(candidateId, operationId); }
+    @JavascriptInterface public boolean installUpdate(String candidateId, String operationId) {
+        MainActivity owner = activity.get();
+        return owner != null && owner.installUpdate(candidateId, operationId);
+    }
 
     private void speech(String operation, String requestId) {
         SpeechInput.validateRequestId(requestId);
@@ -80,6 +90,6 @@ public final class NativeBridge {
 
     private void open(String operation, String content) {
         MainActivity owner = activity.get();
-        if (owner != null) owner.runOnUiThread(() -> owner.openDocument(operation, content));
+        if (owner != null) owner.requestDocument(operation, content);
     }
 }

@@ -47,12 +47,18 @@ import java.io.OutputStream;
 import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
 
 /** Thin Android shell; quiz/session/model rules remain in the shared Python + HTML. */
 public final class MainActivity extends Activity {
     private static final int DOCUMENT_REQUEST = 41;
+    private static final int DOCUMENT_REQUEST_SEQUENCE = 4100;
+    private static final int DOCUMENT_REQUEST_LIMIT = 4299;
+    private static final int PACK_DOCUMENT_REQUEST = 4300;
+    private static final int PACK_DOCUMENT_REQUEST_LIMIT = 4399;
     private static final int MICROPHONE_REQUEST = 42;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private WebView web;
@@ -86,14 +92,53 @@ public final class MainActivity extends Activity {
         boolean working;
         String workingOperation;
         String operation;
+        int documentRequestCode;
+        int nextDocumentRequestCode = DOCUMENT_REQUEST;
+        int nextPackRequestCode = PACK_DOCUMENT_REQUEST;
         String template;
         String diagnosticsId;
         String startupOperationId = DiagnosticPolicy.newOperation();
         String diagnosticsMessage;
-        byte[] pendingArchive;
-        JSONObject pendingPreview;
+        PendingImport pendingImport;
+        final NativeOperationArbiter arbiter = NativeOperationArbiter.process();
+        NativeOperationArbiter.Lease documentLease;
+        NativeOperationArbiter.Lease updateLease;
         ValueCallback<Uri[]> csvCallback;
         final ArrayList<JSONObject> results = new ArrayList<>();
+
+        synchronized NativeOperationArbiter.Lease claimDocument(String operation) {
+            NativeOperationArbiter.Lease lease = arbiter.tryAcquire("file", operation);
+            if (lease != null) documentLease = lease;
+            return lease;
+        }
+
+        synchronized NativeOperationArbiter.Lease claimUpdate(String operation) {
+            NativeOperationArbiter.Lease lease = arbiter.tryAcquire("update", operation);
+            if (lease != null) updateLease = lease;
+            return lease;
+        }
+
+        synchronized boolean ownsDocument(NativeOperationArbiter.Lease lease) {
+            return documentLease == lease && arbiter.owns(lease);
+        }
+
+        synchronized boolean releaseDocument(NativeOperationArbiter.Lease lease) {
+            if (documentLease != lease || !arbiter.release(lease)) return false;
+            documentLease = null;
+            return true;
+        }
+
+        synchronized boolean releaseUpdate(NativeOperationArbiter.Lease lease) {
+            if (updateLease != lease || !arbiter.release(lease)) return false;
+            updateLease = null;
+            return true;
+        }
+
+        synchronized boolean nativeIdle() { return arbiter.isIdle(); }
+
+        synchronized String documentOperation() {
+            return documentLease == null ? null : documentLease.operation();
+        }
 
         void result(String operation, String status, String message, JSONObject counts) {
             AndroidDiagnostics.event("native.file", "ok".equals(status) ? "done" : status, null, diagnosticsId, null);
@@ -103,7 +148,13 @@ public final class MainActivity extends Activity {
                 detail.put("operation", operation).put("status", status).put("message", message);
                 if (diagnosticsId != null) detail.put("operation_id", diagnosticsId);
                 if (counts != null) {
-                    detail.put("added", counts.getInt("added")).put("updated", counts.getInt("updated"));
+                    if ("pack-import".equals(operation)) {
+                        for (String key : new String[]{"pack_id", "name", "revision", "question_count", "experience_count"}) {
+                            if (counts.has(key) && !counts.isNull(key)) detail.put(key, counts.get(key));
+                        }
+                    } else {
+                        detail.put("added", counts.getInt("added")).put("updated", counts.getInt("updated"));
+                    }
                 }
             } catch (JSONException impossible) { throw new IllegalStateException(impossible); }
             results.add(detail);
@@ -121,20 +172,23 @@ public final class MainActivity extends Activity {
         if (retained == null && saved != null) {
             String savedId = saved.getString("documentOperationId");
             if (savedId != null && savedId.matches("n_[a-f0-9]{32}")) state.diagnosticsId = savedId;
-            state.operation = saved.getString("documentOperation");
-            state.template = saved.getString("documentTemplate");
-            if ("diagnostics".equals(state.operation)) {
-                state.operation = null;
-                state.template = null;
-                state.result("diagnostics", "cancelled", "应用已重新启动，诊断导出已取消。请重新选择保存位置。", null);
-            }
             if (saved.getBoolean("documentWorking")) {
                 String operation = saved.getString("workingOperation", "import");
-                state.result(operation, "error", "import".equals(operation)
-                    ? "导入操作被中断，是否完成未知。请先核对题库与进度，不要重复导入。"
-                    : "文件操作被中断，请检查保存位置。", null);
-            } else if (saved.getBoolean("documentPendingImport")) {
-                state.result("import", "cancelled", "待确认的导入已取消，原数据未改变。请重新选择文件。", null);
+                state.result(operation, "error", "pack-import".equals(operation)
+                    ? "题包安装被中断，是否完成未知。请先核对题包列表，不要重复安装。"
+                    : "import".equals(operation)
+                        ? "导入操作被中断，是否完成未知。请先核对题库与进度，不要重复导入。"
+                        : "文件操作被中断，请检查保存位置。", null);
+            } else {
+                String pendingKind = saved.getString("documentPendingImportKind");
+                if (pendingKind == null && saved.getBoolean("documentPendingImport")) pendingKind = "import";
+                if ("pack-import".equals(pendingKind) || "import".equals(pendingKind)) {
+                    state.result(pendingKind, "cancelled", "待确认的导入已取消，原数据未改变。请重新选择文件。", null);
+                } else {
+                    String operation = saved.getString("documentOperation");
+                    if (operation != null) state.result(operation, "cancelled",
+                        "应用已重新启动，文件操作已取消。请重新选择文件。", null);
+                }
             }
         }
         try { buildViews(); }
@@ -264,7 +318,8 @@ public final class MainActivity extends Activity {
             @Override public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams parameters) {
                 if (state.csvCallback != null) state.csvCallback.onReceiveValue(null);
                 state.csvCallback = callback;
-                if (!pageReady || state.operation != null || state.working || state.pendingArchive != null || updateInstallGate.isActive()) {
+                if (!pageReady || state.operation != null || state.working || state.pendingImport != null
+                        || updateInstallGate.isActive()) {
                     callback.onReceiveValue(null);
                     state.csvCallback = null;
                     toast("请先完成当前文件操作。");
@@ -376,12 +431,50 @@ public final class MainActivity extends Activity {
         }
     }
 
-    void openDocument(String operation, String template) {
-        if ((!pageReady && !"diagnostics".equals(operation)) || state.operation != null || state.working || state.pendingArchive != null || updateInstallGate.isActive()) {
-            if (!"csv".equals(operation)) state.result(operation, "diagnostics".equals(operation) ? "busy" : "error", "请先完成当前文件操作。", null);
+    void requestDocument(String operation, String template) {
+        HostState target = state;
+        NativeOperationArbiter.Lease lease = target.claimDocument(operation);
+        if (lease == null) {
+            MAIN.post(() -> {
+                MainActivity owner = target.owner.get();
+                if (owner != null) owner.documentBusy(operation);
+            });
+            return;
+        }
+        MAIN.post(() -> {
+            MainActivity owner = target.owner.get();
+            if (owner == null) target.releaseDocument(lease);
+            else owner.openDocument(operation, template, lease);
+        });
+    }
+
+    boolean openDocument(String operation, String template) {
+        NativeOperationArbiter.Lease lease = state.claimDocument(operation);
+        if (lease == null) {
+            documentBusy(operation);
+            return false;
+        }
+        openDocument(operation, template, lease);
+        return true;
+    }
+
+    private void documentBusy(String operation) {
+        if ("csv".equals(operation)) finishCsv(null, "请先完成当前文件操作。");
+        else state.result(operation, "diagnostics".equals(operation) ? "busy" : "error",
+            "请先完成当前文件操作。", null);
+    }
+
+    private void openDocument(String operation, String template, NativeOperationArbiter.Lease lease) {
+        if (!state.ownsDocument(lease)) return;
+        if ((!pageReady && !"diagnostics".equals(operation)) || state.operation != null || state.working
+                || state.pendingImport != null || updateInstallGate.isActive()
+                || (updater != null && !updater.fileOperationIdle())) {
+            state.releaseDocument(lease);
+            documentBusy(operation);
             return;
         }
         if ("template".equals(operation) && (template == null || template.getBytes(StandardCharsets.UTF_8).length > 65536)) {
+            state.releaseDocument(lease);
             state.result(operation, "error", "CSV 模板内容过大或无效。", null);
             return;
         }
@@ -394,18 +487,34 @@ public final class MainActivity extends Activity {
             AndroidDiagnostics.event("native.file", "export", null, state.diagnosticsId, null);
         }
         updateDiagnosticsUi();
-        boolean read = "import".equals(operation) || "csv".equals(operation);
+        boolean read = "import".equals(operation) || "pack-import".equals(operation) || "csv".equals(operation);
         Intent intent = new Intent(read ? Intent.ACTION_OPEN_DOCUMENT : Intent.ACTION_CREATE_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType(read ? "*/*" : "diagnostics".equals(operation) ? "application/zip" : "template".equals(operation) ? "text/csv" : "application/octet-stream");
+        if ("pack-import".equals(operation)) intent.putExtra(Intent.EXTRA_MIME_TYPES,
+            new String[]{"application/zip", "application/octet-stream"});
         if (!read) intent.putExtra(Intent.EXTRA_TITLE, "template".equals(operation) ? "questions-template.csv"
             : "diagnostics".equals(operation) ? "bagu-diagnostics-" + java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.ROOT).withZone(java.time.ZoneOffset.UTC).format(java.time.Instant.now()) + ".zip"
             : "export-questions".equals(operation) ? "bagu-questions.bagu-backup" : "bagu-progress.bagu-backup");
-        try { startActivityForResult(intent, DOCUMENT_REQUEST); }
+        int requestCode = DOCUMENT_REQUEST;
+        if ("pack-import".equals(operation)) {
+            requestCode = state.nextPackRequestCode;
+            state.nextPackRequestCode = requestCode >= PACK_DOCUMENT_REQUEST_LIMIT
+                ? PACK_DOCUMENT_REQUEST : requestCode + 1;
+        } else {
+            requestCode = state.nextDocumentRequestCode;
+            state.nextDocumentRequestCode = requestCode == DOCUMENT_REQUEST
+                ? DOCUMENT_REQUEST_SEQUENCE
+                : requestCode >= DOCUMENT_REQUEST_LIMIT ? DOCUMENT_REQUEST_SEQUENCE : requestCode + 1;
+        }
+        state.documentRequestCode = requestCode;
+        try { startActivityForResult(intent, requestCode); }
         catch (RuntimeException failure) {
             AndroidDiagnostics.event("native.file", "error", failure, state.diagnosticsId, null);
             state.operation = null;
+            state.documentRequestCode = 0;
             state.template = null;
+            state.releaseDocument(lease);
             if ("csv".equals(operation)) finishCsv(null, "系统文件选择器不可用。");
             else state.result(operation, "error", "系统文件选择器不可用。", null);
         }
@@ -413,23 +522,28 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request != DOCUMENT_REQUEST || state.operation == null) return;
+        NativeOperationArbiter.Lease lease = state.documentLease;
+        if (request != state.documentRequestCode || state.operation == null
+                || !state.ownsDocument(lease)) return;
         String operation = state.operation;
         String template = state.template;
         state.operation = null;
+        state.documentRequestCode = 0;
         state.template = null;
         Uri uri = data == null ? null : data.getData();
         if (result != RESULT_OK || uri == null) {
+            state.releaseDocument(lease);
             if ("csv".equals(operation)) finishCsv(null, null);
             else state.result(operation, "cancelled", "已取消。", null);
             return;
         }
         if (!HostPolicy.isDocumentUri(uri.toString())) {
+            state.releaseDocument(lease);
             if ("csv".equals(operation)) finishCsv(null, "请选择系统文件提供方中的文档。");
             else state.result(operation, "error", "请选择系统文件提供方中的文档。", null);
             return;
         }
-        if ("diagnostics".equals(operation)) { exportDiagnostics(uri); return; }
+        if ("diagnostics".equals(operation)) { exportDiagnostics(uri, lease); return; }
         state.working = true;
         state.workingOperation = operation;
         HostState target = state;
@@ -441,18 +555,25 @@ public final class MainActivity extends Activity {
             try {
                 // A process may have been recreated while the SAF picker was open.
                 RuntimeHost.start(app);
-                if ("import".equals(operation) || "csv".equals(operation)) {
+                if ("import".equals(operation) || "pack-import".equals(operation) || "csv".equals(operation)) {
                     byte[] bytes;
                     try (InputStream input = app.getContentResolver().openInputStream(uri)) {
                         bytes = HostPolicy.readBounded(input, "csv".equals(operation) ? 2 * 1024 * 1024 : 20 * 1024 * 1024);
                     }
-                    if ("import".equals(operation)) {
-                        JSONObject preview = RuntimeHost.inspectArchive(bytes);
+                    if ("import".equals(operation) || "pack-import".equals(operation)) {
+                        JSONObject preview = "pack-import".equals(operation)
+                            ? RuntimeHost.inspectInterviewPack(bytes) : RuntimeHost.inspectArchive(bytes);
+                        PendingImport pending = "pack-import".equals(operation)
+                            ? PendingImport.interviewPack(bytes, previewMap(preview,
+                                "pack_id", "name", "revision", "display_version", "question_count",
+                                "experience_count", "installed_revision", "status"))
+                            : PendingImport.backup(bytes, previewMap(preview,
+                                "mode", "schema_version", "question_count", "created_at", "app_version"));
                         MAIN.post(() -> {
+                            if (!target.ownsDocument(lease)) return;
                             target.working = false;
                             target.workingOperation = null;
-                            target.pendingArchive = bytes;
-                            target.pendingPreview = preview;
+                            target.pendingImport = pending;
                             MainActivity owner = target.owner.get();
                             if (owner != null) owner.showImportConfirmation();
                         });
@@ -479,21 +600,25 @@ public final class MainActivity extends Activity {
             JSONObject restored = counts;
             Uri chosenCsv = csv;
             MAIN.post(() -> {
+                if (!target.ownsDocument(lease)) return;
                 target.working = false;
                 target.workingOperation = null;
                 MainActivity owner = target.owner.get();
                 if ("csv".equals(operation)) {
-                    if (target.csvCallback != null) {
-                        target.csvCallback.onReceiveValue(chosenCsv == null ? null : new Uri[]{chosenCsv});
-                        target.csvCallback = null;
-                    }
+                    ValueCallback<Uri[]> callback = target.csvCallback;
+                    target.csvCallback = null;
+                    target.releaseDocument(lease);
+                    if (callback != null) callback.onReceiveValue(chosenCsv == null ? null : new Uri[]{chosenCsv});
                     if (!ok && owner != null) owner.toast("CSV 读取失败，请选择不超过 2 MiB 的文件。");
                 } else {
-                    String message = ok ? "操作完成。" : "import".equals(operation)
-                        ? "导入失败。请先结束当前练习，并选择有效且不超过 20 MiB 的备份。"
+                    String message = ok ? "操作完成。" : "pack-import".equals(operation)
+                        ? "题包校验失败。请先结束当前练习，并选择有效且不超过 20 MiB 的 .bagu-pack。"
+                        : "import".equals(operation)
+                            ? "导入失败。请先结束当前练习，并选择有效且不超过 20 MiB 的备份。"
                         : ("export".equals(operation) || "export-questions".equals(operation))
                             ? "导出失败。请检查题目字段和题库大小（最多 10000 题、解压后 50 MiB、文件 20 MiB），并确认保存位置可写。原题库未改变。"
                             : "文件写入失败，请重试。";
+                    target.releaseDocument(lease);
                     target.result(operation, ok ? "ok" : "error", message, restored);
                 }
             });
@@ -525,7 +650,7 @@ public final class MainActivity extends Activity {
     }
 
     /** SAF diagnostics never initializes Python, reads the database, or enters its worker. */
-    private void exportDiagnostics(Uri uri) {
+    private void exportDiagnostics(Uri uri, NativeOperationArbiter.Lease lease) {
         state.working = true;
         state.workingOperation = "diagnostics";
         state.diagnosticsMessage = "正在保存诊断日志…";
@@ -548,8 +673,10 @@ public final class MainActivity extends Activity {
             }
             boolean ok = success;
             MAIN.post(() -> {
+                if (!target.ownsDocument(lease)) return;
                 target.working = false;
                 target.workingOperation = null;
+                target.releaseDocument(lease);
                 target.result("diagnostics", ok ? "ok" : "error", ok ? "诊断日志已保存。"
                     : "诊断日志保存失败。请检查或删除保存位置中的不完整文件后重试。", null);
             });
@@ -558,7 +685,7 @@ public final class MainActivity extends Activity {
 
     private void updateDiagnosticsUi() {
         if (state == null || diagnostics == null) return;
-        diagnostics.setEnabled(state.operation == null && !state.working && state.pendingArchive == null && !updateInstallGate.isActive());
+        diagnostics.setEnabled(state.operation == null && !state.working && state.pendingImport == null && !updateInstallGate.isActive());
         if (diagnosticsResult != null) diagnosticsResult.setText(state.diagnosticsMessage == null ? "" : state.diagnosticsMessage);
     }
 
@@ -570,61 +697,103 @@ public final class MainActivity extends Activity {
         catch (Throwable failure) { AndroidDiagnostics.event("native.page", "error", failure, null, null); }
     }
 
+    private static Map<String,Object> previewMap(JSONObject source, String... keys) {
+        LinkedHashMap<String,Object> result = new LinkedHashMap<>();
+        for (String key : keys) {
+            if (!source.has(key)) continue;
+            Object value = source.opt(key);
+            result.put(key, value == JSONObject.NULL ? null : value);
+        }
+        return result;
+    }
+
     private void showImportConfirmation() {
         if (!resumed || !pageReady || isFinishing() || isDestroyed() || importDialog != null
-            || state.pendingArchive == null || state.pendingPreview == null) return;
-        final byte[] bytes = state.pendingArchive;
-        JSONObject preview = state.pendingPreview;
-        boolean pure = "questions".equals(preview.optString("mode"));
-        String message = "类型：" + (pure ? "纯题库（保留本机复习进度）" : "含进度备份（覆盖同名题的复习进度）")
-            + "\n题目：" + preview.optInt("question_count") + " 道"
-            + "\n创建时间：" + preview.optString("created_at")
-            + "\n来源版本：" + preview.optString("app_version")
-            + "\n\n同名题答案和链接将被覆盖，包括空内容。本机其他题目及历史记录保留。建议先导出备份。";
-        importDialog = new AlertDialog.Builder(this).setTitle("导入预览").setMessage(message)
-            .setNegativeButton("取消", (dialog, which) -> cancelImport(bytes))
-            .setPositiveButton("确认导入", (dialog, which) -> confirmImport(bytes))
-            .setOnCancelListener(dialog -> cancelImport(bytes)).create();
+            || state.pendingImport == null) return;
+        final PendingImport pending = state.pendingImport;
+        Map<String,Object> preview = pending.preview();
+        boolean pack = "pack-import".equals(pending.operation());
+        String message;
+        if (pack) {
+            Integer installed = preview.get("installed_revision") instanceof Number
+                ? ((Number)preview.get("installed_revision")).intValue() : null;
+            String status = String.valueOf(preview.get("status"));
+            String change = "upgrade".equals(status) ? "将从 revision " + installed + " 升级。"
+                : "installed".equals(status) ? "相同内容已安装，可幂等确认。"
+                : "downgrade".equals(status) ? "本机 revision 更新，禁止降级。"
+                : "conflict".equals(status) ? "同 revision 内容不同，禁止覆盖。" : "将安装为新题包。";
+            message = "题包：" + preview.get("name")
+                + "\n版本：" + preview.get("display_version") + " · revision " + preview.get("revision")
+                + "\n内容：" + preview.get("question_count") + " 道题 · " + preview.get("experience_count") + " 个专题"
+                + "\n状态：" + change
+                + "\n\n题包内容只读；安装不会自动公开或上传任何文件。";
+        } else {
+            boolean pure = "questions".equals(preview.get("mode"));
+            message = "类型：" + (pure ? "纯题库（保留本机复习进度）" : "含进度备份（覆盖同名题的复习进度）")
+                + "\n题目：" + preview.get("question_count") + " 道"
+                + "\n创建时间：" + preview.get("created_at")
+                + "\n来源版本：" + preview.get("app_version")
+                + "\n\n同名题答案和链接将被覆盖，包括空内容。本机其他题目及历史记录保留。建议先导出备份。";
+        }
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+            .setTitle(pack ? "题包导入预览" : "导入预览").setMessage(message)
+            .setNegativeButton("取消", (dialog, which) -> cancelImport(pending))
+            .setOnCancelListener(dialog -> cancelImport(pending));
+        if (!pack || !("downgrade".equals(preview.get("status")) || "conflict".equals(preview.get("status")))) {
+            builder.setPositiveButton(pack ? "确认安装" : "确认导入", (dialog, which) -> confirmImport(pending));
+        }
+        importDialog = builder.create();
         importDialog.setOnDismissListener(dialog -> importDialog = null);
         importDialog.show();
     }
 
     private void publishDocumentState() {
         String operation = state.operation != null ? state.operation
-            : state.working ? state.workingOperation : state.pendingArchive != null ? "import" : null;
+            : state.working ? state.workingOperation : state.pendingImport != null ? state.pendingImport.operation() : null;
         if (operation != null && !"csv".equals(operation)) {
             state.result(operation, "busy", "文件操作进行中，请完成选择或确认。", null);
         }
     }
 
-    private void cancelImport(byte[] expected) {
-        if (state.pendingArchive != expected) return;
-        state.pendingArchive = null;
-        state.pendingPreview = null;
-        state.result("import", "cancelled", "已取消导入，原数据未改变。", null);
+    private void cancelImport(PendingImport expected) {
+        NativeOperationArbiter.Lease lease = state.documentLease;
+        if (state.pendingImport != expected || !state.ownsDocument(lease)) return;
+        state.pendingImport = null;
+        state.releaseDocument(lease);
+        state.result(expected.operation(), "cancelled", "已取消导入，原数据未改变。", null);
     }
 
-    private void confirmImport(byte[] expected) {
-        if (state.pendingArchive != expected || !resumed || !pageReady || isDestroyed()) return;
+    private void confirmImport(PendingImport expected) {
+        NativeOperationArbiter.Lease lease = state.documentLease;
+        if (state.pendingImport != expected || !state.ownsDocument(lease)
+                || !resumed || !pageReady || isDestroyed()) return;
         // Only this explicit button consumes the validated snapshot. No URI reread,
         // Bundle serialization, JS transfer, or automatic restore on recreation.
-        state.pendingArchive = null;
-        state.pendingPreview = null;
+        state.pendingImport = null;
         state.working = true;
-        state.workingOperation = "import";
+        state.workingOperation = expected.operation();
+        byte[] snapshot = expected.snapshot();
         HostState target = state;
         RuntimeHost.WORKER.execute(() -> {
             JSONObject counts = null;
             boolean success = false;
-            try { counts = RuntimeHost.restoreArchive(expected); success = true; }
-            catch (Exception failure) { AndroidDiagnostics.event("native.file", "import", failure, target.diagnosticsId, null); }
+            try {
+                counts = "pack-import".equals(expected.operation())
+                    ? RuntimeHost.installInterviewPack(snapshot) : RuntimeHost.restoreArchive(snapshot);
+                success = true;
+            } catch (Exception failure) { AndroidDiagnostics.event("native.file", "import", failure, target.diagnosticsId, null); }
             JSONObject result = counts;
             boolean ok = success;
             MAIN.post(() -> {
+                if (!target.ownsDocument(lease)) return;
                 target.working = false;
                 target.workingOperation = null;
-                target.result("import", ok ? "ok" : "error", ok ? "导入完成。"
-                    : "导入失败。请核对题库与进度，并确认本轮练习已结束。", result);
+                boolean pack = "pack-import".equals(expected.operation());
+                target.releaseDocument(lease);
+                target.result(expected.operation(), ok ? "ok" : "error",
+                    ok ? pack ? "题包安装完成。" : "导入完成。"
+                        : pack ? "题包安装失败。请核对题包列表，并确认本轮练习已结束。"
+                            : "导入失败。请核对题库与进度，并确认本轮练习已结束。", result);
             });
         });
     }
@@ -679,7 +848,36 @@ public final class MainActivity extends Activity {
 
     private boolean nativeUpdateIdle() {
         return UpdateEngine.canInstall(updateForeground(), state.operation != null, state.working,
-            state.pendingArchive != null, speechInput != null && speechInput.isActive(), false, false, false, false);
+            state.pendingImport != null, speechInput != null && speechInput.isActive(), false, false, false, false);
+    }
+
+    boolean checkForUpdate(String operationId) {
+        HostState target=state;
+        NativeOperationArbiter.Lease lease=target.claimUpdate(operationId);
+        return lease!=null&&updater.check(operationId,lease,()->target.releaseUpdate(lease));
+    }
+
+    boolean checkForAutomaticUpdate(String operationId) {
+        HostState target=state;
+        NativeOperationArbiter.Lease lease=target.claimUpdate(operationId);
+        return lease!=null&&updater.checkAutomatic(operationId,lease,()->target.releaseUpdate(lease));
+    }
+
+    boolean downloadUpdate(String candidateId,String operationId) {
+        HostState target=state;
+        NativeOperationArbiter.Lease lease=target.claimUpdate(operationId);
+        return lease!=null&&updater.download(candidateId,operationId,lease,()->target.releaseUpdate(lease));
+    }
+
+    boolean installUpdate(String candidateId,String operationId) {
+        HostState target=state;
+        NativeOperationArbiter.Lease lease=target.claimUpdate(operationId);
+        return lease!=null&&updater.install(candidateId,operationId,lease,()->target.releaseUpdate(lease));
+    }
+
+    boolean nativeFileIdle() {
+        return state != null && state.nativeIdle() && state.operation == null && !state.working && state.pendingImport == null
+            && !updateInstallGate.isActive();
     }
 
     void validateUpdateInstallation(String operationId, UpdatePolicy.Release candidate) {
@@ -743,6 +941,17 @@ public final class MainActivity extends Activity {
 
     private void handleBack() {
         if (backPending) return;
+        if (state.pendingImport != null) {
+            PendingImport pending = state.pendingImport;
+            if (importDialog != null) {
+                importDialog.setOnCancelListener(null);
+                importDialog.setOnDismissListener(null);
+                importDialog.dismiss();
+                importDialog = null;
+            }
+            cancelImport(pending);
+            return;
+        }
         if (!pageReady) { super.onBackPressed(); return; }
         backPending = true;
         web.evaluateJavascript("(function(){return typeof window.baguHandleBack==='function' && window.baguHandleBack()===true;})()", value -> {
@@ -760,12 +969,13 @@ public final class MainActivity extends Activity {
 
     @Override protected void onSaveInstanceState(Bundle saved) {
         super.onSaveInstanceState(saved);
-        saved.putString("documentOperation", state.operation);
+        saved.putString("documentOperation", state.operation == null
+            ? state.documentOperation() : state.operation);
         saved.putString("documentOperationId", state.diagnosticsId);
-        saved.putString("documentTemplate", state.template);
         saved.putBoolean("documentWorking", state.working);
         saved.putString("workingOperation", state.workingOperation);
-        saved.putBoolean("documentPendingImport", state.pendingArchive != null);
+        saved.putString("documentPendingImportKind",
+            state.pendingImport == null ? null : state.pendingImport.operation());
     }
 
     @Override protected void onDestroy() {
@@ -781,6 +991,15 @@ public final class MainActivity extends Activity {
         if (speechInput != null) speechInput.cancelActive();
         microphoneReply = null;
         finishCsv(null, null);
+        if (!isChangingConfigurations()) {
+            state.operation = null;
+            state.documentRequestCode = 0;
+            state.template = null;
+            state.pendingImport = null;
+            // A file worker or update/install handoff is process-owned and may outlive
+            // this Activity. Its exact callback releases the shared process lease.
+            if (!state.working) state.releaseDocument(state.documentLease);
+        }
         if (state.owner.get() == this) state.owner.clear();
         if (Build.VERSION.SDK_INT >= 33 && backCallback != null) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
         discardWebView();

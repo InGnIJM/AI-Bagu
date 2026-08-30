@@ -152,3 +152,24 @@ def restore_archive(data) -> str:
         return json.dumps(bagu.restore_backup(conn, bytes(data)))
     finally:
         conn.close()
+
+
+def inspect_interview_pack(data) -> str:
+    """Validate one native-owned snapshot and return metadata-only preview JSON."""
+    conn = _connection()
+    try:
+        blocked = bagu._backup_open_session_error(conn)
+        if blocked:
+            raise blocked
+        return json.dumps(bagu.inspect_interview_pack(conn, bytes(data)))
+    finally:
+        conn.close()
+
+
+def install_interview_pack(data) -> str:
+    """Install the exact bytes previously retained by the native host."""
+    conn = _connection()
+    try:
+        return json.dumps(bagu.install_interview_pack(conn, bytes(data)))
+    finally:
+        conn.close()

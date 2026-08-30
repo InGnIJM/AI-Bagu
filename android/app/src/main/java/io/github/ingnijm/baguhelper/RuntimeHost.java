@@ -49,6 +49,14 @@ final class RuntimeHost {
         return new JSONObject(Python.getInstance().getModule("android_runtime").callAttr("restore_archive", data).toString());
     }
 
+    static JSONObject inspectInterviewPack(byte[] data) throws Exception {
+        return new JSONObject(Python.getInstance().getModule("android_runtime").callAttr("inspect_interview_pack", data).toString());
+    }
+
+    static JSONObject installInterviewPack(byte[] data) throws Exception {
+        return new JSONObject(Python.getInstance().getModule("android_runtime").callAttr("install_interview_pack", data).toString());
+    }
+
     static boolean hasOpenSession() {
         return Python.getInstance().getModule("android_runtime").callAttr("has_open_session").toBoolean();
     }

@@ -48,6 +48,9 @@ public class DiagnosticAcceptanceTest {
         try { java.lang.reflect.Method method = owner.getClass().getDeclaredMethod(name); method.setAccessible(true); method.invoke(owner); }
         catch (ReflectiveOperationException error) { throw new AssertionError("Acceptance boundary failed", error); }
     }
+    private static int documentRequestCode(MainActivity activity) {
+        return (Integer)field(field(activity,"state"),"documentRequestCode");
+    }
     /** Freeze the slow Python boundary. Every Activity, callback, view and SAF operation remains real. */
     private final class StartupFixture implements AutoCloseable {
         final CountDownLatch release = new CountDownLatch(1);
@@ -150,7 +153,7 @@ public class DiagnosticAcceptanceTest {
             });
             assertEquals(1,monitor.getHits());
             fixture.scenario.onActivity(activity -> {
-                activity.onActivityResult(41,Activity.RESULT_CANCELED,null);
+                activity.onActivityResult(documentRequestCode(activity),Activity.RESULT_CANCELED,null);
                 assertNull(field(field(activity,"state"),"operation"));
                 assertTrue(((Button)field(activity,"diagnostics")).isEnabled());
                 assertTrue(((TextView)field(activity,"diagnosticsResult")).getText().toString().contains("已取消"));
@@ -167,7 +170,7 @@ public class DiagnosticAcceptanceTest {
                 assertEquals("diagnostics",field(field(activity,"state"),"operation"));
                 assertEquals(operation.get(),field(field(activity,"state"),"diagnosticsId"));
                 assertFalse(((Button)field(activity,"diagnostics")).isEnabled());
-                activity.onActivityResult(41,Activity.RESULT_CANCELED,null);
+                activity.onActivityResult(documentRequestCode(activity),Activity.RESULT_CANCELED,null);
             });
             assertEquals(1,monitor.getHits());
         } finally { instrumentation.removeMonitor(monitor); }
@@ -200,21 +203,58 @@ public class DiagnosticAcceptanceTest {
             } finally { instrumentation.removeMonitor(monitor); }
         }
     }
+    @Test public void freshProcessPackPendingMarkerCancelsWithoutBytesPreviewOrLateReplay() throws Exception {
+        try (StartupFixture fixture = new StartupFixture()) {
+            Bundle saved = new Bundle();
+            saved.putString("documentPendingImportKind", "pack-import");
+            Context app = instrumentation.getTargetContext();
+            ActivityInfo info = app.getPackageManager().getActivityInfo(new ComponentName(app,MainActivity.class),0);
+            instrumentation.runOnMainSync(() -> {
+                try {
+                    fixture.restored = (MainActivity)instrumentation.newActivity(MainActivity.class,app,new Binder(),
+                        (Application)app.getApplicationContext(),new Intent(app,MainActivity.class),info,
+                        "Bagu pack marker fixture",null,null,null);
+                    fixture.restored.setTheme(info.getThemeResource());
+                    instrumentation.callActivityOnCreate(fixture.restored,saved);
+                } catch (Exception error) { throw new AssertionError("Fresh pack marker restore failed",error); }
+                Object state = field(fixture.restored,"state");
+                assertNull(field(state,"pendingImport"));
+                assertNull(field(state,"documentLease"));
+                @SuppressWarnings("unchecked") ArrayList<JSONObject> results = (ArrayList<JSONObject>)field(state,"results");
+                assertEquals(1,results.size());
+                JSONObject result = results.get(0);
+                assertEquals("pack-import",result.optString("operation"));
+                assertEquals("cancelled",result.optString("status"));
+                assertFalse(result.toString().contains("archive_base64"));
+                fixture.restored.onActivityResult(41,Activity.RESULT_OK,
+                    new Intent().setData(Uri.parse("content://"+DiagnosticOutputProvider.AUTHORITY+"/success.zip")));
+                assertNull(field(state,"pendingImport"));
+                assertEquals(false,field(state,"working"));
+            });
+        }
+    }
     @Test public void outputFailureThenSuccessfulClosedZipAreReportedWithoutJavaScriptOrPython() throws Exception {
         Instrumentation.ActivityMonitor monitor = interceptPicker();
         Context app = instrumentation.getTargetContext();
         Uri success = Uri.parse("content://"+DiagnosticOutputProvider.AUTHORITY+"/success.zip");
+        AtomicReference<Integer> staleRequest = new AtomicReference<>();
         try (StartupFixture fixture = new StartupFixture()) {
             fixture.scenario.onActivity(activity -> {
                 mainFrameFailure(activity); invoke(activity,"discardWebView");
                 activity.openDocument("diagnostics",null);
-                activity.onActivityResult(41,Activity.RESULT_OK,new Intent().setData(Uri.parse("content://"+DiagnosticOutputProvider.AUTHORITY+"/failure.zip")));
+                staleRequest.set(documentRequestCode(activity));
+                activity.onActivityResult(documentRequestCode(activity),Activity.RESULT_OK,new Intent().setData(Uri.parse("content://"+DiagnosticOutputProvider.AUTHORITY+"/failure.zip")));
             });
             awaitNativeMessage(fixture,"保存失败");
             fixture.scenario.onActivity(activity -> {
                 assertTrue(((Button)field(activity,"diagnostics")).isEnabled());
                 activity.openDocument("diagnostics",null);
-                activity.onActivityResult(41,Activity.RESULT_OK,new Intent().setData(success));
+                int currentRequest=documentRequestCode(activity);
+                assertNotEquals(staleRequest.get().intValue(),currentRequest);
+                activity.onActivityResult(staleRequest.get(),Activity.RESULT_CANCELED,null);
+                assertEquals("diagnostics",field(field(activity,"state"),"operation"));
+                assertNotNull(field(field(activity,"state"),"documentLease"));
+                activity.onActivityResult(currentRequest,Activity.RESULT_OK,new Intent().setData(success));
             });
             awaitNativeMessage(fixture,"已保存");
             long deadline = SystemClock.uptimeMillis()+5000; boolean closed = false;
