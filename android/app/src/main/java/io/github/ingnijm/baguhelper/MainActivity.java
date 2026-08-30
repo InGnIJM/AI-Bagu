@@ -7,6 +7,7 @@ import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
@@ -83,6 +84,7 @@ public final class MainActivity extends Activity {
     private final UpdateInstallGate updateInstallGate = new UpdateInstallGate();
     private Runnable updatePrepareTimeout;
     private String speechOperationId;
+    private BundledPackController bundledPackController;
 
     /** Retained across configuration recreation; never retains an Activity strongly. */
     private static final class HostState {
@@ -169,6 +171,7 @@ public final class MainActivity extends Activity {
         Object retained = getLastNonConfigurationInstance();
         state = retained instanceof HostState ? (HostState) retained : new HostState();
         state.owner = new WeakReference<>(this);
+        bundledPackController = createBundledPackController(state);
         if (retained == null && saved != null) {
             String savedId = saved.getString("documentOperationId");
             if (savedId != null && savedId.matches("n_[a-f0-9]{32}")) state.diagnosticsId = savedId;
@@ -277,6 +280,7 @@ public final class MainActivity extends Activity {
                     flushResults();
                     publishDocumentState();
                     showImportConfirmation();
+                    maybePromptBundledInterviewPack();
                     updater.foreground(MainActivity.this);
                 }
             }
@@ -446,6 +450,93 @@ public final class MainActivity extends Activity {
             if (owner == null) target.releaseDocument(lease);
             else owner.openDocument(operation, template, lease);
         });
+    }
+
+    boolean hasBundledInterviewPack() {
+        return bundledPackController != null && bundledPackController.available();
+    }
+
+    void requestBundledInterviewPack() {
+        HostState target = state;
+        MAIN.post(() -> {
+            MainActivity owner = target.owner.get();
+            if (owner != null) owner.prepareBundledInterviewPack(PendingImport.Source.BUNDLED_SETTINGS);
+        });
+    }
+
+    private void maybePromptBundledInterviewPack() {
+        if (bundledOperationIdle()) {
+            prepareBundledInterviewPack(PendingImport.Source.BUNDLED_AUTO_PROMPT);
+        }
+    }
+
+    private boolean bundledOperationIdle() {
+        return resumed && pageReady && !isFinishing() && !isDestroyed()
+            && state.operation == null && !state.working && state.pendingImport == null
+            && state.nativeIdle() && !updateInstallGate.isActive()
+            && (updater == null || updater.fileOperationIdle());
+    }
+
+    private boolean bundledPreviewCanBecomeVisible() {
+        NativeOperationArbiter.Lease lease = state.documentLease;
+        return resumed && pageReady && !isFinishing() && !isDestroyed()
+            && lease != null && state.ownsDocument(lease)
+            && state.operation == null && !state.working && state.pendingImport == null
+            && !updateInstallGate.isActive() && (updater == null || updater.fileOperationIdle());
+    }
+
+    private void prepareBundledInterviewPack(PendingImport.Source source) {
+        boolean automatic = source == PendingImport.Source.BUNDLED_AUTO_PROMPT;
+        boolean idle = bundledOperationIdle();
+        if (automatic && !idle) return;
+        state.diagnosticsId = DiagnosticPolicy.newOperation();
+        HostState target = state;
+        BundledPackController controller = bundledPackController;
+        RuntimeHost.WORKER.execute(() -> {
+            BundledPackController.Result result = controller.prepare(source, idle);
+            MAIN.post(() -> {
+                MainActivity owner = target.owner.get();
+                if (owner == null) result.release();
+                else owner.finishBundledInterviewPack(result, source);
+            });
+        });
+    }
+
+    private void finishBundledInterviewPack(BundledPackController.Result result, PendingImport.Source source) {
+        boolean automatic = source == PendingImport.Source.BUNDLED_AUTO_PROMPT;
+        PendingImport pending = result.pending();
+        if (pending != null) {
+            if (!bundledPreviewCanBecomeVisible()) {
+                result.release();
+                if (!automatic) state.result("pack-import", "error", "当前页面无法预览内置题包，请稍后重试。", null);
+                return;
+            }
+            // This commit is the final action before the retained preview becomes visible.
+            if (!result.activate()) {
+                result.release();
+                state.result("pack-import", "error", "无法保存内置题包提示状态，未显示或安装题包。", null);
+                return;
+            }
+            state.pendingImport = pending;
+            showImportConfirmation();
+            return;
+        }
+        result.release();
+        if (automatic) {
+            if (result.policy() == BundledPackController.Policy.ERROR
+                    && !"unavailable".equals(result.code())) {
+                AndroidDiagnostics.event("native.file", "error", null, state.diagnosticsId, null);
+            }
+            return;
+        }
+        String message = "open_session".equals(result.code())
+            ? "请先结束当前练习，再预览内置题包。"
+            : "unavailable".equals(result.code())
+                ? "当前版本未内置面经题包。"
+                : result.policy() == BundledPackController.Policy.BUSY
+                    ? "请先完成当前文件或更新操作。"
+                    : "内置题包校验失败，未安装任何内容。";
+        state.result("pack-import", "error", message, null);
     }
 
     boolean openDocument(String operation, String template) {
@@ -707,6 +798,39 @@ public final class MainActivity extends Activity {
         return result;
     }
 
+    private BundledPackController createBundledPackController(HostState target) {
+        Context app = getApplicationContext();
+        SharedPreferences preferences = app.getSharedPreferences("bagu-native-bundled-pack", MODE_PRIVATE);
+        BundledPackController.ByteSource asset = new BundledPackController.ByteSource() {
+            @Override public boolean available() throws Exception {
+                String[] names = app.getAssets().list("question-pack");
+                if (names == null) return false;
+                for (String name : names) if ("bundled.bagu-pack".equals(name)) return true;
+                return false;
+            }
+
+            @Override public byte[] read() throws Exception {
+                try (InputStream input = app.getAssets().open(BundledPackController.ASSET_PATH)) {
+                    return HostPolicy.readBounded(input, BundledPackController.MAX_BYTES);
+                }
+            }
+        };
+        BundledPackController.Inspector inspector = bytes -> previewMap(
+            RuntimeHost.inspectInterviewPack(bytes), "pack_id", "name", "revision",
+            "display_version", "question_count", "experience_count", "installed_revision", "status");
+        BundledPackController.PreferenceStore promptState = new BundledPackController.PreferenceStore() {
+            @Override public String get(String key) { return preferences.getString(key, null); }
+            @Override public boolean put(String key, String value) {
+                return preferences.edit().putString(key, value).commit();
+            }
+        };
+        BundledPackController.LeaseGateway gateway = () -> {
+            NativeOperationArbiter.Lease exact = target.claimDocument("pack-import");
+            return exact == null ? null : () -> target.releaseDocument(exact);
+        };
+        return new BundledPackController(asset, inspector, promptState, gateway, RuntimeHost::hasOpenSession);
+    }
+
     private void showImportConfirmation() {
         if (!resumed || !pageReady || isFinishing() || isDestroyed() || importDialog != null
             || state.pendingImport == null) return;
@@ -914,7 +1038,13 @@ public final class MainActivity extends Activity {
 
     void cancelUpdatePreparation(String reason) { updateInstallGate.cancel(reason); }
 
-    @Override protected void onResume() { super.onResume(); resumed = true; showImportConfirmation(); if (updater != null) updater.foreground(this); }
+    @Override protected void onResume() {
+        super.onResume();
+        resumed = true;
+        showImportConfirmation();
+        maybePromptBundledInterviewPack();
+        if (updater != null) updater.foreground(this);
+    }
 
     @Override protected void onPause() {
         cancelUpdatePreparation("应用已离开前台，请重新点击安装。");

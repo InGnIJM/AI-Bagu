@@ -31,6 +31,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.io.File;
 import java.util.TreeMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.security.MessageDigest;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -629,5 +631,76 @@ public final class AndroidAcceptanceTest {
         await("pack confirmation back cancellation", "window.__qaFileResult && window.__qaFileResult.status==='cancelled'", 10000);
         assertFalse(device.hasObject(By.text("确认安装")));
         assertEquals("true", js("!document.getElementById('btn-pack-import').disabled"));
+    }
+
+    @Test public void bundledPackCapabilityAndPreviewLifecycleRemainNativeAndRedacted() throws Exception {
+        assertEquals("boolean", js("typeof BaguNative.hasBundledInterviewPack()"));
+        assertEquals("function", js("typeof BaguNative.importBundledInterviewPack"));
+        byte[] pack = interviewPackFixture();
+        String before = RuntimeHost.inspectInterviewPack(pack).getString("status");
+        Map<String,Object> preview = new LinkedHashMap<>();
+        preview.put("pack_id", "android-private-pack"); preview.put("name", "Android private pack");
+        preview.put("revision", 2); preview.put("display_version", "2.0");
+        preview.put("question_count", 1); preview.put("experience_count", 1);
+        preview.put("installed_revision", 1); preview.put("status", "upgrade");
+        preview.put("answer", "PRIVATE_BUNDLED_ANSWER_SENTINEL");
+        PendingImport pending = PendingImport.interviewPack(pack, preview, PendingImport.Source.BUNDLED_SETTINGS);
+        AtomicReference<Object> retainedLease = new AtomicReference<>();
+        scenario.onActivity(current -> {
+            try {
+                Object host = field(current, "state");
+                java.lang.reflect.Method claim = host.getClass().getDeclaredMethod("claimDocument", String.class);
+                claim.setAccessible(true);
+                retainedLease.set(claim.invoke(host, "pack-import"));
+                assertNotNull(retainedLease.get());
+                java.lang.reflect.Field pendingField = host.getClass().getDeclaredField("pendingImport");
+                pendingField.setAccessible(true); pendingField.set(host, pending);
+                java.lang.reflect.Method show = MainActivity.class.getDeclaredMethod("showImportConfirmation");
+                show.setAccessible(true); show.invoke(current);
+            } catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+        });
+        assertTrue(UiDevice.getInstance(instrumentation).wait(
+            androidx.test.uiautomator.Until.hasObject(By.text("确认安装")), 10000));
+
+        android.os.Bundle saved = new android.os.Bundle();
+        scenario.onActivity(current -> current.onSaveInstanceState(saved));
+        assertFalse(saved.containsKey(BundledPackController.PROMPTED_HASH_KEY));
+        for (String key : saved.keySet()) {
+            Object value = saved.get(key);
+            assertFalse("saved state must not serialize archive bytes", value instanceof byte[]);
+            assertFalse(String.valueOf(value).contains("PRIVATE_BUNDLED_ANSWER_SENTINEL"));
+        }
+
+        scenario.recreate();
+        scenario.onActivity(value -> { activity = value; web = findWebView(value.getWindow().getDecorView()); });
+        await("recreated bundled preview page", "typeof showView==='function'", 30000);
+        assertSame(pending, field(field(activity, "state"), "pendingImport"));
+        assertSame(retainedLease.get(), field(field(activity, "state"), "documentLease"));
+        assertEquals(PendingImport.Source.BUNDLED_SETTINGS,
+            ((PendingImport)field(field(activity, "state"), "pendingImport")).source());
+        assertEquals("recreation must not install", before,
+            RuntimeHost.inspectInterviewPack(pack).getString("status"));
+        assertTrue(UiDevice.getInstance(instrumentation).wait(
+            androidx.test.uiautomator.Until.hasObject(By.text("确认安装")), 10000));
+
+        js("window.__qaBundledResult=null;window.addEventListener('bagu-native-result',function(e){if(e.detail.operation==='pack-import')window.__qaBundledResult=e.detail;});");
+        UiDevice.getInstance(instrumentation).pressBack();
+        await("bundled preview cancelled", "window.__qaBundledResult && window.__qaBundledResult.status==='cancelled'", 10000);
+        String event = js("JSON.stringify(window.__qaBundledResult)");
+        assertTrue(event.contains("pack-import"));
+        for (String secret : new String[]{"PRIVATE_BUNDLED_ANSWER_SENTINEL", "Explain a transaction",
+                "questions_sha256", "content://", BundledPackController.PROMPTED_HASH_KEY}) {
+            assertFalse("bundled result must redact " + secret, event.contains(secret));
+        }
+        assertEquals("true", js("Object.keys(window.__qaBundledResult).every(function(k){return ['operation','status','message','operation_id'].includes(k);})"));
+        assertEquals("false", js("'source' in window.__qaBundledResult"));
+        assertNull(field(field(activity, "state"), "documentLease"));
+
+        scenario.close();
+        scenario = ActivityScenario.launch(MainActivity.class);
+        scenario.onActivity(value -> { activity = value; web = findWebView(value.getWindow().getDecorView()); });
+        await("restarted bundled page", "typeof showView==='function'", 30000);
+        assertEquals("Activity restart must not install retained bytes", before,
+            RuntimeHost.inspectInterviewPack(pack).getString("status"));
     }
 }

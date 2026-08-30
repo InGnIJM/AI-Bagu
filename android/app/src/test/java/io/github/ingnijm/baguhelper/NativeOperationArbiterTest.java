@@ -61,6 +61,20 @@ public final class NativeOperationArbiterTest {
         }
     }
 
+    @Test public void bundledPackPreviewUsesTheSharedFileBoundaryUntilExactRelease() {
+        NativeOperationArbiter arbiter = new NativeOperationArbiter();
+        NativeOperationArbiter.Lease bundled = arbiter.tryAcquire("file", "pack-import");
+        assertNotNull(bundled);
+        assertNull(arbiter.tryAcquire("file", "backup-import"));
+        assertNull(arbiter.tryAcquire("update", "update-install"));
+
+        assertTrue(arbiter.release(bundled));
+        NativeOperationArbiter.Lease next = arbiter.tryAcquire("file", "backup-import");
+        assertNotNull(next);
+        assertFalse(arbiter.release(bundled));
+        assertTrue(arbiter.release(next));
+    }
+
     private static void claim(NativeOperationArbiter arbiter, String kind, String operation,
             AtomicReference<NativeOperationArbiter.Lease> result, CountDownLatch ready,
             CountDownLatch start, CountDownLatch finished) {

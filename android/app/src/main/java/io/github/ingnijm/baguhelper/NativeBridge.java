@@ -62,6 +62,14 @@ public final class NativeBridge {
     @JavascriptInterface public void exportQuestionBank() { open("export-questions", null); }
     @JavascriptInterface public void importBackup() { open("import", null); }
     @JavascriptInterface public void importInterviewPack() { open("pack-import", null); }
+    @JavascriptInterface public boolean hasBundledInterviewPack() {
+        MainActivity owner = activity.get();
+        return owner != null && owner.hasBundledInterviewPack();
+    }
+    @JavascriptInterface public void importBundledInterviewPack() {
+        MainActivity owner = activity.get();
+        if (owner != null) owner.requestBundledInterviewPack();
+    }
     @JavascriptInterface public void saveCsvTemplate(String csv) { open("template", csv); }
     @JavascriptInterface public void startSpeech(String requestId) { speech("start", requestId); }
     @JavascriptInterface public void stopSpeech(String requestId) { speech("stop", requestId); }

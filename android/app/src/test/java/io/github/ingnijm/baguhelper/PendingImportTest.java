@@ -44,4 +44,17 @@ public final class PendingImportTest {
         assertEquals(5, pending.preview().size());
         assertFalse(pending.preview().containsKey("answer"));
     }
+
+    @Test public void nativeSourceSurvivesCloningWithoutEnteringPreview() {
+        Map<String,Object> preview = new LinkedHashMap<>();
+        preview.put("pack_id", "safe-pack"); preview.put("status", "upgrade");
+        preview.put("source", "content://PRIVATE_PATH");
+
+        PendingImport pending = PendingImport.interviewPack(new byte[]{5, 6}, preview,
+            PendingImport.Source.BUNDLED_AUTO_PROMPT);
+
+        assertEquals(PendingImport.Source.BUNDLED_AUTO_PROMPT, pending.source());
+        assertFalse(pending.preview().containsKey("source"));
+        assertFalse(pending.preview().toString().contains("PRIVATE_PATH"));
+    }
 }
