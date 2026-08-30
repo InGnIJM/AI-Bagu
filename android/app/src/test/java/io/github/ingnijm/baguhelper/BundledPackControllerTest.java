@@ -47,10 +47,12 @@ public final class BundledPackControllerTest {
         changed.release();
     }
 
-    @Test public void manualSettingsRequestBypassesAutomaticHashSuppression() {
+    @Test public void manualSettingsRequestBypassesAutomaticHashSuppression() throws Exception {
         Fixture fixture = new Fixture("new", new byte[]{4, 5, 6});
         BundledPackController.Result automatic = fixture.controller.prepare(
             PendingImport.Source.BUNDLED_AUTO_PROMPT, true);
+        assertTrue(automatic.activate());
+        assertEquals(sha256(new byte[]{4, 5, 6}), fixture.preferences.value);
         automatic.release();
 
         BundledPackController.Result manual = fixture.controller.prepare(

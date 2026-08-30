@@ -31,8 +31,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.io.File;
 import java.util.TreeMap;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.security.MessageDigest;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -123,6 +121,25 @@ public final class AndroidAcceptanceTest {
             SystemClock.sleep(150);
         }
         fail("Timed out: " + label + " (runtime details withheld)");
+    }
+
+    private boolean targetHasBundledPackAsset() throws Exception {
+        try (InputStream ignored = instrumentation.getTargetContext().getAssets()
+                .open(BundledPackController.ASSET_PATH)) {
+            return true;
+        } catch (java.io.IOException absent) {
+            return false;
+        }
+    }
+
+    private void settleBundledController() throws Exception {
+        // Flush bridge/main-thread submission, then the serial Python worker, then
+        // the controller's main-thread completion without ever reading asset bytes.
+        instrumentation.runOnMainSync(() -> {});
+        CountDownLatch worker = new CountDownLatch(1);
+        RuntimeHost.WORKER.execute(worker::countDown);
+        assertTrue("Bundled controller worker timed out", worker.await(20, TimeUnit.SECONDS));
+        instrumentation.runOnMainSync(() -> {});
     }
 
     private String qa(String function) throws Exception {
@@ -634,33 +651,65 @@ public final class AndroidAcceptanceTest {
     }
 
     @Test public void bundledPackCapabilityAndPreviewLifecycleRemainNativeAndRedacted() throws Exception {
+        UiDevice device = UiDevice.getInstance(instrumentation);
+        boolean assetExists = targetHasBundledPackAsset();
         assertEquals("boolean", js("typeof BaguNative.hasBundledInterviewPack()"));
+        assertEquals(String.valueOf(assetExists), js("BaguNative.hasBundledInterviewPack()"));
         assertEquals("function", js("typeof BaguNative.importBundledInterviewPack"));
-        byte[] pack = interviewPackFixture();
-        String before = RuntimeHost.inspectInterviewPack(pack).getString("status");
-        Map<String,Object> preview = new LinkedHashMap<>();
-        preview.put("pack_id", "android-private-pack"); preview.put("name", "Android private pack");
-        preview.put("revision", 2); preview.put("display_version", "2.0");
-        preview.put("question_count", 1); preview.put("experience_count", 1);
-        preview.put("installed_revision", 1); preview.put("status", "upgrade");
-        preview.put("answer", "PRIVATE_BUNDLED_ANSWER_SENTINEL");
-        PendingImport pending = PendingImport.interviewPack(pack, preview, PendingImport.Source.BUNDLED_SETTINGS);
-        AtomicReference<Object> retainedLease = new AtomicReference<>();
-        scenario.onActivity(current -> {
-            try {
-                Object host = field(current, "state");
-                java.lang.reflect.Method claim = host.getClass().getDeclaredMethod("claimDocument", String.class);
-                claim.setAccessible(true);
-                retainedLease.set(claim.invoke(host, "pack-import"));
-                assertNotNull(retainedLease.get());
-                java.lang.reflect.Field pendingField = host.getClass().getDeclaredField("pendingImport");
-                pendingField.setAccessible(true); pendingField.set(host, pending);
-                java.lang.reflect.Method show = MainActivity.class.getDeclaredMethod("showImportConfirmation");
-                show.setAccessible(true); show.invoke(current);
-            } catch (ReflectiveOperationException error) { throw new AssertionError(error); }
-        });
-        assertTrue(UiDevice.getInstance(instrumentation).wait(
-            androidx.test.uiautomator.Until.hasObject(By.text("确认安装")), 10000));
+
+        js("window.__qaBundledResult=null;window.addEventListener('bagu-native-result',function(e){if(e.detail.operation==='pack-import')window.__qaBundledResult=e.detail;});");
+        settleBundledController();
+        PendingImport automatic = (PendingImport)field(field(activity, "state"), "pendingImport");
+        if (automatic != null) {
+            assertEquals("Only the real automatic bridge path may already own startup preview",
+                PendingImport.Source.BUNDLED_AUTO_PROMPT, automatic.source());
+            device.pressBack();
+            await("startup bundled preview cancelled",
+                "window.__qaBundledResult && window.__qaBundledResult.status==='cancelled'", 10000);
+            settleBundledController();
+            assertNull(field(field(activity, "state"), "pendingImport"));
+            js("window.__qaBundledResult=null");
+        }
+
+        assertEquals("true", js("(function(){BaguNative.importBundledInterviewPack();return true;})()"));
+        settleBundledController();
+        assertTrue("Bundled action must remain in the target package",
+            device.wait(androidx.test.uiautomator.Until.hasObject(By.pkg(activity.getPackageName())), 10000));
+        String currentPackage = device.getCurrentPackageName();
+        assertFalse("Bundled action must never open DocumentsUI/SAF",
+            currentPackage != null && currentPackage.contains("documentsui"));
+
+        if (!assetExists) {
+            await("assetless bundled action safely rejected",
+                "window.__qaBundledResult && window.__qaBundledResult.status==='error'", 10000);
+            assertEquals("true", js("window.__qaBundledResult.operation==='pack-import'"));
+            assertEquals(JSONObject.quote("当前版本未内置面经题包。"),
+                js("window.__qaBundledResult.message"));
+            assertEquals("true", js("Object.keys(window.__qaBundledResult).every(function(k){return ['operation','status','message','operation_id'].includes(k);})"));
+            String unavailable = js("JSON.stringify(window.__qaBundledResult)");
+            for (String secret : new String[]{BundledPackController.ASSET_PATH,
+                    BundledPackController.PROMPTED_HASH_KEY, "questions_sha256",
+                    "archive_base64", "content://", "question", "answer"}) {
+                assertFalse("assetless result must redact " + secret, unavailable.contains(secret));
+            }
+            assertNull(field(field(activity, "state"), "pendingImport"));
+            assertNull(field(field(activity, "state"), "documentLease"));
+            return;
+        }
+
+        assertFalse("Bundled bridge acceptance requires an idle synthetic database",
+            RuntimeHost.hasOpenSession());
+        PendingImport pending = (PendingImport)field(field(activity, "state"), "pendingImport");
+        assertNotNull("Real bundled bridge action must produce a native preview", pending);
+        assertEquals(PendingImport.Source.BUNDLED_SETTINGS, pending.source());
+        assertEquals("pack-import", pending.operation());
+        assertTrue("Real bundled preview status",
+            java.util.Arrays.asList("new", "upgrade", "installed", "downgrade", "conflict")
+                .contains(String.valueOf(pending.preview().get("status"))));
+        Object retainedLease = field(field(activity, "state"), "documentLease");
+        assertNotNull("Real bridge preview retains its exact native lease", retainedLease);
+        assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(By.text("题包导入预览")), 10000));
+        assertEquals("true", js("window.__qaBundledResult===null"));
 
         android.os.Bundle saved = new android.os.Bundle();
         scenario.onActivity(current -> current.onSaveInstanceState(saved));
@@ -668,28 +717,27 @@ public final class AndroidAcceptanceTest {
         for (String key : saved.keySet()) {
             Object value = saved.get(key);
             assertFalse("saved state must not serialize archive bytes", value instanceof byte[]);
-            assertFalse(String.valueOf(value).contains("PRIVATE_BUNDLED_ANSWER_SENTINEL"));
+            assertFalse("saved state must not expose the fixed asset path",
+                String.valueOf(value).contains(BundledPackController.ASSET_PATH));
         }
 
         scenario.recreate();
         scenario.onActivity(value -> { activity = value; web = findWebView(value.getWindow().getDecorView()); });
         await("recreated bundled preview page", "typeof showView==='function'", 30000);
         assertSame(pending, field(field(activity, "state"), "pendingImport"));
-        assertSame(retainedLease.get(), field(field(activity, "state"), "documentLease"));
+        assertSame(retainedLease, field(field(activity, "state"), "documentLease"));
         assertEquals(PendingImport.Source.BUNDLED_SETTINGS,
             ((PendingImport)field(field(activity, "state"), "pendingImport")).source());
-        assertEquals("recreation must not install", before,
-            RuntimeHost.inspectInterviewPack(pack).getString("status"));
-        assertTrue(UiDevice.getInstance(instrumentation).wait(
-            androidx.test.uiautomator.Until.hasObject(By.text("确认安装")), 10000));
+        assertTrue("Recreation re-displays, but cannot implicitly confirm, the real preview",
+            device.wait(androidx.test.uiautomator.Until.hasObject(By.text("题包导入预览")), 10000));
 
         js("window.__qaBundledResult=null;window.addEventListener('bagu-native-result',function(e){if(e.detail.operation==='pack-import')window.__qaBundledResult=e.detail;});");
-        UiDevice.getInstance(instrumentation).pressBack();
+        device.pressBack();
         await("bundled preview cancelled", "window.__qaBundledResult && window.__qaBundledResult.status==='cancelled'", 10000);
         String event = js("JSON.stringify(window.__qaBundledResult)");
         assertTrue(event.contains("pack-import"));
-        for (String secret : new String[]{"PRIVATE_BUNDLED_ANSWER_SENTINEL", "Explain a transaction",
-                "questions_sha256", "content://", BundledPackController.PROMPTED_HASH_KEY}) {
+        for (String secret : new String[]{BundledPackController.ASSET_PATH, "questions_sha256",
+                "archive_base64", "content://", BundledPackController.PROMPTED_HASH_KEY}) {
             assertFalse("bundled result must redact " + secret, event.contains(secret));
         }
         assertEquals("true", js("Object.keys(window.__qaBundledResult).every(function(k){return ['operation','status','message','operation_id'].includes(k);})"));
@@ -700,7 +748,13 @@ public final class AndroidAcceptanceTest {
         scenario = ActivityScenario.launch(MainActivity.class);
         scenario.onActivity(value -> { activity = value; web = findWebView(value.getWindow().getDecorView()); });
         await("restarted bundled page", "typeof showView==='function'", 30000);
-        assertEquals("Activity restart must not install retained bytes", before,
-            RuntimeHost.inspectInterviewPack(pack).getString("status"));
+        settleBundledController();
+        assertNotSame("Fresh Activity must not restore retained archive bytes", pending,
+            field(field(activity, "state"), "pendingImport"));
+        assertNull("Fresh Activity must not restore the old lease",
+            field(field(activity, "state"), "documentLease"));
+        assertFalse("Fresh Activity remains outside DocumentsUI",
+            device.getCurrentPackageName() != null
+                && device.getCurrentPackageName().contains("documentsui"));
     }
 }
