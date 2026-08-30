@@ -946,6 +946,65 @@ def test_blocker_coordinates_never_echo_nonportable_override_keys(tmp_path):
             assert not blocker["path"].startswith(("/", "\\"))
 
 
+def test_blocker_stable_ids_only_allow_preparer_generated_shapes(tmp_path):
+    preparer = load_preparer()
+    source_root = make_source(
+        tmp_path,
+        "## Empty section\n## Used section\n- [ ] Question\n",
+    )
+    workspace = tmp_path / "workspace"
+    overrides = direct_overrides(
+        ["q.agent.01.001"], recommended="sec.agent.01.02"
+    )
+    private_values = (
+        "private.secret-token",
+        "token:abc123",
+        "C:\\PRIVATE\\secret-source.md",
+        "https://private.example.test/secret-source",
+    )
+    for value in private_values:
+        overrides["questions"][value] = {
+            "category": "general",
+            "kind": "review",
+            "retired": False,
+            "answer": "Secret answer.",
+        }
+    overrides["topics"]["agent.99"] = {
+        "kind": "interview",
+        "direction": "agent",
+        "company": "Acme",
+        "position": "Engineer",
+        "stage": "Technical",
+        "recommended_section": "sec.agent.99.01",
+    }
+    overrides["questions"]["q.agent.01.999"] = {
+        "category": "general",
+        "kind": "review",
+        "retired": False,
+        "answer": "Unknown answer.",
+    }
+
+    with pytest.raises(preparer.CatalogPreparationError):
+        run_prepare(
+            preparer,
+            source_root,
+            workspace,
+            overrides,
+            expected_questions=1,
+        )
+
+    report_path = workspace / "reports" / "normalization-report.json"
+    report_bytes = report_path.read_bytes()
+    for value in private_values:
+        assert value.encode("utf-8") not in report_bytes
+    stable_ids = {
+        blocker["stable_id"]
+        for blocker in read_json(report_path)["blockers"]
+        if "stable_id" in blocker
+    }
+    assert {"agent.99", "q.agent.01.999", "sec.agent.01.01"} <= stable_ids
+
+
 @pytest.mark.parametrize(
     "diagnostic_name",
     ["overrides-template.json", "normalization-report.json"],
@@ -998,6 +1057,325 @@ def test_source_drift_during_diagnostic_writes_blocks_pair_promotion(
     ] == "blocked"
     assert catalog_path.read_bytes() == catalog_before
     assert map_path.read_bytes() == map_before
+
+
+PAIR_JOURNAL = Path("catalog") / ".catalog-pair-transaction.json"
+
+
+def setup_pair_upgrade(tmp_path, preparer, prior_state):
+    source_root = make_source(tmp_path, "## Section\n- [ ] First question\n")
+    seed_workspace = tmp_path / "seed-workspace"
+    seed_overrides = direct_overrides(["q.agent.01.001"])
+    run_prepare(
+        preparer,
+        source_root,
+        seed_workspace,
+        seed_overrides,
+        expected_questions=1,
+    )
+    seed_map = (seed_workspace / "catalog" / "stable-ids.json").read_bytes()
+    seed_catalog = (seed_workspace / "catalog" / "private-catalog.json").read_bytes()
+
+    workspace = tmp_path / "workspace"
+    catalog_dir = workspace / "catalog"
+    catalog_dir.mkdir(parents=True)
+    map_path = catalog_dir / "stable-ids.json"
+    catalog_path = catalog_dir / "private-catalog.json"
+    if prior_state in ("map-only", "both"):
+        map_path.write_bytes(seed_map)
+    if prior_state in ("catalog-only", "both"):
+        catalog_path.write_bytes(seed_catalog)
+
+    (source_root / "Agent面经" / "01_Agent基础" / "01_问题版.md").write_text(
+        "## Section\n- [ ] First question\n- [ ] Second question\n",
+        encoding="utf-8",
+    )
+    overrides = direct_overrides(["q.agent.01.001", "q.agent.01.002"])
+    return {
+        "source_root": source_root,
+        "workspace": workspace,
+        "overrides": overrides,
+        "map_path": map_path,
+        "catalog_path": catalog_path,
+        "journal_path": workspace / PAIR_JOURNAL,
+        "prior_map": seed_map if prior_state in ("map-only", "both") else None,
+        "prior_catalog": (
+            seed_catalog if prior_state in ("catalog-only", "both") else None
+        ),
+    }
+
+
+def assert_prior_pair(fixture):
+    for path_key, bytes_key in (
+        ("map_path", "prior_map"),
+        ("catalog_path", "prior_catalog"),
+    ):
+        path = fixture[path_key]
+        prior = fixture[bytes_key]
+        assert path.exists() is (prior is not None)
+        if prior is not None:
+            assert path.read_bytes() == prior
+
+
+def recover_then_stop(preparer, fixture):
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            fixture["source_root"],
+            fixture["workspace"],
+            fixture["overrides"],
+            expected_questions=2,
+            expected_snapshot="0" * 64,
+        )
+    assert "source_snapshot_mismatch" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert_prior_pair(fixture)
+    assert not fixture["journal_path"].exists()
+
+
+@pytest.mark.parametrize("prior_state", ["none", "map-only", "catalog-only", "both"])
+@pytest.mark.parametrize(
+    "failed_target", ["stable-ids.json", "private-catalog.json"]
+)
+def test_journal_covers_all_prior_pair_states_and_promotion_failures(
+    tmp_path, monkeypatch, prior_state, failed_target
+):
+    preparer = load_preparer()
+    fixture = setup_pair_upgrade(tmp_path, preparer, prior_state)
+    original_replace = preparer.os.replace
+    injected = False
+
+    def fail_one_promotion(source, destination):
+        nonlocal injected
+        if Path(destination).name == failed_target and not injected:
+            assert fixture["journal_path"].is_file()
+            injected = True
+            raise OSError("injected promotion failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(preparer.os, "replace", fail_one_promotion)
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            fixture["source_root"],
+            fixture["workspace"],
+            fixture["overrides"],
+            expected_questions=2,
+        )
+    assert "output_promotion_failed" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert_prior_pair(fixture)
+    assert fixture["journal_path"].is_file()
+
+    monkeypatch.setattr(preparer.os, "replace", original_replace)
+    recover_then_stop(preparer, fixture)
+
+
+def test_restore_write_failure_keeps_journal_for_next_call(tmp_path, monkeypatch):
+    preparer = load_preparer()
+    fixture = setup_pair_upgrade(tmp_path, preparer, "both")
+    original_replace = preparer.os.replace
+    promotion_failed = False
+    restore_failed = False
+
+    def fail_promotion_then_restore(source, destination):
+        nonlocal promotion_failed, restore_failed
+        name = Path(destination).name
+        if name == "private-catalog.json" and not promotion_failed:
+            promotion_failed = True
+            raise OSError("injected catalog promotion failure")
+        if name == "stable-ids.json" and promotion_failed and not restore_failed:
+            restore_failed = True
+            raise OSError("injected map restore failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(preparer.os, "replace", fail_promotion_then_restore)
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            fixture["source_root"],
+            fixture["workspace"],
+            fixture["overrides"],
+            expected_questions=2,
+        )
+    assert "output_recovery_failed" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert fixture["journal_path"].is_file()
+    assert fixture["journal_path"].read_bytes() == canonical_bytes(
+        read_json(fixture["journal_path"])
+    )
+
+    monkeypatch.setattr(preparer.os, "replace", original_replace)
+    recover_then_stop(preparer, fixture)
+
+
+def test_restore_unlink_failure_keeps_journal_for_next_call(tmp_path, monkeypatch):
+    preparer = load_preparer()
+    fixture = setup_pair_upgrade(tmp_path, preparer, "none")
+    original_replace = preparer.os.replace
+    original_unlink = Path.unlink
+    promotion_failed = False
+    unlink_failed = False
+
+    def fail_catalog_promotion(source, destination):
+        nonlocal promotion_failed
+        if Path(destination).name == "private-catalog.json" and not promotion_failed:
+            promotion_failed = True
+            raise OSError("injected catalog promotion failure")
+        return original_replace(source, destination)
+
+    def fail_map_restore_unlink(path, *args, **kwargs):
+        nonlocal unlink_failed
+        if path == fixture["map_path"] and promotion_failed and not unlink_failed:
+            unlink_failed = True
+            raise OSError("injected map restore unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(preparer.os, "replace", fail_catalog_promotion)
+    monkeypatch.setattr(Path, "unlink", fail_map_restore_unlink)
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            fixture["source_root"],
+            fixture["workspace"],
+            fixture["overrides"],
+            expected_questions=2,
+        )
+    assert "output_recovery_failed" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert fixture["journal_path"].is_file()
+
+    monkeypatch.setattr(preparer.os, "replace", original_replace)
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    recover_then_stop(preparer, fixture)
+
+
+def test_journal_cleanup_failure_is_blocked_and_recovered_next_call(
+    tmp_path, monkeypatch
+):
+    preparer = load_preparer()
+    fixture = setup_pair_upgrade(tmp_path, preparer, "both")
+    original_unlink = Path.unlink
+    injected = False
+
+    def fail_journal_cleanup(path, *args, **kwargs):
+        nonlocal injected
+        if path == fixture["journal_path"] and not injected:
+            injected = True
+            raise OSError("injected journal cleanup failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_journal_cleanup)
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            fixture["source_root"],
+            fixture["workspace"],
+            fixture["overrides"],
+            expected_questions=2,
+        )
+    assert "output_recovery_failed" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert fixture["journal_path"].is_file()
+
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    recover_then_stop(preparer, fixture)
+
+
+def test_interruption_after_second_replace_recovers_on_next_call(tmp_path, monkeypatch):
+    preparer = load_preparer()
+    fixture = setup_pair_upgrade(tmp_path, preparer, "both")
+    original_replace = preparer.os.replace
+
+    class SimulatedInterruption(BaseException):
+        pass
+
+    interrupted = False
+
+    def interrupt_after_catalog_replace(source, destination):
+        nonlocal interrupted
+        result = original_replace(source, destination)
+        if Path(destination).name == "private-catalog.json" and not interrupted:
+            interrupted = True
+            raise SimulatedInterruption()
+        return result
+
+    monkeypatch.setattr(preparer.os, "replace", interrupt_after_catalog_replace)
+    with pytest.raises(SimulatedInterruption):
+        run_prepare(
+            preparer,
+            fixture["source_root"],
+            fixture["workspace"],
+            fixture["overrides"],
+            expected_questions=2,
+        )
+    assert fixture["journal_path"].is_file()
+
+    monkeypatch.setattr(preparer.os, "replace", original_replace)
+    recover_then_stop(preparer, fixture)
+
+
+def test_malformed_journal_blocks_without_overwriting_pair_or_leaking(tmp_path):
+    preparer = load_preparer()
+    fixture = setup_pair_upgrade(tmp_path, preparer, "both")
+    malformed = b'{"schema_version":1,"private.secret-token":"PRIVATE_BODY"}'
+    fixture["journal_path"].write_bytes(malformed)
+
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            fixture["source_root"],
+            fixture["workspace"],
+            fixture["overrides"],
+            expected_questions=2,
+        )
+
+    assert "invalid_output_journal" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert_prior_pair(fixture)
+    assert fixture["journal_path"].read_bytes() == malformed
+    report_bytes = (
+        fixture["workspace"] / "reports" / "normalization-report.json"
+    ).read_bytes()
+    assert b"private.secret-token" not in report_bytes
+    assert b"PRIVATE_BODY" not in report_bytes
+
+
+def test_journal_write_failure_is_a_redacted_controlled_blocker(tmp_path, monkeypatch):
+    preparer = load_preparer()
+    fixture = setup_pair_upgrade(tmp_path, preparer, "both")
+    original_replace = preparer.os.replace
+
+    def fail_journal_replace(source, destination):
+        if Path(destination) == fixture["journal_path"]:
+            raise OSError("C:\\PRIVATE\\journal-write-secret")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(preparer.os, "replace", fail_journal_replace)
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            fixture["source_root"],
+            fixture["workspace"],
+            fixture["overrides"],
+            expected_questions=2,
+        )
+    assert "output_journal_failed" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert_prior_pair(fixture)
+    assert not fixture["journal_path"].exists()
+    report_bytes = (
+        fixture["workspace"] / "reports" / "normalization-report.json"
+    ).read_bytes()
+    assert b"PRIVATE" not in report_bytes
+    assert b"journal-write-secret" not in report_bytes
 
 
 @pytest.mark.parametrize(

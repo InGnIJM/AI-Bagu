@@ -7,6 +7,8 @@ the caller, and every generated file is confined to the private workspace.
 """
 
 import argparse
+import base64
+import binascii
 import hashlib
 import importlib.util
 import json
@@ -43,7 +45,12 @@ STABLE_TOPIC_PATTERN = re.compile(r"(agent|backend)\.\d{2,}\Z")
 STORED_QUESTION_ID_PATTERN = re.compile(
     r"q\.(agent|backend)\.(\d{2,})\.(\d{3,})\Z"
 )
+REPORT_SECTION_ID_PATTERN = re.compile(
+    r"sec\.(agent|backend)\.\d{2,}\.\d{2,}\Z"
+)
 MAX_BLOCKERS = 1_000
+PAIR_JOURNAL_NAME = ".catalog-pair-transaction.json"
+PAIR_OUTPUT_NAMES = ("stable-ids.json", "private-catalog.json")
 
 OVERRIDE_FIELDS = {"schema_version", "identity_aliases", "topics", "questions"}
 TOPIC_OVERRIDE_FIELDS = {
@@ -88,6 +95,18 @@ class _DuplicateKeyError(ValueError):
     pass
 
 
+class _InvalidPairJournal(ValueError):
+    pass
+
+
+class _PairPromotionError(OSError):
+    pass
+
+
+class _PairRecoveryError(OSError):
+    pass
+
+
 class _Blockers:
     def __init__(self):
         self.items = []
@@ -126,9 +145,13 @@ def _safe_report_stable_id(value):
     if not isinstance(value, str):
         return None
     value = unicodedata.normalize("NFC", value)
-    if (
-        len(value) > builder.MAX_STABLE_ID_LENGTH
-        or not builder.STABLE_ID_PATTERN.fullmatch(value)
+    if len(value) > builder.MAX_STABLE_ID_LENGTH or not any(
+        pattern.fullmatch(value)
+        for pattern in (
+            STABLE_TOPIC_PATTERN,
+            STORED_QUESTION_ID_PATTERN,
+            REPORT_SECTION_ID_PATTERN,
+        )
     ):
         return None
     return value
@@ -175,29 +198,124 @@ def _stage_json(path, value):
 
 
 def _discard_staged(paths):
+    clean = True
     for path in paths:
         if path is not None and path.exists():
-            path.unlink()
+            try:
+                path.unlink()
+            except OSError:
+                clean = False
+    return clean
 
 
-def _promote_catalog_pair(staged_pairs):
-    previous = {
-        target: target.read_bytes() if target.exists() else None
-        for _, target in staged_pairs
-    }
-    promoted = []
+def _pair_journal_value(targets):
+    outputs = {}
+    for name in PAIR_OUTPUT_NAMES:
+        target = targets[name]
+        if target.exists():
+            contents = target.read_bytes()
+            outputs[name] = {
+                "existed": True,
+                "sha256": hashlib.sha256(contents).hexdigest(),
+                "contents_base64": base64.b64encode(contents).decode("ascii"),
+            }
+        else:
+            outputs[name] = {
+                "existed": False,
+                "sha256": None,
+                "contents_base64": None,
+            }
+    return {"schema_version": 1, "outputs": outputs}
+
+
+def _write_pair_journal(journal_path, targets):
+    _atomic_json(journal_path, _pair_journal_value(targets))
+
+
+def _load_pair_journal(journal_path):
+    try:
+        raw = journal_path.read_bytes()
+        value = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, _DuplicateKeyError) as exc:
+        raise _InvalidPairJournal() from exc
+    if raw != _canonical_json(value):
+        raise _InvalidPairJournal()
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "outputs"}
+        or value.get("schema_version") != 1
+        or not isinstance(value.get("outputs"), dict)
+        or set(value["outputs"]) != set(PAIR_OUTPUT_NAMES)
+    ):
+        raise _InvalidPairJournal()
+    restored = {}
+    for name in PAIR_OUTPUT_NAMES:
+        record = value["outputs"][name]
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"existed", "sha256", "contents_base64"}
+            or type(record.get("existed")) is not bool
+        ):
+            raise _InvalidPairJournal()
+        if not record["existed"]:
+            if record["sha256"] is not None or record["contents_base64"] is not None:
+                raise _InvalidPairJournal()
+            restored[name] = None
+            continue
+        if (
+            not isinstance(record["sha256"], str)
+            or not HASH_PATTERN.fullmatch(record["sha256"])
+            or not isinstance(record["contents_base64"], str)
+        ):
+            raise _InvalidPairJournal()
+        try:
+            contents = base64.b64decode(
+                record["contents_base64"].encode("ascii"), validate=True
+            )
+        except (UnicodeError, ValueError, binascii.Error) as exc:
+            raise _InvalidPairJournal() from exc
+        if (
+            base64.b64encode(contents).decode("ascii") != record["contents_base64"]
+            or hashlib.sha256(contents).hexdigest() != record["sha256"]
+        ):
+            raise _InvalidPairJournal()
+        restored[name] = contents
+    return restored
+
+
+def _recover_catalog_pair(journal_path, targets, *, remove_journal=True):
+    restored = _load_pair_journal(journal_path)
+    try:
+        for name in PAIR_OUTPUT_NAMES:
+            contents = restored[name]
+            target = targets[name]
+            if contents is None:
+                target.unlink(missing_ok=True)
+            else:
+                _atomic_bytes(target, contents)
+        if remove_journal:
+            journal_path.unlink()
+    except OSError as exc:
+        raise _PairRecoveryError() from exc
+
+
+def _promote_catalog_pair(staged_pairs, journal_path, targets):
     try:
         for staged, target in staged_pairs:
             os.replace(staged, target)
-            promoted.append(target)
-    except OSError:
-        for target in reversed(promoted):
-            old_bytes = previous[target]
-            if old_bytes is None:
-                target.unlink(missing_ok=True)
-            else:
-                _atomic_bytes(target, old_bytes)
-        raise
+    except OSError as exc:
+        try:
+            _recover_catalog_pair(journal_path, targets, remove_journal=False)
+        except (_InvalidPairJournal, _PairRecoveryError) as recovery_exc:
+            raise _PairRecoveryError() from recovery_exc
+        raise _PairPromotionError() from exc
+    else:
+        try:
+            journal_path.unlink()
+        except OSError as exc:
+            raise _PairRecoveryError() from exc
     finally:
         _discard_staged([staged for staged, _ in staged_pairs])
 
@@ -933,9 +1051,22 @@ def prepare_catalog(
     workspace = Path(workspace)
     catalog_path = workspace / "catalog" / "private-catalog.json"
     stable_map_path = workspace / "catalog" / "stable-ids.json"
+    journal_path = workspace / "catalog" / PAIR_JOURNAL_NAME
+    pair_targets = {
+        "stable-ids.json": stable_map_path,
+        "private-catalog.json": catalog_path,
+    }
     template_path = workspace / "overrides" / "overrides-template.json"
     report_path = workspace / "reports" / "normalization-report.json"
     blockers = _Blockers()
+
+    try:
+        if journal_path.exists():
+            _recover_catalog_pair(journal_path, pair_targets)
+    except _InvalidPairJournal:
+        blockers.add("invalid_output_journal")
+    except (OSError, _PairRecoveryError):
+        blockers.add("output_recovery_failed")
 
     try:
         files_before = builder._scan_sources(root)
@@ -1039,6 +1170,14 @@ def prepare_catalog(
     _atomic_json(report_path, report)
 
     reported_blockers = blockers.total
+    journal_written = False
+    if blockers.total == 0:
+        try:
+            _write_pair_journal(journal_path, pair_targets)
+            journal_written = True
+        except (OSError, ValueError):
+            blockers.add("output_journal_failed")
+
     try:
         final_files = builder._scan_sources(root)
     except builder.PackBuildError:
@@ -1047,6 +1186,11 @@ def prepare_catalog(
         blockers.add("source_changed")
     if blockers.total:
         _discard_staged([staged for staged, _ in staged_pairs])
+        if journal_written:
+            try:
+                journal_path.unlink()
+            except OSError:
+                blockers.add("output_recovery_failed")
         if blockers.total != reported_blockers:
             report["status"] = "blocked"
             report["counts"]["blockers"] = blockers.total
@@ -1055,9 +1199,16 @@ def prepare_catalog(
         raise CatalogPreparationError(report)
 
     try:
-        _promote_catalog_pair(staged_pairs)
-    except OSError:
+        _promote_catalog_pair(staged_pairs, journal_path, pair_targets)
+    except _PairPromotionError:
         blockers.add("output_promotion_failed")
+        report["status"] = "blocked"
+        report["counts"]["blockers"] = blockers.total
+        report["blockers"] = blockers.items
+        _atomic_json(report_path, report)
+        raise CatalogPreparationError(report)
+    except (_InvalidPairJournal, _PairRecoveryError):
+        blockers.add("output_recovery_failed")
         report["status"] = "blocked"
         report["counts"]["blockers"] = blockers.total
         report["blockers"] = blockers.items
