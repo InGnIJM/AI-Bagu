@@ -41,7 +41,10 @@ def local_preflight(root=None):
     version = meta.load_version(root / "version.json")
     def git(*args):
         return command(["git", *args], cwd=root).decode("utf-8").strip()
-    if git("status", "--porcelain", "--untracked-files=all"):
+    status = git("status", "--porcelain", "--untracked-files=all")
+    dirty = [line for line in status.splitlines()
+             if not line.startswith("?? .tmp-plan-baseline/")]
+    if dirty:
         raise ValueError("dirty checkout: explicitly review and commit source before preparing a release")
     check_origin(root)
     license_text = (root / "LICENSE").read_text(encoding="utf-8")
@@ -274,8 +277,9 @@ def validate_release_identity(release, version, commit):
         raise ValueError("existing release channel differs")
 
 
-def publish_release(remote, directory, version, commit, execute=False, published_only=False):
-    paths = meta.validate_directory(directory, version)
+def publish_release(remote, directory, version, commit, execute=False, published_only=False,
+                    *, descriptor=None):
+    paths = meta.validate_directory(directory, version, descriptor=descriptor)
     if not execute:
         return {"release": "dry-run", "assets": [p.name for p in paths], "pages": "not-written"}
     tag = "v" + version["versionName"]
@@ -528,10 +532,59 @@ def verify_live_feeds(files, attempts=6):
             time.sleep(5)
 
 
-def verify_receipt(directory, commit):
-    receipt = json.loads((directory.parent / "verification.json").read_text(encoding="utf-8"))
-    if receipt.get("commit") != commit or receipt.get("assets") != {
-            p.name: meta.file_hash(p) for p in directory.iterdir()} or receipt.get("checks") != ["pytest", "node", "public-build-unit-lint"]:
+def _read_canonical_record(path, label):
+    raw = Path(path).read_bytes()
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate {label} field")
+            value[key] = item
+        return value
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique)
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise ValueError(f"invalid {label}") from exc
+    if not isinstance(value, dict) or meta.json_bytes(value) != raw:
+        raise ValueError(f"noncanonical {label}")
+    return value
+
+
+def _release_pack_context(version, question_pack=None, require_external=False):
+    loaded = meta.load_question_pack_descriptor(ROOT, version)
+    if loaded is None:
+        if question_pack is not None:
+            raise ValueError("--question-pack has no version-derived descriptor")
+        return None
+    descriptor, descriptor_bytes, descriptor_path = loaded
+    if require_external and question_pack is None:
+        raise ValueError("prepare --execute requires --question-pack for this version")
+    bound = None if question_pack is None else meta.read_bound_question_pack(question_pack, descriptor)
+    return {
+        "descriptor": descriptor,
+        "descriptor_path": descriptor_path,
+        "descriptor_bytes": descriptor_bytes,
+        "bound": bound,
+        "provenance": {
+            "file_name": descriptor["file_name"],
+            "sha256": descriptor["sha256"],
+            "descriptor_sha256": hashlib.sha256(descriptor_bytes).hexdigest(),
+        },
+    }
+
+
+def verify_receipt(directory, commit, pack_context=None):
+    path = directory.parent / "verification.json"
+    receipt = (_read_canonical_record(path, "verification receipt")
+               if pack_context is not None else json.loads(path.read_text(encoding="utf-8")))
+    expected = {
+        "commit": commit,
+        "assets": {p.name: meta.file_hash(p) for p in sorted(directory.iterdir(), key=lambda item: item.name)},
+        "checks": ["pytest", "node", "public-build-unit-lint"],
+    }
+    if pack_context is not None:
+        expected["question_pack"] = pack_context["provenance"]
+    if receipt != expected:
         raise ValueError("verification receipt does not cover exact committed source and assets; run prepare")
 
 
@@ -575,19 +628,31 @@ def retain_interrupted_output(directory, version):
     print(f"Retained unverified interrupted output at {retained}; rebuilding from committed source.")
 
 
-def prepare(directory, version, commit):
+def prepare(directory, version, commit, question_pack=None, *, pack_context=None):
+    pack_context = pack_context or _release_pack_context(
+        version, question_pack, require_external=True
+    )
+    descriptor = None if pack_context is None else pack_context["descriptor"]
     directory, receipt_path, journal_path = preparation_paths(directory, version)
     if local_preflight() != (version, commit):
         raise ValueError("source commit/version changed before preparation")
     existing = receipt_path.exists()
     journal = {"commit": commit, "version": version, "stage": "building"}
+    if pack_context is not None:
+        journal["question_pack"] = pack_context["provenance"]
     if existing:
         # A completed receipt is the only basis for artifact reuse.
-        meta.validate_directory(directory, version)
-        verify_receipt(directory, commit)
+        if pack_context is not None:
+            if not journal_path.exists() or _read_canonical_record(journal_path, "preparation journal") != journal:
+                raise ValueError("completed preparation provenance differs")
+        meta.validate_directory(directory, version, descriptor=descriptor)
+        verify_receipt(directory, commit, pack_context)
     else:
         if journal_path.exists():
-            if json.loads(journal_path.read_text(encoding="utf-8")) != journal:
+            existing_journal = (_read_canonical_record(journal_path, "preparation journal")
+                                if pack_context is not None
+                                else json.loads(journal_path.read_text(encoding="utf-8")))
+            if existing_journal != journal:
                 raise ValueError("unfinished preparation provenance belongs to another commit/version")
         elif directory.exists():
             raise ValueError("unowned existing output has no preparation provenance; inspect it manually")
@@ -601,6 +666,8 @@ def prepare(directory, version, commit):
               ["node", "--test", *[str(p) for p in sorted((ROOT / "test").glob("*.test.cjs"))]],
               ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                str(ROOT / "scripts/android.ps1"), "-Mode", "Check" if existing else "Build"]]
+    if pack_context is not None and not existing:
+        checks[2] += ["-QuestionPack", str(pack_context["bound"].path)]
     if existing:
         checks.append(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                        str(ROOT / "scripts/android.ps1"), "-Mode", "Verify"])
@@ -608,11 +675,20 @@ def prepare(directory, version, commit):
         result = subprocess.run(args, cwd=ROOT)
         if result.returncode:
             raise ValueError("local release verification failed; no remote changes made")
-    meta.validate_directory(directory, version)
+    meta.validate_directory(directory, version, descriptor=descriptor)
     if local_preflight() != (version, commit):
         raise ValueError("source changed during build")
-    receipt = {"commit": commit, "assets": {p.name: meta.file_hash(p) for p in directory.iterdir()},
+    if pack_context is not None:
+        final_context = _release_pack_context(
+            version, pack_context["bound"].path, require_external=True
+        )
+        if final_context["provenance"] != pack_context["provenance"]:
+            raise ValueError("question-pack provenance changed during build")
+    receipt = {"commit": commit, "assets": {
+                   p.name: meta.file_hash(p) for p in sorted(directory.iterdir(), key=lambda item: item.name)},
                "checks": ["pytest", "node", "public-build-unit-lint"]}
+    if pack_context is not None:
+        receipt["question_pack"] = pack_context["provenance"]
     write_atomic_json(receipt_path, receipt)
 
 
@@ -622,8 +698,11 @@ def main():
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirm-repository")
     parser.add_argument("--confirm-version")
+    parser.add_argument("--question-pack", type=Path)
     args = parser.parse_args()
     try:
+        if args.question_pack is not None and not (args.stage == "prepare" and args.execute):
+            raise ValueError("--question-pack is accepted only by prepare --execute")
         if args.stage == "init-feed":
             print(json.dumps({"stage": "init-feed", "dry_run": not args.execute, "repository": meta.REPOSITORY,
                               "branch": FEED_BRANCH, "files": sorted(FEED_FILES)}))
@@ -637,10 +716,19 @@ def main():
             print("Feed branch ready; Pages deployment NOT verified. Configure Pages source codex/update-feed / manually.")
             return 0
         version, commit = local_preflight()
+        pack_context = _release_pack_context(
+            version, args.question_pack,
+            require_external=args.stage == "prepare" and args.execute,
+        )
+        descriptor = None if pack_context is None else pack_context["descriptor"]
         directory = ROOT / "dist/android" / version["versionName"] / "public"
+        assets = [meta.apk_name(version), "SHA256SUMS", "certificate-sha256.txt",
+                  "update.json", "INSTALL.md", "RELEASE_NOTES.md"]
+        if descriptor is not None:
+            assets.append(descriptor["file_name"])
         print(json.dumps({"stage": args.stage, "dry_run": not args.execute, "repository": meta.REPOSITORY,
                           "tag": "v" + version["versionName"], "versionCode": version["versionCode"],
-                          "commit": commit, "assets": [meta.apk_name(version), "SHA256SUMS", "certificate-sha256.txt", "update.json", "INSTALL.md", "RELEASE_NOTES.md"]}, ensure_ascii=False))
+                          "commit": commit, "assets": sorted(assets)}, ensure_ascii=False))
         if not args.execute:
             print("Dry-run: no credentials used, no signing/build, remote state NOT checked or changed.")
             return 0
@@ -654,11 +742,11 @@ def main():
             print("Local, authenticated remote and anonymous Pages preflight passed; no remote writes.")
             return 0
         if args.stage == "prepare":
-            prepare(directory, version, commit)
+            prepare(directory, version, commit, args.question_pack, pack_context=pack_context)
             print("Local public artifacts prepared; no Release or Pages writes.")
             return 0
-        meta.validate_directory(directory, version)
-        verify_receipt(directory, commit)
+        meta.validate_directory(directory, version, descriptor=descriptor)
+        verify_receipt(directory, commit, pack_context)
         command(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                  str(ROOT / "scripts/android.ps1"), "-Mode", "Verify"], timeout=300)
         if args.stage == "feed":
@@ -666,7 +754,7 @@ def main():
             if not release or release["draft"]:
                 raise ValueError("feed cannot reference an unpublished Release")
         result = publish_release(remote, directory, version, commit, execute=True,
-                                 published_only=args.stage == "feed")
+                                 published_only=args.stage == "feed", descriptor=descriptor)
         print(json.dumps(result))
         try:
             feed = json.loads((directory / "update.json").read_text(encoding="utf-8"))

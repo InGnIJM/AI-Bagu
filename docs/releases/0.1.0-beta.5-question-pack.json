@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "versionName": "0.1.0-beta.5",
+  "file_name": "ai-bagu-2026-autumn-interviews-r1.bagu-pack",
+  "sha256": "47aa6b28768be85322924df4a7c17199bf248660997cd10247066821d6d23864",
+  "pack_id": "autumn-recruit-interviews-2026",
+  "revision": 1,
+  "display_version": "2026.08.30-r1",
+  "question_count": 748,
+  "experience_count": 27
+}
