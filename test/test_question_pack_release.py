@@ -173,7 +173,7 @@ def test_descriptor_accepts_only_exact_canonical_nine_field_bytes():
     assert tuple(descriptor) == DESCRIPTOR_FIELDS
     assert descriptor.external_only and not descriptor.bundled_confirm
     assert descriptor.android_delivery == "external_only"
-    assert "内置同一题包" not in module._pack_install_text(VERSION, descriptor)
+    assert "公开 APK 使用空题库，并且不内置题包。" in module._pack_install_text(VERSION, descriptor)
 
     invalid = [
         raw.replace(b'  "schema_version": 1,\n', b'  "schema_version": 1,\n  "schema_version": 1,\n'),
@@ -208,7 +208,9 @@ def test_descriptor_accepts_exact_canonical_v2_bundled_delivery_bytes():
     assert tuple(descriptor) == DESCRIPTOR_V2_FIELDS
     assert not descriptor.external_only and descriptor.bundled_confirm
     assert descriptor.android_delivery == "bundled_confirm"
-    assert "内置同一题包" in module._pack_install_text(VERSION_V2, descriptor)
+    install = module._pack_install_text(VERSION_V2, descriptor)
+    assert "内置同一题包" in install
+    assert "公开 APK 使用空题库，并且不内置题包。" not in install
 
 
 def test_descriptor_rejects_v2_delivery_or_canonical_shape_violations():

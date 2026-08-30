@@ -218,9 +218,12 @@ def read_bound_question_pack(path, descriptor):
 
 def _pack_install_text(version, descriptor):
     name = apk_name(version)
+    delivery = ("公开 APK 使用空题库，并且不内置题包。\n"
+                if descriptor is None or descriptor.external_only else
+                "公开 APK 使用空题库，并内置同一题包；必须在原生预览中明确确认后才安装。\n")
     text = ("# 八股助手 public 安装说明\n\n"
         f"首次安装：`adb install \"{name}\"`；覆盖升级：`adb install -r \"{name}\"`。\n\n"
-        "仅支持 Android 10+ ARM64。公开 APK 使用空题库，并且不内置题包。\n"
+        "仅支持 Android 10+ ARM64。" + delivery +
         "升级前建议导出题库＋进度；同包名同签名升级保留私有数据，卸载会清空数据。\n"
         "旧 internal 包首次需手动安装本 public 包。自动检查只查询 APK 版本，下载和安装须点击确认。\n"
         "备份不包含模型配置、密钥、草稿、会话或评分分析；图片仅保存链接。\n")
@@ -229,8 +232,6 @@ def _pack_install_text(version, descriptor):
             f"从同一 Release 单独下载 `{descriptor['file_name']}`，打开八股助手的题库管理，选择“导入题包”，"
             "先检查预览，再明确确认安装。题包不会自动下载或自动更新。\n\n"
             "题包仅供个人学习及在八股助手中使用；题包内容权利保留，应用源码的 MIT 许可证不适用于题包内容。\n")
-        if descriptor.bundled_confirm:
-            text += "Android public 版也会内置同一题包，但必须在原生预览中明确确认后才安装。\n"
     else:
         text += "\n应用源码使用 MIT；字体、运行时和第三方材料保留各自许可证，题库不在 MIT 授权范围内。\n"
     return text
