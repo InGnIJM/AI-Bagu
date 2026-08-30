@@ -2,17 +2,17 @@
   "schema_version": 1,
   "channel": "beta",
   "release": {
-    "versionName": "0.1.0-beta.4",
-    "versionCode": 4,
+    "versionName": "0.1.0-beta.5",
+    "versionCode": 5,
     "distribution": "public",
     "packageName": "io.github.ingnijm.baguhelper",
     "minSdk": 29,
     "abi": "arm64-v8a",
-    "apkUrl": "https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.4/bagu-0.1.0-beta.4-public-arm64-v8a.apk",
-    "size": 29956897,
-    "sha256": "72688b17e48243e121b9f3cabe47a6fafa9a8561aceceb7590bf1eeeedcd225a",
-    "releaseUrl": "https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.4",
-    "publishedAt": "2026-08-29T08:14:01Z",
-    "notes": "# 八股助手 0.1.0-beta.4\n\n这是尚未公开发布的 beta.4 候选说明。公开发布、远端更新清单和 Git Tag 需要另行确认。\n\n## 主要变化\n\n- 修复 Android 15 及以上系统中安装确认页可能被系统静默拦截的问题。\n- 安装更新改用受保护的 `PackageInstaller.Session` 回调，并新增脱敏确认阶段诊断。\n- 主动操作失败统一使用可访问弹窗，明确显示错误信息、解决办法和可用操作。\n- 更新可用提示采用紧凑的 Compact Editorial 卡片，先查看详情，再决定是否下载。\n\n## 安全与数据\n\n- 不自动结束练习、不自动重试写操作，也不自动下载或安装更新。\n- 安装成功仍以后续启动核对实际 versionCode 为准。\n- public 包首次安装为空题库；同包名、同签名覆盖升级不会主动清除应用私有数据。"
+    "apkUrl": "https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.5/bagu-0.1.0-beta.5-public-arm64-v8a.apk",
+    "size": 30031937,
+    "sha256": "e64f60598fc2451f3f568befecd123845c5c43c00eb5fcc9a5e3529cb40ce1e9",
+    "releaseUrl": "https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.5",
+    "publishedAt": "2026-08-30T16:29:21Z",
+    "notes": "# 八股助手 0.1.0-beta.5\n\n面经题包与专题模拟版本。本文件描述已完成本地验证、等待公开发布的内容，不表示 Release 已经公开。\n\n## 主要变化\n\n- 增加本地 `.bagu-pack` 检查、明确确认安装、增量升级和日常复习开关。\n- 练习页增加“面经模拟”，支持按专题整套或章节顺序练习。\n- `prepare` 准备项只记录已准备或跳过，不调用模型，也不修改间隔调度。\n- `.bagu-backup` v3 保存题包结构、启用偏好和稳定 ID 进度；继续兼容 v1/v2。\n\n## 正式题包附件\n\n- `2026 秋招面经库` revision 1 是独立 Release 附件，APK 不内置题包，也不会自动下载或更新题包。\n- 题包答案由 AI 生成，并由维护者接受为已复核参考答案；它们不是原帖作者或面试公司的标准答案。\n- 题包内容仅供个人学习及在八股助手中使用，内容权利保留；应用源码的 MIT 许可证不适用于题包内容。\n\n## 安全与数据\n\n- public APK 仍使用空题库；题包必须下载后在题库管理中检查预览并明确确认导入。\n- 更新清单仍只描述 APK，不包含题包下载地址或自动更新字段。\n- 有进行中的练习时不能安装或升级题包；已有学习进度按稳定 ID 保留。"
   }
 }
