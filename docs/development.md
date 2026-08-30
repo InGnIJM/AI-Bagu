@@ -2,7 +2,7 @@
 
 [文档导航](README.md) · [架构与数据](architecture.md) · [HTTP API](api.md) · [Android Beta](android-beta.md) · [验收记录](validation.md)
 
-本文描述公开 beta.4（源码 `ac53f34`）及后续开发使用的入口与验证方法。具体源码、构建产物和设备的验收结论分开记录，某次测试通过不自动证明其他工作树或 APK 可发布。
+本文描述公开 beta.4（源码 `ac53f34`）及当前后续开发使用的入口与验证方法。当前工作树的题包/专题、SQLite/备份 v3 尚未发布；具体源码、构建产物和设备的验收结论分开记录，某次测试通过不自动证明其他工作树或 APK 可发布。
 
 ## 环境分层
 
@@ -20,7 +20,7 @@ Android 工具链的固定版本、目录、覆盖参数和缓存准备见 [Andr
 ## 源码目录与职责
 
 ```text
-bagu.py                            核心、CLI、HTTP、抓题、评卷、备份与配置
+bagu.py                            核心、CLI、HTTP、抓题、评卷、题包/专题、备份与配置
 web/index.html                     桌面和 Android 共用的唯一页面
 android/app/src/main/java/         原生活动、WebView 策略、存储/文件/语音桥接
 android/app/src/main/python/       Android 私有路径与 Python 服务启动层
@@ -30,8 +30,11 @@ assets/fonts/                      离线字体及许可证
 assets/branding/                   品牌图片
 scripts/android.ps1                本地签名准备、构建及交付校验
 scripts/build_android_seed.py       从授权只读题库生成清洁种子，或生成空种子
+scripts/build_interview_pack.py     纯标准库私有清单审计与确定性 .bagu-pack 构建
 scripts/verify_android_apk.py       APK 允许列表、原生库及私有数据检查
 test/test_bagu.py                   核心、HTTP、网页行为回归
+test/test_interview_pack_builder.py 题包构建、漂移与内容门禁
+test/test_interview_pack_web.py     日常/面经与题包管理页面行为
 test/test_android_project.py        Android 项目、桥接、运行时和打包契约回归
 test/speech_input.test.cjs          网页/原生语音交互的 Node.js 回归
 test/manual_speech_server.py        使用临时题库和模拟语音服务的浏览器检查入口
@@ -41,9 +44,9 @@ docs/superpowers/plans/             历史实现计划，不替代当前运行�
 AGENTS.md                          当前项目协作规则
 ```
 
-Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面与生命周期，`HostPolicy` 限制导航与 URL，`RuntimeHost` / `android_runtime.py` 启动隔离运行时，`NativeBridge` 暴露受限存储、文件和语音能力，`SpeechInput` / `AndroidSpeechBackend` 管理识别状态与系统服务。更新安装由 `PackageInstallDriver` 写入系统 session，`UpdateInstallActivity` 只接收非导出的显式回调，`UpdateInstallStatusPolicy` 映射固定结果；禁止恢复通用 APK `ACTION_VIEW` 或厂商包名分支。不要把 Android 的随机端口 origin 当作可靠跨启动存储。
+Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面与生命周期，`HostPolicy` 限制导航与 URL，`RuntimeHost` / `android_runtime.py` 启动隔离运行时，`NativeBridge` 暴露受限存储、文件和语音能力，`PendingImport` 持有备份/题包的同字节快照，`NativeOperationArbiter` / `NativeOperationLeaseTracker` 串行化文件与更新 handoff，`SpeechInput` / `AndroidSpeechBackend` 管理识别状态与系统服务。更新安装仍由 `PackageInstallDriver` 写入系统 session；禁止恢复通用 APK `ACTION_VIEW` 或厂商包名分支。不要把 Android 的随机端口 origin 当作可靠跨启动存储。
 
-本地生成且禁止提交：`.env`、`settings.json`、`bagu.db`、`.signing/`、`.toolchains/`、`.android-sdk/`、Gradle/Android 缓存、`dist/`。桌面服务日志默认位于 `.superpowers/bagu-server.log`，Android 日志位于私有 `logs/`；日志不是源码，不应携带 Key、令牌或作答正文。
+本地生成且禁止提交：`.env`、`settings.json`、`bagu.db`、`*.bagu-pack`、私有面经 catalog、`.signing/`、`.toolchains/`、`.android-sdk/`、Gradle/Android 缓存、`dist/`。桌面服务日志默认位于 `.superpowers/bagu-server.log`，Android 日志位于私有 `logs/`；日志不是源码，不应携带 Key、令牌或作答正文。
 
 ## 诊断日志
 
@@ -61,6 +64,18 @@ Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面�
 
 发布工具测试必须 mock GitHub CLI、匿名下载、构建和签名边界；`test_github_release.py` 的 socket/DNS 禁止外网夹具不能移除。`init-feed` 离线 dry-run 可在当前脏工作区运行；真实执行、Pages 配置和发布仍需另外授权，详见[发布指南](data-transfer-and-updates.md#维护者独立初始化更新源)。
 
+## 私有题包构建门禁
+
+题包构建器只接受显式参数，不搜索固定盘符，也不访问网络或模型：
+
+```powershell
+python .\scripts\build_interview_pack.py --source-root <冻结的Markdown目录> --catalog <私有清单.json> --output <输出.bagu-pack>
+```
+
+尖括号均须替换。`source-root` 与 catalog 属于用户私有整理范围，不能加入仓库；catalog 为每个源文件、专题、章节和题目分配永久 ID，记录原始字节 hash、类型、分类、已复核答案/提示及来源。构建器在前后各扫描一次，README 数量、未登记 Markdown、源/catalog 字节漂移、未复核内容、引用循环/孤儿或产物计数不一致均阻止输出。相同输入应生成逐字节相同的三成员 ZIP。
+
+开发/发布检查不得用合成夹具通过冒充真实首包审校完成。当前没有真实 `.bagu-pack` 产物；27 专题、109 Markdown、748 项只属于历史审计基线。发布预检拒绝任何 tracked `.bagu-pack` 和精确匹配的私有 catalog，APK verifier 扫描全部 ZIP member；public/internal 种子也必须没有 pack/experience/source/relationship 行。
+
 ## 修改前的边界检查
 
 1. 读取根目录 [AGENTS.md](../AGENTS.md) 及目标子目录规则，检查工作树，保留用户和其他任务的未提交改动。
@@ -68,6 +83,7 @@ Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面�
 3. 网页仍放在 `web/index.html`，不另开配置页面，不引入外部运行时字体；沿用现有颜色、圆角和触控目标。
 4. 保持会话唯一、一次评分、skip 不调度、提交前完成结果渲染、submission 幂等及 Android 隔离边界。
 5. 用失败测试锁定正常、边界与异常行为，再做最小变更。数据库迁移先在临时库验证，正式升级真实库须另行完整备份。
+6. 题包/专题变更同时检查稳定 ID、revision/hash、只读归属、有序 position、prepare 不调度、备份 v3 与 Android 同字节确认；不得直接拿真实私有源或题库做测试。
 
 项目规则不允许把真实工作站数据库、进度、模型配置或签名材料直接打包。`internal` 种子来自明确授权的只读源，`public` 为空种子；克隆仓库不会自动获得内部题库或本地工具链。
 
@@ -78,6 +94,7 @@ Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面�
 ```bash
 python -m pip install pytest
 python -m pytest test/test_bagu.py -q
+python -m pytest test/test_interview_pack_builder.py test/test_interview_pack_web.py -q
 ```
 
 Android 工具链和本地缓存就绪后：
@@ -89,6 +106,8 @@ python -m pytest test/test_bagu.py test/test_android_project.py -q
 | 检查层 | 入口 | 能证明什么 / 不能证明什么 |
 | --- | --- | --- |
 | 核心与网页 | `python -m pytest test/test_bagu.py -q` | SQLite、会话、评卷、HTTP、网页脚本回归；不证明真实模型或浏览器服务连通 |
+| 题包构建 | `python -m pytest test/test_interview_pack_builder.py -q` | 临时源/catalog 的确定性、漂移和内容门禁；不读取真实面经库、不证明首包已审校 |
+| 题包网页 | `python -m pytest test/test_interview_pack_web.py -q` | 双入口、筛选/顺序、prepare、只读/开关和桌面同字节行为；不替代真实浏览器截图或 Android 原生生命周期 |
 | Android 项目契约 | 加上 `test/test_android_project.py` | 项目配置、隔离运行时、桥接和打包策略；包含 PowerShell/JDK/离线 Gradle 检查，不是全部 APK/设备验收 |
 | 语音脚本 | `node --test test/speech_input.test.cjs` | 实际页面脚本配合模拟浏览器/原生识别边界；也由核心 pytest 调用，不采集真实音频 |
 | Java 单元测试 | `android/app/src/test/` 的 Gradle 单元测试任务 | 宿主、语音、更新状态机／网络分类、session 恢复与状态映射、诊断过滤与 ZIP；不替代 WebView 或系统安装器真正运行 |
@@ -101,6 +120,7 @@ python -m pytest test/test_bagu.py test/test_android_project.py -q
 ## 测试隔离要求
 
 - pytest fixture 使用 `tmp_path`；传入显式临时数据库，或将 `DB_PATH` monkeypatch 到临时路径。不要运行会触碰真实 `bagu.db` 的测试。
+- 题包/备份用例只构造临时 canonical ZIP 和合成 catalog，不读取 `E:/秋招/面经库`、真实 `.bagu-pack` 或私有清单；升级测试断言原题主键/进度/快照不变及事务失败无半写。
 - 模型配置、日志目录、原生数据目录和签名测试材料也放临时目录；不能读取真实 `.env` 或复用真实签名身份做破坏性用例。
 - 抓题和模型请求使用 mock/桩，不打真实来源或模型 API。密钥用 `sk-test` 等假值，检查响应和日志不会泄露 Key。
 - 保留并发会话、同题重复评分、跨题 submission 冲突、评分结果重放、断流与渲染失败回滚等测试；仅检查 HTTP 200 不足以判断流式评卷成功。

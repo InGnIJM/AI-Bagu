@@ -8,6 +8,7 @@
 
 | 记录 | 对象 | 不能据此推断 |
 | --- | --- | --- |
+| 2026-08-30 面经题包与专题模拟 | 当前未提交工作树、合成题包/临时库、自动化与精确本地 public 验证 APK | 已有真实首包、源面经已迁移、公开 beta.4 已更新、设备生命周期或 internal APK 已验收 |
 | 2026-08-29 beta.4 公开发布 | `ac53f34`、精确 public ARM64 APK、Release／Pages、同签名 code 2 QA 包与自动化 | 报告问题的 API36 物理手机和厂商机型已完成安装验收 |
 | 2026-08-28 beta.3 公开发布 | `8cc586f`、精确 public ARM64 APK、隔离设备及真实 Release／Pages／应用内升级 | 所有真机通过、后续未提交格式恢复已打包、原仪器测试夹具问题已修复 |
 | 2026-08-28 答案格式恢复 | 后续本地工作区、合成自动化与单独授权的本地数据恢复 | beta.3 包含这些改动、手机题库自动同步 |
@@ -22,6 +23,26 @@
 早期基础文档核对的源码为 `71fbbfd`，公开 beta.3 对应 `8cc586f`，公开 beta.4 对应 `ac53f341342c2266079af72e23b953aa3ae43459`。较早章节中的“本轮未发布／未验收”仅描述各自当时的对象，相关失败与限制不删除。
 
 后续迁移、自动更新和发布工作应在完成后另外记录源码、精确产物、测试环境及结果；不能用开发计划的勾选项或用户截图替代验收证据。
+
+## 2026-08-30：面经题包与专题模拟（当前开发源码）
+
+本节记录用户批准设计后的当前工作树，不是新发布版本。实现加入 SQLite v3、严格 `.bagu-pack`、有序专题会话、`review|prepare`、桌面/Android 显式同字节导入和 `.bagu-backup` v3；没有修改版本、创建 commit/Tag、上传 Release 或发布更新清单。公开 beta.4 仍是上节记录的 SQLite/备份 v2，不包含这些能力。
+
+### 实现与自动化证据
+
+- 纯标准库构建器以临时 Markdown/catalog 覆盖确定性 ZIP、前后快照、未登记/漂移、稳定 ID、审校/来源、引用展开、孤儿/循环、大小和 runtime validator：`python -m pytest test/test_interview_pack_builder.py -q` 为 **66 passed**。没有读取 `E:/秋招/面经库` 或生成真实题包。
+- SQLite v3/安装、专题会话与备份分别经 TDD 和独立审查修复。最终 `python -m pytest test/test_bagu.py -q` 为 **484 passed**，builder/web/transfer 组合为 **118 passed**，`test_android_project.py` 为 **76 passed**。整仓 `python -m pytest test -q` 得到 **900 passed / 3 failed**：其中两个 Windows localhost `WinError 10053` 参数项随后原测试隔离为 **8 passed**；Java `DiagnosticStore` 在受限沙箱内被 `toRealPath()` 拒绝，精确策略测试移到沙箱外为 **1 passed**。因此聚焦回归通过，但不能把整仓沙箱命令记录成全绿，也不能宣称环境级随机中止已根治。
+- 共享网页聚焦 `test_interview_pack_web.py + test_transfer_web.py + test_update_web.py` 为 **64 passed**；题包网页自身 **16 passed**，Android-web 子集 **23 passed**。覆盖日常/面经切换、筛选/推荐章节、按序恢复、prepare、答案来源、只读/开关、桌面同字节确认、旧宿主和乱序响应。静态响应式/44 px/reduced-motion 复核完成，但 Edge 截图因宿主 GPU 进程失败未取得，因此没有真实渲染截图结论。
+- Android/发布/迁移 Python 契约 `test_android_project.py + test_github_release.py + test_transfer.py` 最终为 **278 passed**；`test_android_project.py` 为 **76 passed**。直接 JUnit 的进程仲裁器 **2 passed**、租约 tracker **5 passed**，覆盖文件/更新争用、精确 token、同步终态、迟到回调和新租约保护。
+- 当前树的 Gradle `testPublicDebugUnitTest` 报告为 **117 passed / 0 failed / 0 skipped**；同一次离线 JDK 17 构建中，`compilePublicDebugAndroidTestJavaWithJavac`、`lintPublicRelease` 与 `assemblePublicRelease` 均成功。仪器测试只编译，未在设备/模拟器运行。
+- 当前树的 public ARM64 验证 APK 为 **30,031,933 字节**，SHA-256 `7afb92be480555e98e9a620869653735785141f75898336548bf0751bb85cc38`。精确 verifier 确认 `questions=0`、`packs=0`、`experiences=0`、`sessions=0`、`session_items=0`，ABI/16 KiB/RELRO/允许列表通过；`apksigner` 确认 v2 签名和单一证书 SHA-256 `ac92a24f30a5e6c10c4ced0d0db89124f39f36e00778fef6ca3ba4973bdf0ee3`。该文件只是当前工作树的本地验证产物，未安装、上传、作为 Release 附件或更新清单发布。
+
+### 未完成与内容边界
+
+- 没有访问、迁移或修改真实面经库，没有建立/提交私有 catalog，没有冻结或生成首个 `.bagu-pack`。27 专题、109 Markdown、748 自测项及旧指纹只是一份历史审计基线；多题拆分、引用展开、来源/隐私及逐题审校仍须在私有整理流程完成。
+- 没有把题包加入 public/internal 种子；发布预检和 APK verifier 已增加 `.bagu-pack`/精确私有 catalog/pack-owned seed 拒绝契约。没有在线商店、自动题包更新、物理卸载或自动语义去重。
+- 没有递增版本、提交、推送、创建 PR、使用新 Release/Pages、发布或安装新 APK。公开 beta.4 的哈希和功能范围完全不因本节改变。
+- 未运行设备/模拟器 instrumentation；真实 SAF provider、取消/返回、Activity 重建、进程死亡、WebView 事件、系统安装器与文件/更新并发仍需隔离设备验收。未新构建 internal APK；当前源码对应的 public APK 只完成了宿主机验证，不能替代设备验收或公开发布。
 
 ## beta.4 公开发布
 

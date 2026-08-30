@@ -4,6 +4,8 @@
 
 本文说明已发布 beta.4 的迁移／更新实现与维护者发布流程。公开版本来自 Tag `v0.1.0-beta.4`、提交 `ac53f341342c2266079af72e23b953aa3ae43459`。发布、构建、设备检查的证据及限制见[beta.4 验收记录](validation.md#beta4-公开发布)；下面的命令说明本身不构成再次执行的授权。
 
+2026-08-30 当前开发源码另行增加 `.bagu-pack`、SQLite/`.bagu-backup` v3 和 Android 同字节题包导入；尚未提交新版本或公开发布。当前工作树只生成并校验了本地 public 空种子验证 APK，未安装设备、上传附件或更新线上清单。为避免混淆，下面明确标出当前源码与 beta.4 的差异。
+
 ## 已上线的版本与更新清单
 
 截至 2026-08-29，[beta.4 Release](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.4) 已公开为预发布版，code 为 `4`，提供 [public ARM64 空题库 APK](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.4/bagu-0.1.0-beta.4-public-arm64-v8a.apk)，下载不需要登录。
@@ -30,7 +32,9 @@ Release 网页和两份清单已匿名核验。beta 安装检查两个通道，�
 
 “同名题”指分类与题干一致。两种模式都会用文件中的答案和链接覆盖已有内容，**空答案／空链接也会覆盖**。纯题库中的新增题从零次复习、无调度日期开始；本机其他题目不会被删除。已有会话、评分分析和历史答案不被改写。
 
-两个导出模式都不包含模型配置、API Key、草稿、会话或评分分析。含进度备份也不是完整 SQLite 备份；数据库升级保护与跨设备迁移是两件事。
+当前源码的 v3 对本地题继续使用上述身份；题包题改按 `pack_id + stable_question_id`，专题/章节按各自稳定 ID 合并，避免不同面经中的同文题被误合并。恢复两种模式都带回题包内容、结构和 `include_in_review`，但不删除目标独有题或历史快照。
+
+两个导出模式都不包含模型配置、API Key、草稿、会话、submission 或评分分析。当前源码 v3 会额外保存题包快照、来源、专题章节、日常开关和可选稳定 ID 进度；beta.4 的 v2 只保存普通题。含进度备份也不是完整 SQLite 备份；数据库升级保护与跨设备迁移是两件事。
 
 ### 推荐操作顺序
 
@@ -44,13 +48,29 @@ Release 网页和两份清单已匿名核验。beta 安装检查两个通道，�
 
 ### 格式、兼容与失败处理
 
-- 当前导出备份格式 v2，类型为 `questions` 或 `progress`；仍可读取 v1，统一按含进度备份处理。旧应用不能因此自动获得读取 v2 的能力，应先更新应用。
-- 备份格式 v2 与 SQLite `user_version=2` 相互独立，不应据此修改数据库版本或用旧程序打开已升级数据库。
-- ZIP 只能含 `manifest.json` 和 `questions.json`；最多 10000 题、压缩文件 20 MiB、解压 JSON 合计 50 MiB。
+- 当前源码导出备份 schema v3，类型仍为 `questions` 或 `progress`；严格包含 `manifest.json`、`questions.json`、`packs.json`、`experiences.json`。仍可读取 v1/v2，v1 按历史 progress 语义处理。公开 beta.4 只使用两成员 v1/v2，不能读取 v3。
+- 备份格式版本与 SQLite `user_version` 相互独立；当前源码两者恰为 3，beta.4 两者为 2，也不能据此让旧程序打开升级后的数据库。
+- v3 保存本地题、题包/来源、专题结构与偏好；questions 保留目标已有进度，progress 按稳定身份覆盖调度，prepare 始终零调度。题包降级或同 revision 内容冲突会整批拒绝。
+- 所有版本最多 10000 题、压缩文件 20 MiB、解压 JSON 合计 50 MiB；v3 四成员必须 DEFLATED。
 - 校验成员名、路径、重复成员／JSON 字段、加密标记、数据类型、题目字段、重复题、题数与 SHA-256；不通过则整批拒绝。恢复在事务内检查会话锁，失败回滚，不只导入前半部分。
 - CSV 是另一种导入：UTF-8、最多 2 MiB／5000 题，重复题跳过、不覆盖，不携带进度。不要把 CSV 和 `.bagu-backup` 的合并规则混用。
 
 程序接入：`GET /api/backup/export?mode=questions` 导出纯题库，`?mode=progress` 导出含进度备份，省略 mode 默认 `progress`；空值、非法值或重复 `mode` 返回 400。`POST /api/backup/inspect` 和 `/api/backup/restore` 都只接受 `{ "archive_base64": "…" }`；inspect 完整校验但不执行备份合并，restore 遇到 open 会话返回 409。HTTP 预览仍会经过公共数据库初始化，可能创建或迁移数据库，不能用于数据库的只读迁移预演；核心／Android 原生预览函数不访问数据库。Android API 仍需原有进程令牌，不应绕过原生文件边界。
+
+## 当前源码：本地面经题包（未发布）
+
+`.bagu-pack` 是“安装/升级内容来源”，`.bagu-backup` 是两端迁移已安装状态；两者不能互换。仓库、public/internal 种子和公开附件不含真实题包。当前 27 专题、109 Markdown、748 项及旧指纹只属于历史审计，未达到首包冻结/逐题审校门禁。
+
+### 显式安装流程
+
+1. 结束当前练习；题包预览不结束会话，安装/升级遇到 open 会话会返回 409。
+2. 选择本地 `.bagu-pack`。桌面读取一次并缓存同一 base64；Android 原生读取一次受限字节，JS 不接收正文。
+3. 完整校验后核对 pack ID、名称、显示版本、revision、题数、专题数和 `new|upgrade|installed|downgrade|conflict` 状态；Android 的网页预览不接收 hash 或正文。
+4. 明确确认后安装刚才预览的同一份字节。Activity 配置重建可重新显示确认但不会自动执行；进程死亡后要求重选。结果未知时先核对题包列表和 revision，不直接反复覆盖。
+
+首次安装默认加入日常复习。更高 revision 按稳定 ID 更新并保留题目主键、调度、历史答案快照和本地开关；同 revision/同内容幂等，相同 revision/不同内容或降级拒绝。遗漏旧 ID 不删除，显式 `retired` 才停止新抽题。关闭日常开关后不进入日常统计/抽题，但仍可模拟且进度保留。
+
+首版没有在线题包商店、自动下载/检查/升级、自动语义去重或物理卸载。题包制作者在源目录旁维护私有 catalog，使用 `scripts/build_interview_pack.py --source-root ... --catalog ... --output ...` 离线确定性构建；源面经、私有清单和产物都不提交。应用发布预检拒绝 tracked `.bagu-pack`/精确私有 catalog，APK verifier 扫描所有 ZIP member；不能用 internal flavor 绕过。
 
 ## Android 应用更新
 
@@ -184,7 +204,7 @@ python .\scripts\release_github.py feed --execute --confirm-repository InGnIJM/A
 
 ## 许可、隐私与验收记录
 
-应用自有源码按 [MIT License](../LICENSE) 提供；这不把抓取或导入的题目、答案以及第三方素材／依赖变成本项目可再授权的内容。公开包必须为空题库，不因源码采用 MIT 就重新分发题库或个人学习进度。
+应用自有源码按 [MIT License](../LICENSE) 提供；这不把抓取或导入的题目、答案以及第三方素材／依赖变成本项目可再授权的内容。公开包必须为空题库且不含题包/专题/私有 catalog，internal 也不能把面经题包当作授权种子捷径；不因源码采用 MIT 就重新分发题库或个人学习进度。
 
 第三方字体、图标和 Android／Python／Chaquopy 等运行时或依赖保留各自许可证。已有字体声明位于 [assets/fonts](../assets/fonts/)；发布时应核对随包依赖与所需声明，不用项目 MIT 替代它们。不得提交或上传 `.env`、模型配置、真实数据库、备份、草稿、签名私钥或密码。
 

@@ -7,7 +7,8 @@
 | 想做什么 | 从这里开始 |
 | --- | --- |
 | 在电脑启动，完成第一轮练习 | [快速开始](../README.md#快速开始) |
-| 配模型、用语音、管理题库、导入 CSV、处理报错 | [使用指南](user-guide.md) |
+| 配模型、用语音、管理题库/题包、导入 CSV、处理报错 | [使用指南](user-guide.md) |
+| 使用当前源码的面经模拟与 `.bagu-pack` | [面经模拟与题包](user-guide.md#面经模拟与题包) |
 | 在 Android 安装、更新或保留数据 | [Android 指南](android-beta.md#安装更新与备份) |
 | 下载公开 APK、查看更新清单 | [beta.4 Release](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.4)、[更新源状态](data-transfer-and-updates.md#已上线的版本与更新清单) |
 | 了解备份包含什么、恢复会覆盖什么 | [备份与恢复](user-guide.md#备份与恢复) |
@@ -35,6 +36,8 @@
 - **发布后文档**：发布状态同步可能晚于 APK 对应提交，不改变已签名附件字节或 Tag 指向。
 - **版本配置**：公开 beta.4 的构建配置为 `0.1.0-beta.4 / 4 / beta`；复现发布必须使用对应 Tag、稳定签名和发布回执，不能把任意开发树当作公开版本。
 
+2026-08-30 的当前未提交开发源码另行实现了 SQLite v3、`.bagu-pack`、有序面经会话、准备项完成语义、`.bagu-backup` v3，以及桌面/Android 的显式同字节导入。它**尚未形成新的 Tag、公开 Release 或已安装 APK**；公开 beta.4 仍是 SQLite v2 / 备份 v2，也不认识题包。仓库没有真实首包或私有审校清单，没有读取或迁移 `E:/秋招/面经库`；748 项只是早期审计基线，不能当作产物题数或审校完成证明。验证范围见[当前源码验收记录](validation.md#2026-08-30面经题包与专题模拟当前开发源码)。
+
 [历史验收记录](validation.md)集中保存每个阶段的测试、APK 哈希、模拟器与未覆盖项。beta.4 已完成构建、Release、匿名附件与 Pages 验证，但报告问题的 API36 物理手机和厂商系统安装仍待反馈。较早章节中的“未发布／未验收”只描述当时的对象，不撤销，也不套用到新版本。
 
 ## 设计依据与历史计划
@@ -50,6 +53,7 @@
 | [会话与网页实现计划](superpowers/plans/2026-08-26-session-web.md) | 历史实施步骤，不应逐段复制成当前实现 |
 | [多模型实现计划](superpowers/plans/2026-08-26-model-profiles.md) | 历史实施步骤，旧接口及存储示例需核对 |
 | [Android Beta 实现计划](superpowers/plans/2026-08-27-android-beta.md) | 当时的实施与验收过程，不证明新包已验收 |
+| [面经题包与专题模拟计划](superpowers/plans/2026-08-29-interview-pack-simulation.md) | 当前开发源码的实现契约与任务状态；不包含真实面经、私有清单或首包 |
 
 ## 文档维护约定
 

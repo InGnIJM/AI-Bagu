@@ -60,6 +60,13 @@
 
 `load_settings` 返回 `models` / `active_id`，并把 active 的 `provider/model/base_url/api_key` 提到顶层给评卷用。
 
+面经题包与专题模拟也已在当前源码实现：
+
+- `.bagu-pack` 仅支持用户本地显式检查、确认安装和更高 revision 增量升级；题包题只读，默认可加入日常复习，可关闭但不物理卸载
+- 练习入口区分日常复习与面经模拟；专题可按整套或章节启动，技术题沿用评分/调度，`prepare` 准备题只允许 `prepared|skipped` 完成且不调用模型、不改调度
+- 桌面和 Android 都先检查再确认同一份字节；Android 原生持有正文，JS 只接收允许列表结果。没有在线商店、自动下载、自动更新或公开首包
+- 仓库、public/internal 种子与公开 APK 不内置真实题包；源面经、私有审校清单和生成的 `.bagu-pack` 不提交、不公开，也不从历史审计基线自动迁移
+
 ## 相关设计
 
 `docs/superpowers/specs/2026-08-26-model-profiles-design.md`（已实现）。
@@ -70,13 +77,15 @@
 
 ## 数据表
 
-`questions`：题干、分类、answer、url、level、times_seen、times_right、next_due、last_reviewed。`UNIQUE(category, question)`。旧库由 `init_db` 自动添加 `answer` 列。
+`questions`：除题干、分类、答案、URL 和原有调度字段外，新增 `pack_id`、`stable_question_id`、`question_type=review|prepare`、`preparation_prompt`、`answer_review_status`、`retired`。本地题用部分唯一索引 `(category, question)`；题包题用 `(pack_id, stable_question_id)`，因此不同面经可保存相同文本并独立计算进度。题包题只读，升级按稳定 ID 更新内容并保留主键和进度。
 
-`sessions`：`id TEXT PK`，`status` 仅 `open|closed`，`created_at`，`n`，`cat`。
+`question_packs` 保存稳定 `pack_id`、revision、显示版本、源/内容哈希、manifest 声明数量和 `include_in_review` 本地偏好；`question_sources` 保存题包题的有序来源。`experiences`、`experience_sections`、`experience_items` 保存 `interview|topic_set` 专题、章节及有序题目关系。
 
-`session_items`：`(session_id, question_id)` PK，`grade` 空表示未判；`submission_id` 有非空唯一索引，`result_comment` / `result_full_answer` / `result_answer_source` 保存首次点评、答案及来源，不保存用户回答正文。来源由后端决定：`stored`（题库）、`model`（模型）、`NULL`（历史记录或无答案自评）。重放不重新读取题库答案替换历史结果。
+`sessions`：`id TEXT PK`，`status` 仅 `open|closed`，`session_type=review|experience`，并可保存专题/章节上下文；每库仍最多一条 open。
 
-`init_db` 负责事务迁移，当前 `PRAGMA user_version = 2`，拒绝更高版本。v1 升级仅新增可空答案来源，历史记录不回填；若旧库有多条 open，只保留最新会话，关闭其余会话但不修改题目调度。正式升级真实库前须另行备份完整 SQLite；v2 不能直接交给旧版程序使用，`.bagu-backup` 不是完整库备份。
+`session_items`：`(session_id, question_id)` PK，`position` 保存专题原顺序，`completion_type` 仅 `graded|prepared|skipped`；旧已评分项迁移为 `graded`。`submission_id` 有非空唯一索引，`result_comment` / `result_full_answer` / `result_answer_source` 保存首次点评、答案及来源，不保存用户回答正文。来源由后端决定：`stored`（题库）、`model`（模型）、`NULL`（历史记录或无答案自评）。重放不重新读取题库答案替换历史结果。
+
+`init_db` 负责事务迁移，当前 `PRAGMA user_version = 3`，拒绝更高版本。v2→v3 保留旧题 ID/进度、会话、评分及答案快照，补齐题包/专题、有序会话和完成类型结构；多条旧 open 仍只保留最新一条且不修改题目调度。正式升级真实库前须另行备份完整 SQLite；v3 不能直接交给旧版程序使用，`.bagu-backup` 不是完整库备份。
 
 `session_id`：`s_YYYYMMDD_` + 8 位 hex。用 `new_session_id()`，不要手写。
 
@@ -98,6 +107,14 @@
 | `POST /api/reveal` | 仅返回本轮未判题的题库答案，不计分 |
 | `POST /api/review` | 自评并保存结果，支持 submission 重放，不调用模型 |
 | `GET /api/submissions/:id` | 查询已完成结果，会话关闭后也可恢复 |
+| `GET /api/packs` | 列出已安装题包、revision、题数、专题数及日常复习开关 |
+| `POST /api/packs/inspect` | `{archive_base64}`；完整检查 `.bagu-pack`，只返回脱敏预览，不安装 |
+| `POST /api/packs/install` | 安装/幂等重导/更高 revision 升级；有 open 会话时 409 |
+| `PUT /api/packs/:id` | 只修改 `include_in_review`，不改包内容或进度 |
+| `GET /api/experiences` | 按题包列出可模拟专题及筛选元数据 |
+| `GET /api/experiences/:id` | 返回专题、章节和有序题目摘要 |
+| `POST /api/experiences/:id/start` | 可带 `section_id`，按整套或章节保存顺序启动唯一 open 会话 |
+| `POST /api/session/complete` | 仅接受准备题的 `prepared|skipped`，不调用模型、不修改调度 |
 | `GET /api/backup/export` | `mode=questions` 或 `mode=progress`，默认 progress；空／非法／重复 mode → 400，允许有 open 会话 |
 | `POST /api/backup/inspect` | `{archive_base64}`；完整校验，只读返回类型、题数、时间、版本与 schema |
 | `POST /api/backup/restore` | `{archive_base64}`；整批校验后合并，有 open 会话时 409 |
@@ -149,10 +166,12 @@
 
 ## 备份与 Android 交付
 
-- `.bagu-backup` v2 仅含 `manifest.json` / `questions.json`；`questions` 仅含分类、题干、答案、URL，不含任何调度字段；`progress` 额外保存调度，且为默认导出模式。v1 按 progress 读取；备份 schema 与 SQLite user_version 无关。不含配置、Key、草稿、会话或评分分析
+- `.bagu-pack` schema 1 是严格 ZIP，仅含 canonical `manifest.json` / `questions.json` / `experiences.json` 三个 DEFLATED 成员；校验稳定 ID、revision、内容哈希、`review|prepare`、已复核答案/提示、安全 HTTP(S) 来源、专题顺序和引用完整性。安装与升级有 open 会话时 409
+- `.bagu-backup` v3 严格含 `manifest.json` / `questions.json` / `packs.json` / `experiences.json` 四个 DEFLATED 成员；保存本地题、累计题包快照/专题结构、启用偏好和稳定 ID 进度。`questions` 模式保留目标进度，`progress` 模式覆盖调度且为默认；准备题进度始终为零
+- 继续兼容 v1/v2：v1 按 progress 读取，v2 仍只接受 `manifest.json` / `questions.json` 两成员。备份 schema 与 SQLite user_version 无关；所有版本都不含配置、Key、草稿、会话或评分分析
 - 上限为 10000 题、压缩 20 MiB、解压 JSON 合计 50 MiB；检查成员名、重复项、字段及 SHA-256，失败整批不写库
-- 恢复按分类+题干合并，两种模式都覆盖答案与 URL（包括空内容）；questions 保留已有进度，新题默认零／null，progress 覆盖调度。不删除其他题，不修改会话／分析历史；BEGIN IMMEDIATE 事务内检查 open 会话，异常回滚
-- 桌面与 Android 均先完整校验、预览，再明确确认同一份字节。Android 文件正文不进 JS，Activity 重建不得隐式确认，进程死亡不重放；恢复完成未知时要求先核对数据，不自动重试。真实 `*.bagu-backup` 禁止提交
+- 恢复时本地题按分类+题干合并，题包题按稳定 ID 合并；题包降级、同 revision 异内容、类型变化和专题引用冲突整批拒绝。累计快照遗漏项不删除；同一专题更新时 incoming/current 章节关系优先，遗漏历史章节保留身份/顺序/推荐标记，只移除与当前章节冲突的关系，因而可留下空历史章节。显式 `retired` 才停止新抽题；不修改会话／分析历史，`BEGIN IMMEDIATE` 内检查 open 会话并在异常时回滚
+- 桌面与 Android 对 `.bagu-backup` 和 `.bagu-pack` 均先完整校验、预览，再明确确认同一份字节。Android 文件正文不进 JS，Activity 重建不得隐式确认，进程死亡不重放；恢复/安装结果未知时要求先核对数据，不自动重试。真实 `*.bagu-backup`、`*.bagu-pack`、源面经及私有审校清单禁止提交
 - Android 通过 `AppPaths` 分离 data/config/static/logs；首次安装复制清洁种子，已有数据不被种子覆盖
 - `internal` 使用经授权的只读源题库生成清洁种子；`public` 为空种子。不得把工作站数据库、进度、配置或密钥直接打包
 - 发布脚本使用项目本地工具链和稳定签名，不自动上传；不要重新生成已有签名身份或更改机器级环境变量

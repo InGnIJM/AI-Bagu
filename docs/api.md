@@ -2,12 +2,12 @@
 
 [文档导航](README.md) · [CLI](cli.md) · [用户指南](user-guide.md) · [架构与数据](architecture.md)
 
-本文包含公开 beta.4（源码 `ac53f34`）的 HTTP、双模式备份、诊断和原生更新契约，迁移操作见[数据迁移与更新](data-transfer-and-updates.md)。桌面默认地址为 `http://127.0.0.1:8765`，可用 `python bagu.py serve --port 8765` 启动；Android 使用独立私有数据库和随机本机端口。这不是账号服务或公网 API。
+本文描述当前源码的 HTTP、备份、诊断和原生更新契约，迁移操作见[数据迁移与更新](data-transfer-and-updates.md)。其中题包、面经专题、SQLite/备份 v3 是 2026-08-30 尚未发布的开发源码能力；公开 beta.4（源码 `ac53f34`）不提供这些新路由。桌面默认地址为 `http://127.0.0.1:8765`，可用 `python bagu.py serve --port 8765` 启动；Android 使用独立私有数据库和随机本机端口。这不是账号服务或公网 API。
 
 ## 通用约定与安全
 
 - 除页面、允许的字体/图片、ZIP 和 SSE 外，响应为 JSON。已处理的业务错误通常为 `{"error":"原因"}`；客户端仍需处理网络中断和非 JSON 异常响应。
-- POST / PUT 发送 UTF-8 JSON 对象，推荐 `Content-Type: application/json`；空请求体按 `{}` 处理。数组、非法 JSON 返回 400；请求体超过 32 MiB 返回 413。CSV 和备份另有更严格上限。
+- POST / PUT 发送 UTF-8 JSON 对象，推荐 `Content-Type: application/json`；空请求体按 `{}` 处理。数组、非法 JSON 返回 400；请求体超过 32 MiB 返回 413。CSV、备份和题包另有更严格上限。
 - HTTP 层拒绝 `Transfer-Encoding`、重复或非法 `Content-Length`，返回 400；不要使用分块请求体。
 - Android API 请求必须携带当前进程的 `X-Bagu-Token`，缺失或不匹配返回 403。令牌由原生启动层提供，不写入文档、日志或持久配置，也不能沿用上次进程的令牌。
 - 桌面 CLI 默认只监听 `127.0.0.1`。不要公开映射端口或改成 `0.0.0.0`；本机绑定不等于公网认证机制。
@@ -21,6 +21,9 @@
 | GET | `/assets/...` | 允许的本地字体和品牌图标，不是任意文件服务 |
 | GET | `/api/stats` | 统计及 `open_session_id` |
 | GET | `/api/session` | 当前 open 会话、全部本轮题目和未判题 |
+| GET | `/api/experiences` | 已安装专题列表、筛选元数据、题数及推荐章节 ID |
+| GET | `/api/experiences/:id` | 专题详情与有序章节 |
+| POST | `/api/experiences/:id/start` | `{section_id?}`，按保存顺序启动整套或章节面经 |
 | GET | `/api/questions` | `q` 搜索题目、答案和分类；`cat`、`page`、`page_size` 用于筛选和分页 |
 | POST | `/api/questions` | 新增题目；成功为 201 |
 | PUT | `/api/questions/:id` | 修改题目，不重置进度 |
@@ -32,6 +35,11 @@
 | POST | `/api/reveal` | `{session_id, question_id}`，只看题库答案、不评分 |
 | POST | `/api/review` | `{session_id, question_id, result, submission_id?}`，自评并保存答案 |
 | GET | `/api/submissions/:id` | 查询已完成的 submission，关闭会话后仍可恢复 |
+| POST | `/api/session/complete` | `{session_id,question_id,completion_type}`，完成 `prepare` 项 |
+| GET | `/api/packs` | 已安装题包、revision、计数和日常复习开关 |
+| POST | `/api/packs/inspect` | `{archive_base64}`，完整校验 `.bagu-pack` 并预览，不安装 |
+| POST | `/api/packs/install` | 对同一 `archive_base64` 执行安装/幂等重导/升级 |
+| PUT | `/api/packs/:id` | 仅接受 `{include_in_review:boolean}` |
 | GET | `/api/backup/export` | `mode=questions` 或 `mode=progress`，默认 progress；返回 ZIP 字节 |
 | POST | `/api/backup/inspect` | `{archive_base64}`，校验档案并返回类型、题数、时间、版本，不执行恢复 |
 | POST | `/api/backup/restore` | `{archive_base64}`，按文件模式事务合并题目及可选进度 |
@@ -49,13 +57,51 @@
 
 ## 统计与会话
 
-`GET /api/stats` 返回 `total`、`due`、`review_due`、`new_count`、`mastered`、`by_cat`、`open_session_id`。为兼容旧调用方，`due` 仍表示当前可抽题数（到期题加新题）；`review_due` 只统计已进入调度且不晚于本地今天的题，`new_count` 只统计 `next_due` 为空的新题，且 `due = review_due + new_count`。`mastered` 为 `level >= 3`；`by_cat` 每项为 `{category, total, seen, mastered, due_n}`，其中 `seen` 是至少复习过一次的题数，`mastered` 是该分类已掌握题数，`due_n` 是该分类当前可抽题数。
+`GET /api/stats` 返回 `total`、`due`、`review_due`、`new_count`、`mastered`、`by_cat`、`open_session_id`。为兼容旧调用方，`due` 仍表示当前可抽题数（到期题加新题）；`review_due` 只统计已进入调度且不晚于本地今天的题，`new_count` 只统计 `next_due` 为空的新题，且 `due = review_due + new_count`。统计与日常 draw 使用同一资格谓词：只包含未退役 `review` 题，题包题还要求 `include_in_review=true`；`prepare` 和已关闭题包不计入日常分类。`mastered` 为 `level >= 3`；`by_cat` 每项为 `{category, total, seen, mastered, due_n}`。
 
 `POST /api/draw` 的 `n` 建议传正整数，省略时为 5；`cat` 按完整分类名过滤，省略/空值表示全部分类。响应为 `{session_id, questions}`；没有可选题时返回 `{"session_id":null,"questions":[]}`，不会创建会话。
 
-`GET /api/session` 有会话时返回 `{session_id, n, cat, items, pending}`，`pending` 是未判题对象数组，不是 ID 数组。没有会话时为 `{"session_id":null,"items":[],"pending":[]}`。这里的题目对象与抽题响应一致：`id`、`category`、`question`、`url`、`times_seen`、`grade`；未评分的 `grade` 为 `null`，不包含答案正文。
+`GET /api/session` 有会话时返回 `{session_id,n,cat,session_type,items,pending}`；`session_type` 为 `review|experience`。`items` 和 `pending` 按持久化 `position` 排序，`pending` 是 `completion_type=null` 的对象数组，不是 ID 数组。每项在旧题目字段外增加 `position`、`completion_type`（`null|graded|prepared|skipped`）、`question_type`、`pack_id`、`pack_name`、`stable_question_id`；仅 `prepare` 项额外返回 `preparation_prompt`，`review` 项仍不返回答案正文。面经会话另带 `experience`，单章会话再带 `section`。没有会话时为 `{"session_id":null,"session_type":null,"items":[],"pending":[]}`。
 
-已有 open 会话时，`draw` 返回 409 和 `{error, session_id, pending_ids}`，不另开一轮。所有本轮题评分成功后自动关闭；`POST /api/skip` 返回 `{session_id, status:"closed"}`，只关闭会话，不改未判题调度，也不撤销已完成评分。无可关闭会话返回 400。
+已有 open 会话时，`draw` 或面经 start 返回 409 和 `{error, session_id, pending_ids}`，不另开一轮。所有本轮项完成后自动关闭；`POST /api/skip` 返回 `{session_id,status:"closed"}`，只关闭会话，不改未完成项调度，也不撤销已完成评分/准备结果。无可关闭会话返回 400。
+
+## 题包与面经专题
+
+### 题包检查、安装与开关
+
+`GET /api/packs` 返回 `{packs:[...]}`。每个对象含 `pack_id`、`name`、`revision`、`display_version`、源快照/内容/manifest SHA-256、`question_count`、`experience_count`、`include_in_review`、`installed_at` 和 `updated_at`。
+
+`POST /api/packs/inspect` 与 `/api/packs/install` 都严格只接受：
+
+```json
+{"archive_base64":"<完整 .bagu-pack ZIP 的规范 base64>"}
+```
+
+inspect 会在不安装题包的情况下完整解析固定三成员、canonical UTF-8 JSON、DEFLATED 压缩、大小、哈希、稳定 ID、文本、HTTP(S) 来源和专题引用，返回公开 manifest 字段、三成员哈希、`installed_revision` 以及 `status`：`new|upgrade|installed|downgrade|conflict`。它不返回题干、答案或准备提示正文。HTTP 入口仍会经过公共数据库初始化，所以不能当作数据库 schema 的绝对只读预演。
+
+install 必须由客户端在预览后对同一份缓存 base64 调用。首次安装返回 201、`status="installed"`；高 revision 升级与相同 revision/相同 hash 的幂等重导返回 200，状态分别为 `upgraded` / `unchanged`。降级、同 revision 内容冲突、题型稳定 ID 冲突或 orphan 所有权冲突返回 409；坏格式返回 400；存在 open 会话返回 409 并附 `session_id/pending_ids`。升级保留题目整数主键、调度和历史评分快照，且不覆盖用户的 `include_in_review`；遗漏旧 ID 保持原状，只有显式 `retired` 停止新抽题。
+
+`PUT /api/packs/:id` 精确接受 `{"include_in_review":true|false}`，只改变日常抽题/统计资格；关闭后仍可启动专题，进度不删除。题包 ID 不存在为 404。首版没有 HTTP 卸载、在线商店、自动下载或自动题包更新接口。
+
+`.bagu-pack` 压缩文件最多 20 MiB、解压 JSON 合计最多 50 MiB、最多 10000 题，严格只含 `manifest.json`、`questions.json`、`experiences.json`。manifest 的 `schema_version` 当前为 1；题目类型为 `review|prepare`，均须 `review_status="reviewed"` 和完整来源，产物不接受未解析引用。
+
+### 专题列表、启动与准备项
+
+`GET /api/experiences` 返回 `{experiences:[...]}`。专题对象包含数据库 `id`、`stable_experience_id`、题包标识/名称、`kind`（`interview|topic_set`）、`direction/company/position/stage`、`section_count`、未退役 `question_count` 及 `recommended_section_id`。`GET /api/experiences/:id` 返回 `{experience,sections}`；章节按 `position` 排序，每项为 `{id,stable_section_id,position,title,recommended,question_count}`。
+
+`POST /api/experiences/:id/start` 用 `{}` 启动整套，或用 `{"section_id":12}` 启动该专题下的一个章节。响应含 `session_id`、有序 `questions`、`session_type:"experience"`、`experience`，单章时另有 `section`。题目顺序由章节位置和题目位置写入 `session_items.position`；仅过滤 `retired`，不受 `include_in_review` 开关影响。未知专题/章节为 404，非法 ID/请求字段为 400。
+
+`POST /api/session/complete` 精确接受：
+
+```json
+{
+  "session_id": "s_20260830_a3f2c91b",
+  "question_id": 42,
+  "completion_type": "prepared"
+}
+```
+
+`completion_type` 只允许 `prepared|skipped`，目标必须是该专题会话里的 `prepare` 项。成功返回 `{session_id,question_id,completion_type,replayed,status}`；同题同结果重放幂等，改用另一结果或把 review 题交给本接口会拒绝。它不创建 submission/grade，不调用模型，也不修改 `level/times_seen/times_right/next_due/last_reviewed`；末项完成时同事务关闭会话。
 
 ## 评分、看答案与自评
 
@@ -88,6 +134,8 @@
 `POST /api/reveal` 只允许查看当前会话未判题，返回 `{question_id, answer, answer_html, url}`；无题库答案时正文为空，不调用模型、不计分。
 
 `POST /api/review` 的 `result` 为 `again` / `hard` / `good` / `easy`。它不调用模型，返回上述看答案字段，再加 `next_due` 和评分结果对象字段；自评无答案时仍可评分，`answer_source` 为 `null`。页面的“不会，直接看答案”使用 `again` 自评，不等于只调用 `/api/reveal`。
+
+以上 `/api/answer`、流式 answer、`/api/reveal` 和 `/api/review` 只接受 `review` 题；`prepare` 在模型调用或调度写入前即拒绝，必须使用 `/api/session/complete`。题包 review 的 `answer_source` 仍是 `stored`；页面借助题目对象中的 `pack_id` 将它标为「题包参考答案 · 已复核」。submission 恢复只增加这个公开归属字段，不返回题包答案、准备提示、稳定 ID 或来源清单。
 
 同步评卷未配置模型返回 400；模型请求失败、截断、拒答、空响应、解析失败或缺少必需模型答案返回 502。目标会话/题目非法、已评分、submission 格式错误返回 400。完整答案与结果 HTML 构造成功后才提交评分；失败不留下新评分、调度或 submission 记录。
 
@@ -130,11 +178,13 @@ HTTP 请求体、认证或 Android 地址校验失败可能先返回普通 JSON 
 | `answer` | 可空字符串，最多 100000 字符 |
 | `url` | 可空字符串，最多 2048 字符 |
 
-`PUT` 是提交完整题目字段，不是局部补丁；省略的 `answer`、`url` 会成为空字符串。`category + question` 唯一；新增/修改重复题返回 400。返回题目对象包含上述四字段及 `id`、`answer_html`、`level`、`times_seen`、`times_right`、`next_due`、`last_reviewed`。修改仅更改题目内容，不重置调度。
+`PUT` 是提交完整题目字段，不是局部补丁；省略的 `answer`、`url` 会成为空字符串。普通本地题按 `category + question` 唯一；新增/修改重复题返回 400。CSV 和 POST 始终创建本地 `review` 题，不接受题包身份或专题结构。
+
+题目列表对象在原内容/进度字段外增加 `pack_id`、`pack_name`、`stable_question_id`、`question_type`、`preparation_prompt`、`answer_review_status`、`retired`、有序 `sources`。本地题的题包字段为空，审校状态为 `local`；题包题由包管理，通用 PUT/DELETE 在任何写入前返回 409，不能用这些入口改变归属或覆盖内容。题包答案/准备提示仍只以安全文本/Markdown 渲染，不直接信任 HTML。
 
 查询参数：`q` 在题干、答案、分类中做文本搜索，`cat` 精确匹配分类；`page` 默认 1 且至少 1，`page_size` 默认 20，范围 1–100。响应为 `{items, total, page, page_size, pages, categories}`；题目按 ID 倒序，`categories` 是全题库分类列表。非法分页返回 400。
 
-删除成功返回 `{"deleted":true,"id":12}`；已有任意会话引用的题目返回 409，即使该会话已经关闭。不存在的数字题目 ID 在修改/删除时返回 400。
+删除成功返回 `{"deleted":true,"id":12}`；已有任意会话引用的本地题返回 409，即使该会话已经关闭；题包题也返回 409 只读冲突。不存在的数字题目 ID 在修改/删除时返回 400。
 
 CSV 请求为 `{"content":"category,question,answer,url\n..."}`，不是 multipart 文件上传。支持 UTF-8 BOM、双引号和字段内逗号；表头必须按顺序为 `category,question,answer,url`，也兼容旧表头 `category,question,url`。字段限制与单题相同，最多 2 MiB / 5000 题；整批通过校验才写入。重复题跳过、不覆盖，响应为 `{total, inserted, skipped}`；任一行非法或无可导入题目返回 400。
 
@@ -142,15 +192,21 @@ CSV 请求为 `{"content":"category,question,answer,url\n..."}`，不是 multipa
 
 `GET /api/backup/export?mode=questions` 导出纯题库，`?mode=progress` 导出含进度备份，省略 mode 默认 progress；空值、非法值或重复 mode 返回 400。成功返回 `application/zip` 二进制，由调用方保存为 `.bagu-backup`，不是 JSON/base64 响应。有 open 会话仍可导出，但会话本身不在档案中。
 
-`POST /api/backup/inspect` 与 `/api/backup/restore` 都只接受 `{"archive_base64":"<完整 ZIP 的 base64>"}`。inspect 完整校验所有成员和题目后返回 `{schema_version, mode, question_count, created_at, app_version}`，不执行备份合并或改写题目进度，也不取得恢复资格的锁。restore 在写事务中重新检查 open 会话，成功返回 `{added, updated, total}`。
+`POST /api/backup/inspect` 与 `/api/backup/restore` 都只接受 `{"archive_base64":"<完整 ZIP 的规范 base64>"}`。inspect 完整校验所有成员和题目后返回 `{schema_version,mode,question_count,local_question_count?,pack_question_count?,pack_count?,experience_count?,created_at,app_version}`；这些额外计数字段只在 v3 出现。它不执行合并或取得恢复资格的锁。restore 在写事务中重新检查 open 会话，成功返回 `{added,updated,total}`。
 
 核心 `inspect_backup(data)` 和 Android 原生档案预览不访问数据库；但 HTTP inspect 沿用普通 API 的公共入口，处理前会调用 `get_conn`／`init_db`，缺失的数据库可能被创建、旧库可能被迁移。因此 HTTP 预览不是“绝对不写库”的数据库迁移预演，也不具备下方诊断接口的数据库故障隔离保证。
 
-档案只含 `manifest.json` 和 `questions.json`。新导出使用备份格式 v2：questions 只含分类、题干、答案和来源，不包含进度字段；progress 另含调度字段。仍兼容 v1，按 progress 处理；旧应用不支持 v2 时须先更新。两种模式均不含模型配置、Key、草稿、会话和评分分析，备份格式与 SQLite user_version 独立。
+当前源码新导出备份 schema v3，严格只含 `manifest.json`、`questions.json`、`packs.json`、`experiences.json`：
 
-限制为 10000 题、压缩文件 20 MiB、两份 JSON 解压后合计 50 MiB。校验成员名、重复项、字段和 SHA-256；损坏、超限、非法 base64 等返回 400，整批不写入。restore 遇到 open 会话时返回 409 和 `{error, session_id, pending_ids}`；inspect 不因有会话而拒绝预览。
+- `questions` 模式保存本地题、题包题/来源、题包 revision/hash 元数据、专题/章节顺序和 `include_in_review`，不保存调度；目标已有进度保留，新题从零开始。
+- `progress` 在同一内容快照上保存 review 题调度，并按稳定身份覆盖目标进度；prepare 的调度固定为零/null。
+- v1/v2 两成员档案继续按历史契约读取，v1 按 progress 处理；公开 beta.4 只认识这两个旧版本，不能读取 v3。
 
-恢复按 `category + question` 合并：两种模式都覆盖已有题的答案与 URL，包括空值。questions 保留已有进度，新题使用零等级、零次数和空复习日期；progress 按文件覆盖进度，日期不重算。不删除本机独有题，也不修改已有会话/分析历史。恢复是覆盖性操作，先备份再执行；`.bagu-backup` 不能替代数据库升级前的完整 SQLite 备份。用户操作说明见 [用户指南](user-guide.md) 和 [Android Beta](android-beta.md)。
+两种 v3 模式均为一个 SQLite 读快照，不含模型配置、Key、草稿、会话、submission、评分分析或历史答案快照。备份 schema 与 SQLite `user_version=3` 是两个独立版本号。
+
+限制为 10000 题、压缩文件 20 MiB、全部 JSON 解压后合计 50 MiB。v3 还要求 DEFLATED，并校验固定字段、重复 JSON key、题包原始 canonical manifest 身份、来源 URL、稳定引用和累计结构；损坏、超限、非法 base64 等返回 400，错误消息受限且不回显任意题包来源正文。restore 遇到 open 会话时返回 409 和 `{error,session_id,pending_ids}`；inspect 不因有会话而拒绝预览。
+
+本地题按 `category + question` 合并；题包题按 `pack_id + stable_question_id`，专题/章节按各自稳定 ID 合并。恢复会还原题包内容、结构和日常开关，不删除目标独有行；同 revision/同 manifest 幂等，高 revision 可升级，降级、同 revision 冲突、题型变化或 orphan 所有权冲突返回 409，整批回滚。已有会话/分析历史不改。恢复是覆盖性操作，先备份再执行；`.bagu-backup` 不能替代数据库升级前的完整 SQLite 备份。用户操作说明见 [用户指南](user-guide.md) 和 [Android Beta](android-beta.md)。
 
 ## 诊断接口
 
