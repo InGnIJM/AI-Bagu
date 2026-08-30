@@ -4478,8 +4478,12 @@ def test_runtime_injects_independent_database_config_and_static_roots(tmp_path, 
 ])
 def test_runtime_auth_precedes_body_parsing_and_database_access(tmp_path, method, path, token):
     headers = {"X-Bagu-Token": token} if token else {}
+    if method in {"POST", "PUT"}:
+        # Invalid framing proves authentication runs before body parsing without
+        # sending entity bytes that an auth rejection intentionally leaves unread.
+        headers["Content-Length"] = "not-a-length"
     with _runtime_server(tmp_path, access_token="test-access-token") as server:
-        status, payload, ctype = _runtime_request(server, method, path, "not-json", headers)
+        status, payload, ctype = _runtime_request(server, method, path, headers=headers)
     assert status == 403
     assert json.loads(payload) == {"error": "未授权请求"}
     assert ctype == "application/json"
