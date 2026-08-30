@@ -126,7 +126,7 @@ Android 仅允许 HTTPS，不能直接使用表中的默认 Ollama 地址；手�
 
 `.bagu-pack` 是严格 ZIP，只含 `manifest.json`、`questions.json`、`experiences.json`，最多 10000 题、压缩 20 MiB、解压 50 MiB。每题必须有永久稳定 ID、知识分类、`review|prepare` 类型、已复核答案或准备提示，以及至少一个安全 HTTP(S) 来源；专题保存 `interview|topic_set`、方向/公司/岗位/阶段、章节和题目顺序。产物不允许保留私有清单中的交叉引用。
 
-当前的 27 个专题、109 个 Markdown、748 个自测项及旧指纹仅是历史审计基线，不是可安装首包，也不表示逐题审校完成。构建真实题包前仍须在源库旁维护不提交的私有清单、重新冻结目录并让全部门禁通过；仓库、public/internal 种子与公开 APK 都排除 `.bagu-pack` 和私有 catalog。首版不支持在线下载、自动题包更新、自动语义去重或物理卸载。
+仓库不保存可安装的真实题包。beta.5 的 27 专题／748 题正式 r1 由仓库外私有流程完成冻结和逐题审校，字节不提交 Git；是否可下载以对应 GitHub Release 的独立 `.bagu-pack` 附件为准。历史的 109 个 Markdown、748 项统计和旧指纹本身不能替代正式产物门禁。仓库、public/internal 种子与公开 APK 都排除 `.bagu-pack` 和私有 catalog。首版不支持在线商店、应用内自动题包下载／更新、自动语义去重或物理卸载。
 
 **以下格式修复已包含在公开 beta.4 中：**
 

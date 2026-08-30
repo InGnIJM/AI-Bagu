@@ -54,9 +54,9 @@ beta.4 将用户主动操作失败显示为带解决办法的弹窗；后台自�
 
 已发布 beta.4 来自提交 `ac53f341342c2266079af72e23b953aa3ae43459`，标签为 `v0.1.0-beta.4`，包含语音输入、评分答案来源、SQLite v2、双端迁移、答案格式恢复、诊断日志、安装确认修复和统一错误弹窗。旧 beta.1／beta.2／beta.3 包不会因更新源码自动获得新功能。
 
-2026-08-30 当前工作树已实现 SQLite/备份 v3 与本地题包导入，但未递增版本、未提交 Tag、未发布 Release，也未安装设备。已为最终工作树本地构建并校验一份 public ARM64 空种子 APK，SHA-256 为 `7afb92be480555e98e9a620869653735785141f75898336548bf0751bb85cc38`；它只是验证产物，不是公开 beta.4 的替代附件，也没有进入更新清单。精确范围见[验收记录](validation.md#2026-08-30面经题包与专题模拟当前开发源码)。
+2026-08-30 当前发布分支已实现 SQLite/备份 v3 与本地题包导入，并配置为 beta.5/code 5，但尚未提交 Tag、发布 Release 或安装设备。已在本地构建并校验 public ARM64 空种子签名 APK，SHA-256 为 `e64f60598fc2451f3f568befecd123845c5c43c00eb5fcc9a5e3529cb40ce1e9`；同目录正式题包 SHA-256 为 `47aa6b28768be85322924df4a7c17199bf248660997cd10247066821d6d23864`。它们仍是本地验证产物，不是公开 beta.4 的替代附件，也没有进入线上更新清单。精确范围见[验收记录](validation.md#2026-08-30面经题包与专题模拟当前开发源码)。
 
-本版已完成正式 public 构建、精确附件、匿名下载及 Pages 校验；此前 beta.3 在隔离 API29/API36 环境完成过应用内升级链路，但 beta.4 的新安装确认修复尚未在报告问题的 API36 物理手机运行。未完成范围见[beta.4 验收记录](validation.md#beta4-公开发布)，用户截图不替代这些检查。
+已公开的 beta.4 完成了正式 public 构建、精确附件、匿名下载及 Pages 校验；此前 beta.3 在隔离 API29/API36 环境完成过应用内升级链路，但 beta.4 的新安装确认修复尚未在报告问题的 API36 物理手机运行。未完成范围见[beta.4 验收记录](validation.md#beta4-公开发布)，用户截图不替代这些检查。
 
 复现 beta.4 应使用 Tag `v0.1.0-beta.4` 对应的独立、干净源码、六项附件和本地验证回执；发布后的文档同步提交不改变 Tag 或已签名 APK。历史包仍保留各自[验收记录](validation.md)。
 
@@ -92,20 +92,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\android.ps1 -Mode 
 
 ### 本地构建
 
-工具链、缓存和既有签名完整后，构建空题库 public 包：
+工具链、缓存和既有签名完整后，为存在版本化题包描述的 beta.5 构建空题库 public 包及独立七附件目录：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\android.ps1 -Mode Build
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\android.ps1 -Mode Build -QuestionPack "<正式题包路径>"
 ```
 
-经授权需要内部题库时，显式使用 `-Mode BuildInternal`。当前脚本按版本和 flavor 分目录，目标 APK 已存在时拒绝覆盖，应检查已有交付物，而不是删除它后强行重建。不要套用旧文档中“一次构建两种包、覆盖固定中文文件名”的步骤。
+`<正式题包路径>` 是待替换的本地文件路径，不应原样执行；脚本先校验题包身份、revision、数量和哈希，题包只作为独立附件复制，不会嵌入 APK。没有版本化题包描述的历史版本可省略此参数。经授权需要内部题库时，显式使用 `-Mode BuildInternal`；它不接受题包参数。当前脚本按版本和 flavor 分目录，目标 APK 已存在时拒绝覆盖，应检查已有交付物，而不是删除它后强行重建。不要套用旧文档中“一次构建两种包、覆盖固定中文文件名”的步骤。
 
-公开发布准备使用 `release_github.py prepare --execute`，会建立精确 commit／附件哈希回执；若该准备自己产生的目录被中断，会保留为 `public.interrupted-<UUID>` 后重建，而不是直接认证中断文件。未经该流程拥有的目录会停止并要求人工检查。完整 dry-run、gh 登录前提、明确发布确认和 feed 重试见[维护者发布指南](data-transfer-and-updates.md#维护者发布预检准备与执行)。
+beta.5 公开发布准备使用 `release_github.py prepare --execute --question-pack "<正式题包路径>"`，会建立精确 commit、题包／描述身份和七附件哈希回执；若该准备自己产生的目录被中断，会保留为 `public.interrupted-<UUID>` 后重建，而不是直接认证中断文件。未经该流程拥有的目录会停止并要求人工检查。完整 dry-run、gh 登录前提、明确发布确认和 feed 重试见[维护者发布指南](data-transfer-and-updates.md#维护者发布预检准备与执行)。
 
 public 的当前输出约定：
 
 ```text
 dist/android/<versionName>/public/
+├── ai-bagu-2026-autumn-interviews-r1.bagu-pack
 ├── bagu-<versionName>-public-arm64-v8a.apk
 ├── SHA256SUMS
 ├── certificate-sha256.txt
@@ -114,7 +115,7 @@ dist/android/<versionName>/public/
 └── RELEASE_NOTES.md
 ```
 
-以上为路径模板；具体名称与文件完整性以实际脚本和产物为准。internal 输出位于相应 `internal/` 目录，不生成可公开发布的元数据。
+以上为 beta.5 七附件路径模板；具体题包名称来自版本化公开描述，历史无题包版本仍使用六附件。题包不进入 APK 或更新 feed。具体名称与文件完整性以实际脚本和产物为准。internal 输出位于相应 `internal/` 目录，不生成可公开发布的元数据。
 
 ### 验证已有 public 交付物
 

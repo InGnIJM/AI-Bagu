@@ -156,10 +156,10 @@ python .\scripts\release_github.py feed
 
 ```powershell
 python .\scripts\release_github.py preflight --execute
-python .\scripts\release_github.py prepare --execute
+python .\scripts\release_github.py prepare --execute --question-pack "<正式题包路径>"
 ```
 
-`preflight --execute` 仅做本地与远端只读预检。`prepare --execute` 运行项目 pytest、Node 测试和 public 构建／Java 测试／lint，校验附件后，将精确源码 commit 与每个附件哈希写入版本目录的 `verification.json`。该回执不是设备验收证明；后续源码或附件有任何变化，都不能沿用旧回执。直接 `android.ps1 -Mode Build` 的输出也不能自动替代发布准备回执。
+`<正式题包路径>` 是待替换的本地路径，不应原样执行。存在版本化题包描述时，`preflight --execute` 仍只做本地与远端只读预检；`prepare --execute` 必须显式传入题包，并在任何 journal、构建或输出写入前核对文件名、题包身份、revision、数量和 SHA-256。随后它运行项目 pytest、Node 测试和 public 构建／Java 测试／lint，将精确源码 commit、题包与描述身份以及七个附件哈希写入版本目录的 `verification.json`。发布和 feed 阶段不再接受任意题包路径，只认该回执绑定的交付字节。该回执不是设备验收证明；后续源码、描述或附件有任何变化，都不能沿用旧回执。直接 `android.ps1 -Mode Build` 的输出也不能自动替代发布准备回执。历史无题包描述的版本仍走六附件流程且不接受 `--question-pack`。
 
 Pages 必须在这些时点就绪，避免先签名或公开 Release 才发现客户端没有可用清单：
 
@@ -178,13 +178,13 @@ GitHub JSON 请求用 [`gh api --include`](https://cli.github.com/manual/gh_api)
 
 ### 中断的本地准备
 
-`preparation.json` 只记录正在准备的 commit／version 与目录归属，不证明里面的 APK 已验证。相同 commit／version 的准备被中断后，再执行 `prepare --execute` 时，脚本将有归属的未完成 `public/` 保留为同级 `public.interrupted-<UUID>/`，再从已提交源码重建；不会给旧的中断字节补发验证回执。保留目录可用于人工排查，不是发布附件。
+`preparation.json` 只记录正在准备的 commit／version、目录归属，以及适用时的题包文件名／哈希和公开描述哈希，不证明里面的 APK 或题包已验证。相同完整来源的准备被中断后，再执行 `prepare --execute --question-pack "<正式题包路径>"` 时，脚本将有归属的未完成 `public/` 保留为同级 `public.interrupted-<UUID>/`，再从已提交源码重建；不会给旧的中断字节补发验证回执。保留目录可用于人工排查，不是发布附件。
 
 已有完整、匹配的 `verification.json` 才能复用附件，而且仍重新执行检查与 Verify。无归属的现有输出、其他 commit／version 的中断记录、链接／异常目录或哈希冲突都会停止，先人工检查，不应删除目录、伪造回执或覆盖成品来绕过保护。
 
 ### 公开发布与 feed 恢复
 
-只有维护者另外明确确认仓库、版本、六个精确附件及验收范围后才执行发布。以下记录 beta.4 发布时使用的命令，**本版已经发布，无需再次执行**；以后应替换为另行确认的新版本，并与干净发布工作区的 `version.json` 完全一致。确认参数不带 Tag 的 `v` 前缀：
+只有维护者另外明确确认仓库、版本、对应版本允许的六个或描述绑定的七个精确附件及验收范围后才执行发布。以下记录 beta.4 发布时使用的命令，**本版已经发布，无需再次执行**；以后应替换为另行确认的新版本，并与干净发布工作区的 `version.json` 完全一致。确认参数不带 Tag 的 `v` 前缀：
 
 ```powershell
 python .\scripts\release_github.py publish --execute --confirm-repository InGnIJM/AI-Bagu --confirm-version 0.1.0-beta.4

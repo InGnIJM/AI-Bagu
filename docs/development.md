@@ -74,7 +74,7 @@ python .\scripts\build_interview_pack.py --source-root <冻结的Markdown目录>
 
 尖括号均须替换。`source-root` 与 catalog 属于用户私有整理范围，不能加入仓库；catalog 为每个源文件、专题、章节和题目分配永久 ID，记录原始字节 hash、类型、分类、已复核答案/提示及来源。构建器在前后各扫描一次，README 数量、未登记 Markdown、源/catalog 字节漂移、未复核内容、引用循环/孤儿或产物计数不一致均阻止输出。相同输入应生成逐字节相同的三成员 ZIP。
 
-开发/发布检查不得用合成夹具通过冒充真实首包审校完成。当前没有真实 `.bagu-pack` 产物；27 专题、109 Markdown、748 项只属于历史审计基线。发布预检拒绝任何 tracked `.bagu-pack` 和精确匹配的私有 catalog，APK verifier 扫描全部 ZIP member；public/internal 种子也必须没有 pack/experience/source/relationship 行。
+开发/发布检查不得用合成夹具通过冒充真实首包审校完成。仓库不保存或跟踪真实 `.bagu-pack`；beta.5 的正式 r1 只在仓库外私有流程中生成，仓库内仅保存公开身份、数量和 SHA-256 描述。27 专题、109 Markdown、748 项的历史统计本身不能替代冻结、逐题审校和最终产物门禁。发布预检拒绝任何 tracked `.bagu-pack` 和精确匹配的私有 catalog，APK verifier 扫描全部 ZIP member；public/internal 种子也必须没有 pack/experience/source/relationship 行。
 
 ## 修改前的边界检查
 
@@ -120,7 +120,7 @@ python -m pytest test/test_bagu.py test/test_android_project.py -q
 ## 测试隔离要求
 
 - pytest fixture 使用 `tmp_path`；传入显式临时数据库，或将 `DB_PATH` monkeypatch 到临时路径。不要运行会触碰真实 `bagu.db` 的测试。
-- 题包/备份用例只构造临时 canonical ZIP 和合成 catalog，不读取 `E:/秋招/面经库`、真实 `.bagu-pack` 或私有清单；升级测试断言原题主键/进度/快照不变及事务失败无半写。
+- 题包/备份用例只构造临时 canonical ZIP 和合成 catalog，不读取仓库外的真实私人源目录、真实 `.bagu-pack` 或私有清单；升级测试断言原题主键/进度/快照不变及事务失败无半写。
 - 模型配置、日志目录、原生数据目录和签名测试材料也放临时目录；不能读取真实 `.env` 或复用真实签名身份做破坏性用例。
 - 抓题和模型请求使用 mock/桩，不打真实来源或模型 API。密钥用 `sk-test` 等假值，检查响应和日志不会泄露 Key。
 - 保留并发会话、同题重复评分、跨题 submission 冲突、评分结果重放、断流与渲染失败回滚等测试；仅检查 HTTP 200 不足以判断流式评卷成功。

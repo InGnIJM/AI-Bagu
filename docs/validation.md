@@ -31,20 +31,20 @@
 ### 实现与自动化证据
 
 - beta.5 七附件发布契约采用 TDD：新增测试在生产改动前为 **49 failed**，实现后题包描述／绑定、六七附件、GitHub 状态机组合为 **226 passed**。正式外部题包只读绑定通过；测试夹具全部使用合成题包，不把真实正文或私有 catalog 带入仓库。
-- 当前 Android 项目契约为 **82 passed**，核心＋Android 精确组合为 **566 passed**；Node 语音网页回归为 **27 passed**。`py_compile`、PowerShell `Plan` 和 beta.5 public 构建计划检查通过。Task 5 的签名构建、lint、精确 APK 校验、远端七附件和设备验证尚未执行。
-- 整仓 `python -m pytest test -q` 为 **1013 passed / 1 failed**：沙箱内唯一失败仍是 Java `DiagnosticStore` 无权解析系统 Temp。沙箱外精确复跑排除 Temp 问题后，一次碰到既有测试把随机诊断 ID 中偶然出现的 `73` 误判为会话号，未改生产代码；同一精确测试再次复跑为 **1 passed**。因此聚焦改动全绿，但整仓单次命令不能记录为全绿。
-- 纯标准库构建器以临时 Markdown/catalog 覆盖确定性 ZIP、前后快照、未登记/漂移、稳定 ID、审校/来源、引用展开、孤儿/循环、大小和 runtime validator：`python -m pytest test/test_interview_pack_builder.py -q` 为 **66 passed**。没有读取 `E:/秋招/面经库` 或生成真实题包。
+- 当前 Android 项目契约为 **82 passed**，核心＋Android 精确组合为 **566 passed**；Node 语音网页回归为 **27 passed**。Task 5 又以正式题包完成本地签名 public Build／Verify：Java **117 passed**，release lint **0 错误／5 警告**，`androidTest` 编译成功但未在设备运行；七附件、签名、证书、ABI、16 KiB 对齐、空种子和 APK 不含题包均通过精确校验。远端附件和设备验证仍未执行。
+- 发布前第一次整仓运行为 **1014 passed / 2 failed**：一个 Windows localhost 请求偶发 `WinError 10053`，另一个 Java wrapper 被沙箱 Temp ACL 拒绝；两项精确复跑分别通过。随后 5000 次对照确认前者是 Windows 关闭仍有未读未授权正文的连接时偶发 TCP RST，不是鉴权或数据库行为失败；测试改用“非法 `Content-Length`、无实体字节”继续确定性证明鉴权先于正文解析，生产代码和正文上限不变。该测试修正经独立审查后，沙箱外仓库安全临时目录中的完整 `python -m pytest test -q` 单次结果为 **1016 passed**，退出码 0。
+- 纯标准库构建器以临时 Markdown/catalog 覆盖确定性 ZIP、前后快照、未登记/漂移、稳定 ID、审校/来源、引用展开、孤儿/循环、大小和 runtime validator：`python -m pytest test/test_interview_pack_builder.py -q` 为 **66 passed**。该自动化阶段没有读取真实私人源目录或生成真实题包。
 - SQLite v3/安装、专题会话与备份分别经 TDD 和独立审查修复。最终 `python -m pytest test/test_bagu.py -q` 为 **484 passed**，builder/web/transfer 组合为 **118 passed**，`test_android_project.py` 为 **76 passed**。整仓 `python -m pytest test -q` 得到 **900 passed / 3 failed**：其中两个 Windows localhost `WinError 10053` 参数项随后原测试隔离为 **8 passed**；Java `DiagnosticStore` 在受限沙箱内被 `toRealPath()` 拒绝，精确策略测试移到沙箱外为 **1 passed**。因此聚焦回归通过，但不能把整仓沙箱命令记录成全绿，也不能宣称环境级随机中止已根治。
 - 共享网页聚焦 `test_interview_pack_web.py + test_transfer_web.py + test_update_web.py` 为 **64 passed**；题包网页自身 **16 passed**，Android-web 子集 **23 passed**。覆盖日常/面经切换、筛选/推荐章节、按序恢复、prepare、答案来源、只读/开关、桌面同字节确认、旧宿主和乱序响应。静态响应式/44 px/reduced-motion 复核完成，但 Edge 截图因宿主 GPU 进程失败未取得，因此没有真实渲染截图结论。
 - Android/发布/迁移 Python 契约 `test_android_project.py + test_github_release.py + test_transfer.py` 最终为 **278 passed**；`test_android_project.py` 为 **76 passed**。直接 JUnit 的进程仲裁器 **2 passed**、租约 tracker **5 passed**，覆盖文件/更新争用、精确 token、同步终态、迟到回调和新租约保护。
 - 当前树的 Gradle `testPublicDebugUnitTest` 报告为 **117 passed / 0 failed / 0 skipped**；同一次离线 JDK 17 构建中，`compilePublicDebugAndroidTestJavaWithJavac`、`lintPublicRelease` 与 `assemblePublicRelease` 均成功。仪器测试只编译，未在设备/模拟器运行。
-- 当前树的 public ARM64 验证 APK 为 **30,031,933 字节**，SHA-256 `7afb92be480555e98e9a620869653735785141f75898336548bf0751bb85cc38`。精确 verifier 确认 `questions=0`、`packs=0`、`experiences=0`、`sessions=0`、`session_items=0`，ABI/16 KiB/RELRO/允许列表通过；`apksigner` 确认 v2 签名和单一证书 SHA-256 `ac92a24f30a5e6c10c4ced0d0db89124f39f36e00778fef6ca3ba4973bdf0ee3`。该文件只是当前工作树的本地验证产物，未安装、上传、作为 Release 附件或更新清单发布。
+- 当前 code 5 public ARM64 本地签名 APK 为 **30,031,937 字节**，SHA-256 `e64f60598fc2451f3f568befecd123845c5c43c00eb5fcc9a5e3529cb40ce1e9`。精确 verifier 确认 `questions=0`、`packs=0`、`experiences=0`、`sessions=0`、`session_items=0`，ABI/16 KiB/RELRO/允许列表通过；`apksigner` 确认 v2 签名和单一证书 SHA-256 `ac92a24f30a5e6c10c4ced0d0db89124f39f36e00778fef6ca3ba4973bdf0ee3`。同一七附件目录中的正式题包为 **196,882 字节**，SHA-256 `47aa6b28768be85322924df4a7c17199bf248660997cd10247066821d6d23864`；双行 `SHA256SUMS` 按文件名排序且 `update.json` 仍只描述 APK。这些文件仍只是本地验证产物，未安装、上传或写入线上更新清单。
 
 ### 未完成与内容边界
 
 - 上述历史自动化阶段没有访问真实面经库或生成首包。后续私有整理流程已在仓库外冻结 109 个 Markdown、完成 27 专题／748 题的正式 r1 构建和独立复核；原始 Markdown 保持只读，题包字节、源快照、catalog、稳定 ID 和审校材料均不提交。仓库只保存正式附件的公开身份、数量和 SHA-256 描述。
 - 没有把题包加入 public/internal 种子；发布预检和 APK verifier 已增加 `.bagu-pack`/精确私有 catalog/pack-owned seed 拒绝契约。没有在线商店、自动题包更新、物理卸载或自动语义去重。
-- 历史验证阶段没有递增版本或提交；当前发布检查点已使用 beta.5/code 5 并形成分支提交，但仍没有推送、创建新 Tag/Release、修改 Pages、签名构建 beta.5 或安装新 APK。公开 beta.4 的哈希、附件和功能范围完全不因本节改变。
+- 历史验证阶段没有递增版本或提交；当前发布检查点已使用 beta.5/code 5 并形成分支提交，也完成上述本地签名构建，但仍没有推送、创建新 Tag/Release、修改 Pages 或安装新 APK。公开 beta.4 的哈希、附件和功能范围完全不因本节改变。
 - 未运行设备/模拟器 instrumentation；真实 SAF provider、取消/返回、Activity 重建、进程死亡、WebView 事件、系统安装器与文件/更新并发仍需隔离设备验收。未新构建 internal APK；当前源码对应的 public APK 只完成了宿主机验证，不能替代设备验收或公开发布。
 
 ## beta.4 公开发布

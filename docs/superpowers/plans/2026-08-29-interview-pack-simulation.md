@@ -1,6 +1,6 @@
 # 面经题包与专题模拟 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`, `superpowers:test-driven-development`, and `superpowers:verification-before-completion`. 用户已授权当前任务实施；不得提交、推送、迁移 `E:/秋招/面经库`、生成或发布真实首包。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`, `superpowers:test-driven-development`, and `superpowers:verification-before-completion`. 用户已授权当前任务实施；不得提交、推送或迁移仓库外的真实私人源目录，也不得生成或发布真实首包。
 
 **Goal:** 在复用现有题目、评分、调度和唯一会话锁的前提下，引入私有 `.bagu-pack`、有序面经模拟、准备题自评、桌面/Android 显式导入和备份 v3。
 
@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- 不读取、修改或迁移 `E:/秋招/面经库`；当前 `748` 项和指纹仅是审计基线，不能冒充冻结首包。
+- 不读取、修改或迁移仓库外的真实私人源目录；当前 `748` 项和私有指纹仅是审计基线，不能冒充冻结首包。
 - 不新增第三方 Python 依赖，不新增第二个 HTML，不改变 Hermes `grade <session_id> <id> <result>` 协议。
 - 保持每库最多一个 open 会话、首次评分、skip 不调度、失败不落库、submission 重放、Android localhost/token/HTTPS/WebView 边界。
 - public/internal 种子行为不变；仓库不加入源面经、私有清单、生成的 `.bagu-pack` 或真实数据库。
