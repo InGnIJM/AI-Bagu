@@ -17,6 +17,7 @@ bagu.db
 *.sqlite
 *.sqlite3
 *.bagu-backup
+*.bagu-pack
 
 # Python
 __pycache__/

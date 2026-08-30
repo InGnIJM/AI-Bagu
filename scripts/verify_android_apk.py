@@ -133,8 +133,27 @@ def _is_allowed_asset(name):
     )
 
 
+def _is_private_catalog(name):
+    parts = tuple(part.lower() for part in PurePosixPath(name).parts)
+    if not parts or not parts[-1].endswith(".json"):
+        return False
+    basename = parts[-1]
+    stem = basename[:-5]
+    catalog_tokens = stem.replace("-", " ").replace("_", " ").replace(".", " ").split()
+    return (
+        ("private" in parts[:-1] and "catalog" in catalog_tokens)
+        or (basename.startswith("private-") and basename.endswith("-catalog.json"))
+    )
+
+
 def _check_names(apk):
     names = set(apk.namelist())
+    packs = [name for name in names if PurePosixPath(name).name.lower().endswith(".bagu-pack")]
+    if packs:
+        _fail(f"APK contains private interview pack: {sorted(packs)}")
+    private_catalogs = [name for name in names if _is_private_catalog(name)]
+    if private_catalogs:
+        _fail(f"APK contains private catalog: {sorted(private_catalogs)}")
     missing = REQUIRED_ASSETS - names
     if missing:
         _fail(f"APK missing required assets: {sorted(missing)}")
@@ -192,12 +211,23 @@ def _seed_report(seed_bytes, flavor, expected_questions):
         ).fetchone()[0]
         sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         session_items = conn.execute("SELECT COUNT(*) FROM session_items").fetchone()[0]
+        pack_questions = conn.execute(
+            "SELECT COUNT(*) FROM questions WHERE pack_id IS NOT NULL"
+        ).fetchone()[0]
+        packs = conn.execute("SELECT COUNT(*) FROM question_packs").fetchone()[0]
+        experiences = conn.execute("SELECT COUNT(*) FROM experiences").fetchone()[0]
+        experience_sections = conn.execute("SELECT COUNT(*) FROM experience_sections").fetchone()[0]
+        experience_items = conn.execute("SELECT COUNT(*) FROM experience_items").fetchone()[0]
+        question_sources = conn.execute("SELECT COUNT(*) FROM question_sources").fetchone()[0]
     except sqlite3.Error as exc:
         _fail(f"packaged seed is not a valid mobile database: {exc}")
     finally:
         conn.close()
     if dirty or sessions or session_items:
         _fail("packaged seed contains scheduling or session history")
+    if any((pack_questions, packs, experiences, experience_sections,
+            experience_items, question_sources)):
+        _fail("packaged seed contains private pack or experience state")
     if flavor == "public" and questions != 0:
         _fail(f"public seed must be empty, found {questions} questions")
     if expected_questions is not None and questions != expected_questions:
@@ -210,6 +240,8 @@ def _seed_report(seed_bytes, flavor, expected_questions):
         "seed_content_sha256": digest,
         "sessions": sessions,
         "session_items": session_items,
+        "packs": packs,
+        "experiences": experiences,
     }
 
 

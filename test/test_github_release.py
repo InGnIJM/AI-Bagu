@@ -34,6 +34,53 @@ def publisher():
     return module
 
 
+def local_preflight_with_tracked_path(tmp_path, monkeypatch, tracked_path):
+    module = publisher()
+    (tmp_path / "version.json").write_bytes((ROOT / "version.json").read_bytes())
+    (tmp_path / "LICENSE").write_bytes((ROOT / "LICENSE").read_bytes())
+
+    def fake_command(args, cwd=tmp_path, data=None, timeout=120):
+        assert cwd == tmp_path and args[0] == "git"
+        if args[1:3] == ["status", "--porcelain"]:
+            return b""
+        if args[1:] == ["remote", "get-url", "origin"]:
+            return b"https://github.com/InGnIJM/AI-Bagu.git\n"
+        if args[1:] == ["ls-files"]:
+            return ("README.md\n" + tracked_path + "\n").encode()
+        if args[1:] == ["rev-parse", "HEAD"]:
+            return ("a" * 40).encode()
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module, "command", fake_command)
+    return module.local_preflight(tmp_path)
+
+
+@pytest.mark.parametrize("private_path", [
+    "fixtures/interviews.bagu-pack",
+    "assets/private/catalog.json",
+    "assets/private/catalog-index.json",
+    "assets/private/package-catalog.json",
+    "assets/private/release_catalog.v2.json",
+    "docs/private-catalog.json",
+    "docs/private-interview-catalog.json",
+])
+def test_local_preflight_rejects_tracked_interview_pack_material(tmp_path, monkeypatch, private_path):
+    with pytest.raises(ValueError, match="private|artifact|pack|catalog"):
+        local_preflight_with_tracked_path(tmp_path, monkeypatch, private_path)
+
+
+@pytest.mark.parametrize("allowed_path", [
+    "docs/package-catalog.json",
+    "docs/interviewing-catalog.json",
+    "docs/privately-owned-catalog.json",
+    "assets/private/mycatalog.json",
+])
+def test_local_preflight_allows_marker_substrings_without_private_catalog_match(
+        tmp_path, monkeypatch, allowed_path):
+    _, commit = local_preflight_with_tracked_path(tmp_path, monkeypatch, allowed_path)
+    assert commit == "a" * 40
+
+
 @pytest.fixture
 def prepared(tmp_path):
     import release_metadata as meta

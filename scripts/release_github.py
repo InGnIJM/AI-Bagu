@@ -49,9 +49,18 @@ def local_preflight(root=None):
         raise ValueError("MIT license missing")
     for name in git("ls-files").splitlines():
         parts = Path(name).parts
+        lower_name = name.lower()
+        lower_parts = tuple(part.lower() for part in parts)
+        basename = lower_parts[-1]
+        has_catalog_token = re.search(r"(?:^|[-_.])catalog(?:[-_.]|$)", basename) is not None
+        is_private_catalog = basename.endswith(".json") and (
+            ("private" in lower_parts[:-1] and has_catalog_token) or
+            (basename.startswith("private-") and basename.endswith("-catalog.json"))
+        )
         if (name in (".env", "settings.json", "bagu.db") or
                 any(p in (".signing", "dist") for p in parts) or
-                name.endswith((".bagu-backup", ".db", ".sqlite", ".sqlite3", ".jks", ".keystore", ".key", ".p12", ".pfx"))):
+                lower_name.endswith((".bagu-backup", ".bagu-pack", ".db", ".sqlite", ".sqlite3", ".jks", ".keystore", ".key", ".p12", ".pfx")) or
+                is_private_catalog):
             raise ValueError("tracked private data or generated artifact blocks public release")
     return version, git("rev-parse", "HEAD")
 
