@@ -199,9 +199,26 @@ def _stage_bytes(path, contents):
 
 
 def _atomic_bytes(path, contents):
+    path = Path(path)
     temporary_path = _stage_bytes(path, contents)
     try:
-        os.replace(temporary_path, path)
+        try:
+            os.replace(temporary_path, path)
+        except OSError:
+            try:
+                temporary_path.stat()
+            except FileNotFoundError:
+                temporary_consumed = True
+            except OSError:
+                temporary_consumed = False
+            else:
+                temporary_consumed = False
+            try:
+                target_matches = path.read_bytes() == contents
+            except OSError:
+                target_matches = False
+            if not (temporary_consumed and target_matches):
+                raise
     finally:
         if temporary_path.exists():
             temporary_path.unlink()
@@ -1249,6 +1266,10 @@ def prepare_catalog(
         report["status"] = "blocked"
         report["counts"]["blockers"] = blockers.total
         report["blockers"] = blockers.items
+        try:
+            _atomic_json(report_path, report)
+        except OSError:
+            pass
         raise CatalogPreparationError(report)
     return report
 

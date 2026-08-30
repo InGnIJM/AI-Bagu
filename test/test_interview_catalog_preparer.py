@@ -1420,6 +1420,102 @@ def test_interruption_after_second_replace_recovers_on_next_call(tmp_path, monke
     assert not fixture["journal_path"].exists()
 
 
+def test_ready_report_replace_committed_before_error_is_verified_as_success(
+    tmp_path, monkeypatch
+):
+    preparer = load_preparer()
+    fixture = setup_pair_upgrade(tmp_path, preparer, "both")
+    report_path = fixture["workspace"] / "reports" / "normalization-report.json"
+    original_replace = preparer.os.replace
+    injected = False
+
+    def commit_ready_then_raise(source, destination):
+        nonlocal injected
+        source = Path(source)
+        destination = Path(destination)
+        if destination == report_path and read_json(source).get("status") == "ready":
+            result = original_replace(source, destination)
+            if not injected:
+                injected = True
+                raise OSError("C:\\PRIVATE\\after-ready-replace-secret")
+            return result
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(preparer.os, "replace", commit_ready_then_raise)
+    report = run_prepare(
+        preparer,
+        fixture["source_root"],
+        fixture["workspace"],
+        fixture["overrides"],
+        expected_questions=2,
+    )
+
+    assert injected
+    assert report["status"] == read_json(report_path)["status"] == "ready"
+    assert not fixture["journal_path"].exists()
+    stable_map = read_json(fixture["map_path"])
+    catalog = read_json(fixture["catalog_path"])
+    map_ids = {
+        entry["stable_id"]
+        for topic in stable_map["topics"].values()
+        for entry in topic["entries"]
+    }
+    assert map_ids == {question["stable_id"] for question in catalog["questions"]}
+    assert map_ids == {"q.agent.01.001", "q.agent.01.002"}
+
+
+def test_ready_report_replace_error_with_tampered_target_is_not_success(
+    tmp_path, monkeypatch
+):
+    preparer = load_preparer()
+    fixture = setup_pair_upgrade(tmp_path, preparer, "both")
+    report_path = fixture["workspace"] / "reports" / "normalization-report.json"
+    original_replace = preparer.os.replace
+    injected = False
+
+    def commit_tampered_ready_then_raise(source, destination):
+        nonlocal injected
+        source = Path(source)
+        destination = Path(destination)
+        if destination == report_path and read_json(source).get("status") == "ready":
+            result = original_replace(source, destination)
+            if not injected:
+                injected = True
+                report_path.write_bytes(b'{"status":"ready","tampered":true}')
+                raise OSError("C:\\PRIVATE\\tampered-ready-secret")
+            return result
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(preparer.os, "replace", commit_tampered_ready_then_raise)
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            fixture["source_root"],
+            fixture["workspace"],
+            fixture["overrides"],
+            expected_questions=2,
+        )
+
+    assert injected
+    assert "output_report_failed" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert read_json(report_path)["status"] != "ready"
+    assert "PRIVATE" not in str(caught.value)
+    assert b"PRIVATE" not in report_path.read_bytes()
+    assert not fixture["journal_path"].exists()
+
+    monkeypatch.setattr(preparer.os, "replace", original_replace)
+    report = run_prepare(
+        preparer,
+        fixture["source_root"],
+        fixture["workspace"],
+        fixture["overrides"],
+        expected_questions=2,
+    )
+    assert report["status"] == read_json(report_path)["status"] == "ready"
+
+
 def test_final_ready_report_failure_leaves_committed_pair_nonready_and_rerunnable(
     tmp_path, monkeypatch
 ):
