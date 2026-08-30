@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 源目录 `E:\秋招\面经库` 始终只读；执行基线必须为 109 个 Markdown、快照 `d571737ed5fc1ed095effb755f99284b0925dcd449ace85ae60226f4d781f2de`。
+- 源目录 `E:\秋招\面经库` 始终只读；用户于 2026-08-30 明确确认采用更新后的当前版本，执行基线必须为 109 个 Markdown、快照 `b61c35c42483caed9d478334acae0cde2daf5dc1e3d6a04c96ab87e3f762d745`。
 - 正式包固定 `pack_id=autumn-recruit-interviews-2026`、`revision=1`、`display_version=2026.08.30-r1`、27 专题、748 题、文件名 `ai-bagu-2026-autumn-interviews-r1.bagu-pack`。
 - 一个 checklist/编号项就是一个题目；复合追问不拆分。Agent 01 和 Agent 09 为 `topic_set`，其余为 `interview`。
 - 原始资料、私有 catalog/overrides/stable IDs、`.bagu-pack`、数据库、签名和 dist 不提交 Git；public APK 空种子且不含题包。
