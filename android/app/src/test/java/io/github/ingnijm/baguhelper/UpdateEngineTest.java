@@ -445,8 +445,22 @@ public class UpdateEngineTest {
         UpdateDiagnostic launched=diagnostics.get(diagnostics.size()-1);
         assertEquals("confirm",arrived.stage);assertEquals("started",arrived.outcome);
         assertEquals("confirm",launched.stage);assertEquals("ok",launched.outcome);
-        assertFalse(arrived.toRecord().containsKey("session_id"));
-        assertFalse(launched.toRecord().toString().contains("73"));
+        Map<String,Object> arrivedRecord=arrived.toRecord(),launchedRecord=launched.toRecord();
+        Set<String> fields=new LinkedHashSet<>(Arrays.asList("time","event","level","stage","outcome","channel","operation_id","error_code","duration_ms"));
+        assertEquals(fields,arrivedRecord.keySet());assertEquals(fields,launchedRecord.keySet());
+        assertFalse(arrivedRecord.containsKey("session_id"));assertFalse(launchedRecord.containsKey("session_id"));
+        assertEquals(arrived.diagnosticId,arrivedRecord.get("operation_id"));
+        assertEquals(launched.diagnosticId,launchedRecord.get("operation_id"));
+        assertEquals(0,arrivedRecord.get("error_code"));assertEquals(0,launchedRecord.get("error_code"));
+    }
+
+    @Test public void diagnosticOperationIdMayContainSessionDigitsWithoutLeakingSessionPayload() {
+        String operationId="n_73"+"0".repeat(30);
+        Map<String,Object> record=new UpdateDiagnostic("confirm","ok","beta",operationId,1000,0,null).toRecord();
+        Set<String> fields=new LinkedHashSet<>(Arrays.asList("time","event","level","stage","outcome","channel","operation_id","error_code","duration_ms"));
+        assertEquals(fields,record.keySet());
+        assertEquals(operationId,record.get("operation_id"));
+        assertFalse(record.containsKey("session_id"));
     }
 
     @Test public void confirmationLaunchFailureUsesInstallerCodeAndKeepsSystemSessionProtected() throws Exception {
