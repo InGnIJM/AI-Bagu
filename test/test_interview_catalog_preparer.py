@@ -1134,6 +1134,86 @@ def recover_then_stop(preparer, fixture):
     assert not fixture["journal_path"].exists()
 
 
+@pytest.mark.parametrize(
+    ("failure_mode", "prior_state", "expected_code"),
+    [
+        ("malformed", "both", "invalid_output_journal"),
+        ("restore-write", "both", "output_recovery_failed"),
+        ("restore-unlink", "none", "output_recovery_failed"),
+        ("cleanup-unlink", "both", "output_recovery_failed"),
+    ],
+)
+def test_unrecovered_journal_stops_before_identity_or_template_work(
+    tmp_path, monkeypatch, failure_mode, prior_state, expected_code
+):
+    preparer = load_preparer()
+    fixture = setup_pair_upgrade(tmp_path, preparer, prior_state)
+    targets = {
+        "stable-ids.json": fixture["map_path"],
+        "private-catalog.json": fixture["catalog_path"],
+    }
+    if failure_mode == "malformed":
+        fixture["journal_path"].write_bytes(
+            b'{"schema_version":1,"private.secret-token":"PRIVATE_BODY"}'
+        )
+    else:
+        preparer._write_pair_journal(fixture["journal_path"], targets)
+        fixture["map_path"].write_bytes(b"PRIVATE_MIXED_MAP")
+        fixture["catalog_path"].write_bytes(b"PRIVATE_MIXED_CATALOG")
+
+    original_atomic_bytes = preparer._atomic_bytes
+    original_unlink = Path.unlink
+
+    def fail_restore_write(path, contents):
+        if failure_mode == "restore-write" and Path(path) == fixture["map_path"]:
+            raise OSError("C:\\PRIVATE\\restore-write-secret")
+        return original_atomic_bytes(path, contents)
+
+    def fail_recovery_unlink(path, *args, **kwargs):
+        if failure_mode == "restore-unlink" and path == fixture["map_path"]:
+            raise OSError("C:\\PRIVATE\\restore-unlink-secret")
+        if failure_mode == "cleanup-unlink" and path == fixture["journal_path"]:
+            raise OSError("C:\\PRIVATE\\cleanup-unlink-secret")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(preparer, "_atomic_bytes", fail_restore_write)
+    monkeypatch.setattr(Path, "unlink", fail_recovery_unlink)
+    downstream_calls = []
+    for function_name in ("_load_stable_map", "_assign_stable_ids", "_make_template"):
+        original = getattr(preparer, function_name)
+
+        def record_call(*args, _name=function_name, _original=original, **kwargs):
+            downstream_calls.append(_name)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(preparer, function_name, record_call)
+
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            fixture["source_root"],
+            fixture["workspace"],
+            fixture["overrides"],
+            expected_questions=2,
+        )
+
+    assert {item["code"] for item in caught.value.report["blockers"]} == {
+        expected_code
+    }
+    assert downstream_calls == []
+    report = read_json(
+        fixture["workspace"] / "reports" / "normalization-report.json"
+    )
+    assert report["status"] == "blocked"
+    assert report["counts"]["blockers"] == len(report["blockers"]) == 1
+    report_bytes = canonical_bytes(report)
+    assert b"PRIVATE" not in report_bytes
+    assert b"secret-token" not in report_bytes
+    assert b"restore-write-secret" not in report_bytes
+    assert b"restore-unlink-secret" not in report_bytes
+    assert b"cleanup-unlink-secret" not in report_bytes
+
+
 @pytest.mark.parametrize("prior_state", ["none", "map-only", "catalog-only", "both"])
 @pytest.mark.parametrize(
     "failed_target", ["stable-ids.json", "private-catalog.json"]
@@ -1282,9 +1362,19 @@ def test_journal_cleanup_failure_is_blocked_and_recovered_next_call(
         blocker["code"] for blocker in caught.value.report["blockers"]
     }
     assert fixture["journal_path"].is_file()
+    report_path = fixture["workspace"] / "reports" / "normalization-report.json"
+    assert read_json(report_path)["status"] != "ready"
 
     monkeypatch.setattr(Path, "unlink", original_unlink)
-    recover_then_stop(preparer, fixture)
+    report = run_prepare(
+        preparer,
+        fixture["source_root"],
+        fixture["workspace"],
+        fixture["overrides"],
+        expected_questions=2,
+    )
+    assert report["status"] == read_json(report_path)["status"] == "ready"
+    assert not fixture["journal_path"].exists()
 
 
 def test_interruption_after_second_replace_recovers_on_next_call(tmp_path, monkeypatch):
@@ -1315,9 +1405,95 @@ def test_interruption_after_second_replace_recovers_on_next_call(tmp_path, monke
             expected_questions=2,
         )
     assert fixture["journal_path"].is_file()
+    report_path = fixture["workspace"] / "reports" / "normalization-report.json"
+    assert read_json(report_path)["status"] != "ready"
 
     monkeypatch.setattr(preparer.os, "replace", original_replace)
-    recover_then_stop(preparer, fixture)
+    report = run_prepare(
+        preparer,
+        fixture["source_root"],
+        fixture["workspace"],
+        fixture["overrides"],
+        expected_questions=2,
+    )
+    assert report["status"] == read_json(report_path)["status"] == "ready"
+    assert not fixture["journal_path"].exists()
+
+
+def test_final_ready_report_failure_leaves_committed_pair_nonready_and_rerunnable(
+    tmp_path, monkeypatch
+):
+    preparer = load_preparer()
+    fixture = setup_pair_upgrade(tmp_path, preparer, "both")
+    report_path = fixture["workspace"] / "reports" / "normalization-report.json"
+    report_path.parent.mkdir(parents=True)
+    preparer._atomic_json(
+        report_path,
+        {
+            "schema_version": 1,
+            "status": "ready",
+            "source_snapshot_sha256": "0" * 64,
+            "counts": {
+                "source_files": 0,
+                "topics": 0,
+                "questions": 0,
+                "experiences": 0,
+                "blockers": 0,
+            },
+            "blockers": [],
+            "deleted_ids": [],
+            "audit": [],
+        },
+    )
+    original_atomic_json = preparer._atomic_json
+    injected = False
+
+    def fail_final_ready_write(path, value):
+        nonlocal injected
+        if (
+            Path(path) == report_path
+            and value.get("status") == "ready"
+            and not injected
+        ):
+            injected = True
+            raise OSError("C:\\PRIVATE\\final-ready-secret")
+        return original_atomic_json(path, value)
+
+    monkeypatch.setattr(preparer, "_atomic_json", fail_final_ready_write)
+    with pytest.raises(preparer.CatalogPreparationError) as caught:
+        run_prepare(
+            preparer,
+            fixture["source_root"],
+            fixture["workspace"],
+            fixture["overrides"],
+            expected_questions=2,
+        )
+
+    assert "output_report_failed" in {
+        blocker["code"] for blocker in caught.value.report["blockers"]
+    }
+    assert read_json(report_path)["status"] != "ready"
+    assert not fixture["journal_path"].exists()
+    stable_map = read_json(fixture["map_path"])
+    catalog = read_json(fixture["catalog_path"])
+    map_ids = {
+        entry["stable_id"]
+        for topic in stable_map["topics"].values()
+        for entry in topic["entries"]
+    }
+    assert map_ids == {question["stable_id"] for question in catalog["questions"]}
+    assert map_ids == {"q.agent.01.001", "q.agent.01.002"}
+
+    monkeypatch.setattr(preparer, "_atomic_json", original_atomic_json)
+    report = run_prepare(
+        preparer,
+        fixture["source_root"],
+        fixture["workspace"],
+        fixture["overrides"],
+        expected_questions=2,
+    )
+    assert report["status"] == read_json(report_path)["status"] == "ready"
+    assert not fixture["journal_path"].exists()
 
 
 def test_malformed_journal_blocks_without_overwriting_pair_or_leaking(tmp_path):

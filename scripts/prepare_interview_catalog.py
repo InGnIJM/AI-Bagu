@@ -128,6 +128,24 @@ class _Blockers:
             self.items.append(item)
 
 
+def _minimal_blocked_report(blockers):
+    return {
+        "schema_version": 1,
+        "status": "blocked",
+        "source_snapshot_sha256": hashlib.sha256(b"").hexdigest(),
+        "counts": {
+            "source_files": 0,
+            "topics": 0,
+            "questions": 0,
+            "experiences": 0,
+            "blockers": blockers.total,
+        },
+        "blockers": blockers.items,
+        "deleted_ids": [],
+        "audit": [],
+    }
+
+
 def _safe_report_path(value):
     if isinstance(value, Path):
         value = value.as_posix()
@@ -1060,13 +1078,22 @@ def prepare_catalog(
     report_path = workspace / "reports" / "normalization-report.json"
     blockers = _Blockers()
 
+    recovery_blocker = None
     try:
         if journal_path.exists():
             _recover_catalog_pair(journal_path, pair_targets)
     except _InvalidPairJournal:
-        blockers.add("invalid_output_journal")
+        recovery_blocker = "invalid_output_journal"
     except (OSError, _PairRecoveryError):
-        blockers.add("output_recovery_failed")
+        recovery_blocker = "output_recovery_failed"
+    if recovery_blocker is not None:
+        blockers.add(recovery_blocker)
+        report = _minimal_blocked_report(blockers)
+        try:
+            _atomic_json(report_path, report)
+        except OSError:
+            pass
+        raise CatalogPreparationError(report)
 
     try:
         files_before = builder._scan_sources(root)
@@ -1153,7 +1180,7 @@ def prepare_catalog(
 
     report = {
         "schema_version": 1,
-        "status": "ready" if blockers.total == 0 else "blocked",
+        "status": "preparing" if blockers.total == 0 else "blocked",
         "source_snapshot_sha256": snapshot,
         "counts": {
             "source_files": len(files_before),
@@ -1213,6 +1240,15 @@ def prepare_catalog(
         report["counts"]["blockers"] = blockers.total
         report["blockers"] = blockers.items
         _atomic_json(report_path, report)
+        raise CatalogPreparationError(report)
+    report["status"] = "ready"
+    try:
+        _atomic_json(report_path, report)
+    except OSError:
+        blockers.add("output_report_failed")
+        report["status"] = "blocked"
+        report["counts"]["blockers"] = blockers.total
+        report["blockers"] = blockers.items
         raise CatalogPreparationError(report)
     return report
 
