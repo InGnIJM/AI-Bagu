@@ -338,6 +338,25 @@ def test_release_archive_verifier_rejects_pack_members_in_every_apk_path(tmp_pat
         verifier.verify_apk_contents(apk, "internal")
 
 
+@pytest.mark.parametrize(("private_entry", "message"), [
+    ("interviews.bagu-pack", "private interview pack"),
+    ("private/package-catalog.json", "private catalog"),
+    ("nested/settings.json", "private state"),
+])
+def test_release_archive_verifier_rejects_private_material_inside_non_application_imy(
+        tmp_path, private_entry, message):
+    verifier = load_release_verifier()
+    apk = make_packaged_seed(tmp_path / "seed.db")
+    nested_payload = io.BytesIO()
+    with zipfile.ZipFile(nested_payload, "w") as nested:
+        nested.writestr(private_entry, b"must-not-ship")
+    with zipfile.ZipFile(apk, "a") as archive:
+        archive.writestr("assets/chaquopy/requirements-common.imy", nested_payload.getvalue())
+
+    with pytest.raises(ValueError, match=message):
+        verifier.verify_apk_contents(apk, "internal")
+
+
 @pytest.mark.parametrize("private_entry", [
     "assets/private/package-catalog.json",
     "docs/PRIVATE/catalog-index.JSON",

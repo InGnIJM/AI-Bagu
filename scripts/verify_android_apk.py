@@ -146,20 +146,24 @@ def _is_private_catalog(name):
     )
 
 
-def _check_names(apk):
-    names = set(apk.namelist())
+def _check_private_names(names, container):
     packs = [name for name in names if PurePosixPath(name).name.lower().endswith(".bagu-pack")]
     if packs:
-        _fail(f"APK contains private interview pack: {sorted(packs)}")
+        _fail(f"{container} contains private interview pack: {sorted(packs)}")
     private_catalogs = [name for name in names if _is_private_catalog(name)]
     if private_catalogs:
-        _fail(f"APK contains private catalog: {sorted(private_catalogs)}")
+        _fail(f"{container} contains private catalog: {sorted(private_catalogs)}")
+    private = [name for name in names if PurePosixPath(name).name.lower() in PRIVATE_BASENAMES]
+    if private:
+        _fail(f"{container} contains private state: {sorted(private)}")
+
+
+def _check_names(apk):
+    names = set(apk.namelist())
+    _check_private_names(names, "APK")
     missing = REQUIRED_ASSETS - names
     if missing:
         _fail(f"APK missing required assets: {sorted(missing)}")
-    private = [name for name in names if PurePosixPath(name).name.lower() in PRIVATE_BASENAMES]
-    if private:
-        _fail(f"APK contains private state: {sorted(private)}")
     assets = {name for name in names if name.startswith("assets/") and not name.endswith("/")}
     unknown_assets = {name for name in assets if not _is_allowed_asset(name)}
     if unknown_assets:
@@ -182,9 +186,11 @@ def _check_names(apk):
             continue
         try:
             with zipfile.ZipFile(io.BytesIO(apk.read(archive_name))) as nested:
+                nested_names = nested.namelist()
+                _check_private_names(nested_names, f"Chaquopy archive {archive_name}")
                 discovered.update(
                     f"{archive_name}!{name}"
-                    for name in nested.namelist()
+                    for name in nested_names
                     if name.endswith(".so") and not name.endswith("/")
                 )
         except zipfile.BadZipFile:
