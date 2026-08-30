@@ -445,6 +445,51 @@ def test_gradle_generates_only_fixed_public_release_pack_asset(tmp_path):
     assert (generated / files[0]).read_bytes() == pack_path.read_bytes()
 
 
+def run_release_gradle_graph(*arguments):
+    gradle = ROOT / ".toolchains/gradle-9.1.0/bin/gradle.bat"
+    env = os.environ.copy()
+    env.update({
+        "JAVA_HOME": "C:/Program Files/Java/jdk-17.0.10",
+        "ANDROID_HOME": str(ROOT / ".android-sdk"),
+        "ANDROID_SDK_ROOT": str(ROOT / ".android-sdk"),
+        "ANDROID_USER_HOME": str(ROOT / ".android-user-home"),
+        "GRADLE_USER_HOME": str(ROOT / ".gradle-user-home"),
+    })
+    return subprocess.run(
+        [str(gradle), "--offline", "--no-daemon", "--console=plain", *arguments,
+         f"-PbaguBuildPython={sys.executable}"],
+        cwd=ANDROID, env=env, capture_output=True, text=True, encoding="utf-8",
+    )
+
+
+def test_public_release_gradle_graph_requires_explicit_android_delivery():
+    completed = run_release_gradle_graph(":app:assemblePublicRelease", "--dry-run")
+
+    assert completed.returncode != 0
+    assert "baguAndroidDelivery" in completed.stdout + completed.stderr
+
+
+def test_aggregate_release_gradle_graph_rejects_bundled_pack_for_internal(tmp_path):
+    pack = tmp_path / "validated-copy.bagu-pack"
+    pack.write_bytes(make_interview_pack_fixture())
+
+    completed = run_release_gradle_graph(
+        ":app:assembleRelease", "--dry-run", "-PbaguAndroidDelivery=bundled_confirm",
+        f"-PbaguBundledQuestionPack={pack}",
+    )
+
+    assert completed.returncode != 0
+    assert "internal" in (completed.stdout + completed.stderr).lower()
+
+
+def test_check_graph_does_not_require_android_delivery_or_pack():
+    completed = run_release_gradle_graph(
+        ":app:testPublicDebugUnitTest", ":app:lintPublicRelease", "--dry-run",
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_gitignore_keeps_android_private_material_and_generated_state_untracked(tmp_path):
     """Pins ignore behavior without opening real secrets or changing this repository."""
     isolated = tmp_path / "ignore-contract"

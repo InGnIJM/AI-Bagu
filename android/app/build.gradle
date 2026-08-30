@@ -41,19 +41,11 @@ signingPropertiesFile.withInputStream { signingProperties.load(it) }
 def generatedPython = layout.buildDirectory.dir('generated/bagu/python')
 def generatedStatic = layout.buildDirectory.dir('generated/bagu/assets')
 def generatedBranding = layout.buildDirectory.dir('generated/bagu/res')
-def androidDelivery = providers.gradleProperty('baguAndroidDelivery').getOrElse('external_only')
+def androidDeliveryProperty = providers.gradleProperty('baguAndroidDelivery')
+def androidDelivery = androidDeliveryProperty.getOrElse('external_only')
 def bundledQuestionPack = providers.gradleProperty('baguBundledQuestionPack')
 if (!(androidDelivery in ['external_only', 'bundled_confirm'])) {
     throw new GradleException('baguAndroidDelivery must be external_only or bundled_confirm')
-}
-if (androidDelivery == 'bundled_confirm' && !bundledQuestionPack.isPresent()) {
-    throw new GradleException('bundled_confirm requires baguBundledQuestionPack')
-}
-def requestedInternalBuild = gradle.startParameter.taskNames.any {
-    it.toLowerCase(java.util.Locale.ROOT).contains('internal')
-}
-if (requestedInternalBuild && bundledQuestionPack.isPresent()) {
-    throw new GradleException('internal builds must never receive baguBundledQuestionPack')
 }
 
 android {
@@ -176,6 +168,26 @@ androidComponents {
             }
             variant.sources.assets.addGeneratedSourceDirectory(packTask) { it.outputDirectory }
         }
+    }
+}
+gradle.taskGraph.whenReady { graph ->
+    def publicReleaseApk = graph.allTasks.any {
+        it.name ==~ /(?i)(assemble|package)PublicRelease/
+    }
+    def internalApk = graph.allTasks.any {
+        it.name ==~ /(?i)(assemble|package)Internal(?:Debug|Release)/
+    }
+    if (publicReleaseApk && !androidDeliveryProperty.isPresent()) {
+        throw new GradleException('public release APK assembly requires explicit baguAndroidDelivery')
+    }
+    if (bundledQuestionPack.isPresent() && androidDelivery != 'bundled_confirm') {
+        throw new GradleException('baguBundledQuestionPack requires bundled_confirm delivery')
+    }
+    if (publicReleaseApk && androidDelivery == 'bundled_confirm' && !bundledQuestionPack.isPresent()) {
+        throw new GradleException('bundled_confirm public release requires baguBundledQuestionPack')
+    }
+    if (internalApk && bundledQuestionPack.isPresent()) {
+        throw new GradleException('internal APK tasks must never receive baguBundledQuestionPack')
     }
 }
 // Chaquopy has its own source model; wire its documented merge task explicitly.

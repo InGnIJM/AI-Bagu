@@ -457,10 +457,10 @@ switch ($Mode) {
         $gradleArgs = @(
             '--no-daemon', '--console=plain',
             ":app:assemble${variant}Release", ":app:test${variant}DebugUnitTest", ":app:lint${variant}Release",
-            "-PbaguBuildPython=$BuildPython", '-PbaguAbi=arm64-v8a'
+            "-PbaguBuildPython=$BuildPython", '-PbaguAbi=arm64-v8a',
+            "-PbaguAndroidDelivery=$(if ($null -eq $packBinding) { 'external_only' } else { $packBinding.android_delivery })"
         )
         if ($null -ne $packBinding) {
-            $gradleArgs += "-PbaguAndroidDelivery=$($packBinding.android_delivery)"
             if ($packBinding.android_delivery -eq 'bundled_confirm') {
                 $gradleArgs += "-PbaguBundledQuestionPack=$packForBuild"
             }
