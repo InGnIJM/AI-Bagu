@@ -49,13 +49,25 @@ def progress(**changes):
 
 
 @pytest.mark.parametrize("mode", ["questions", "progress"])
-def test_export_v2_modes_and_real_version(conn, mode):
+def test_export_v3_modes_pack_aware_members_and_real_version(conn, mode):
     conn.execute("INSERT INTO questions(category,question,level,times_seen,times_right) VALUES('A','synthetic',2,4,3)")
     conn.commit()
     payload = bagu.export_backup(conn, mode=mode)
     with zipfile.ZipFile(io.BytesIO(payload)) as zipped:
         manifest = json.loads(zipped.read("manifest.json"))
-    assert manifest["schema_version"] == 2 and manifest["mode"] == mode
+        assert set(zipped.namelist()) == {
+            "manifest.json", "questions.json", "packs.json", "experiences.json",
+        }
+    assert manifest["schema_version"] == 3 and manifest["mode"] == mode
+    assert {
+        key: manifest[key] for key in (
+            "question_count", "local_question_count", "pack_question_count",
+            "pack_count", "experience_count",
+        )
+    } == {
+        "question_count": 1, "local_question_count": 1,
+        "pack_question_count": 0, "pack_count": 0, "experience_count": 0,
+    }
     assert manifest["app_version"] == json.loads((Path(bagu.__file__).parent / "version.json").read_text())["versionName"]
     rows = bagu.parse_backup(payload)
     assert set(rows[0]) == (set(question()) if mode == "questions" else set(progress()))
@@ -109,7 +121,7 @@ def test_pure_restore_overwrites_empty_content_preserving_progress_history_and_l
     assert tuple(conn.execute("SELECT level,times_seen,times_right,next_due,last_reviewed FROM questions WHERE question='new'").fetchone()) == (0, 0, 0, None, None)
     assert conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 3
     assert [tuple(row) for row in conn.execute("SELECT * FROM session_items")] == history
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_v2_progress_restore_overwrites_schedule_and_default_export_is_progress(conn):

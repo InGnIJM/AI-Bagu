@@ -798,6 +798,45 @@
       box-shadow: 2px 2px 0px var(--color-border);
     }
     .mode-note { min-height: 24px; margin-bottom: 12px !important; font-size: 14px; font-weight: 600; color: var(--color-muted-fg); }
+    .practice-kind-switch { margin-top: 14px; }
+    .practice-panel { max-width: 720px; margin: 18px auto 0; }
+    .experience-filters {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      text-align: left;
+    }
+    .experience-filters .field, .experience-selection .field { margin: 0; }
+    .experience-selection {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr);
+      gap: 10px;
+      margin-top: 10px;
+      text-align: left;
+    }
+    .experience-summary {
+      margin-top: 12px;
+      padding: 12px 14px;
+      border: 2px solid var(--color-border);
+      border-radius: var(--radius-btn);
+      background: #FEF9C3;
+      color: var(--color-foreground) !important;
+      text-align: left;
+      overflow-wrap: anywhere;
+    }
+    .experience-message { min-height: 22px; margin: 10px 0 0 !important; }
+    .prepare-flow {
+      margin-top: 16px;
+      padding: 18px;
+      border: 2px solid var(--color-border);
+      border-radius: var(--radius-card);
+      background: #FEF9C3;
+      box-shadow: var(--shadow-hard-sm);
+    }
+    .prepare-provenance { font: 800 12px/1.4 var(--font-mono); color: #713F12; }
+    .prepare-prompt { margin-top: 10px; white-space: pre-wrap; overflow-wrap: anywhere; font-weight: 650; line-height: 1.7; }
+    .prepare-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 16px; }
+    .answer-provenance { margin-bottom: 10px; color: #713F12; font: 800 12px/1.4 var(--font-mono); }
 
     .quiz-actions {
       display: grid;
@@ -1262,6 +1301,27 @@
       color: var(--color-danger);
       background: #FEF2F2;
     }
+    .question-owner {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+      color: var(--color-muted-fg);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .question-owner code { font-family: var(--font-mono); overflow-wrap: anywhere; }
+    .question-readonly {
+      display: inline-flex;
+      align-items: center;
+      min-height: 40px;
+      padding: 0 10px;
+      border: 1.5px solid var(--color-border);
+      border-radius: 8px;
+      background: #FEF9C3;
+      font-size: 13px;
+      font-weight: 800;
+    }
 
     .pager {
       display: flex;
@@ -1417,6 +1477,8 @@
       .manage-head { flex-direction: column; align-items: stretch; }
       .manage-actions { display: grid; grid-template-columns: 1fr 1fr; }
       .manage-toolbar { grid-template-columns: 1fr; }
+      .experience-filters, .experience-selection { grid-template-columns: 1fr; }
+      .pack-item { grid-template-columns: 1fr; }
       .question-item { grid-template-columns: minmax(0, 1fr); }
       .question-ops { width: 100%; }
       .question-ops button { flex: 1; }
@@ -1474,6 +1536,8 @@
     body.android-app .lib-ops { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
     body.android-app .lib-ops button { justify-content: center; padding: 0 6px; }
     body.android-app .quiz-actions { grid-template-columns: minmax(0, 1fr); }
+    body.android-app .experience-filters, body.android-app .experience-selection,
+    body.android-app .prepare-actions, body.android-app .pack-item { grid-template-columns: minmax(0, 1fr); }
     body.android-app .review-grid { grid-template-columns: 1fr 1fr; }
     body.android-app .pager { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; }
     body.android-app .pager button {
@@ -1500,6 +1564,31 @@
     .update-progress { width: 100%; margin-top: 12px; accent-color: var(--color-accent); }
     body.android-app #view-overview .sidebar-cats-card { margin-top: 14px; }
     .backup-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 16px; }
+    .pack-list { display: grid; gap: 10px; margin-top: 16px; }
+    .pack-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      padding: 14px;
+      border: 2px solid var(--color-border);
+      border-radius: var(--radius-card);
+      background: var(--color-card);
+      box-shadow: var(--shadow-hard-sm);
+    }
+    .pack-item h3 { font-size: 16px; overflow-wrap: anywhere; }
+    .pack-meta { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 5px; color: var(--color-muted-fg); font-size: 12px; font-weight: 700; }
+    .pack-toggle { display: flex; align-items: center; gap: 8px; min-height: 44px; font-weight: 750; cursor: pointer; }
+    .pack-toggle input { width: 22px; height: 22px; accent-color: var(--color-accent); }
+    .pack-preview {
+      margin-top: 14px;
+      padding: 14px;
+      border: 2px solid var(--color-border);
+      border-radius: var(--radius-card);
+      background: #FEF9C3;
+    }
+    .pack-preview h3 { font-size: 17px; }
+    .pack-preview .actions { margin-top: 12px; }
     body.android-app .mobile-nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; padding: 8px 10px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); background: var(--color-background); border-top: 2px solid var(--color-border); }
     body.android-app .mobile-nav button { display: grid; justify-items: center; align-content: center; gap: 3px; border: 2px solid transparent; border-radius: 12px; background: transparent; color: var(--color-foreground); min-height: 56px; font-size: 12px; font-weight: 800; }
     body.android-app .mobile-nav button.active { background: var(--color-accent); border-color: var(--color-border); }
@@ -1637,8 +1726,18 @@
                   没有进行中的会话
                 </span>
               </div>
-              <h2 id="idle-title">抽一轮，逐题作答</h2>
-              <div class="mode-switch" role="group" aria-label="学习模式">
+              <h2 id="idle-title">日常复习，逐题作答</h2>
+              <div class="mode-switch practice-kind-switch" role="group" aria-label="练习入口">
+                <button type="button" class="mode-option" id="practice-daily" aria-pressed="true">
+                  <span class="material-symbols-rounded" style="font-size:16px; margin-right:4px;">event_repeat</span>
+                  日常复习
+                </button>
+                <button type="button" class="mode-option" id="practice-experience" aria-pressed="false">
+                  <span class="material-symbols-rounded" style="font-size:16px; margin-right:4px;">work</span>
+                  面经模拟
+                </button>
+              </div>
+              <div class="mode-switch" role="group" aria-label="作答方式">
                 <button type="button" class="mode-option" id="mode-answer" aria-pressed="true">
                   <span class="material-symbols-rounded" style="font-size:16px; margin-right:4px;">edit_note</span>
                   答题模式
@@ -1649,22 +1748,41 @@
                 </button>
               </div>
               <p class="mode-note" id="mode-help">先用自己的话回答，再交给模型评判。</p>
-              <div class="practice-category">
-                <label for="practice-cat">练习分类</label>
-                <select id="practice-cat"><option value="">全部分类</option></select>
-              </div>
-              <p id="session-scope-note">到期复习优先。Hermes 客户端和本页面共用同一把会话锁。</p>
-              <button class="cta" type="button" id="btn-draw">
-                <span class="material-symbols-rounded filled">play_arrow</span>
-                抽 5 题开始
-              </button>
-              <div id="empty-bank-help" class="hidden">
-                <p class="help">题库还是空的。可导入另一端导出的 .bagu-backup，也可导入 UTF-8 CSV 或新增题目。</p>
-                <div class="actions">
-                  <button type="button" class="secondary" id="btn-empty-transfer">导入题库／备份</button>
-                  <button type="button" class="secondary" id="btn-empty-import">导入 CSV</button>
-                  <button type="button" class="secondary" id="btn-empty-add">新增题目</button>
+              <div id="daily-practice-options" class="practice-panel">
+                <div class="practice-category">
+                  <label for="practice-cat">知识分类</label>
+                  <select id="practice-cat"><option value="">全部分类</option></select>
                 </div>
+                <p id="session-scope-note">到期复习优先。Hermes 客户端和本页面共用同一把会话锁。</p>
+                <button class="cta" type="button" id="btn-draw">
+                  <span class="material-symbols-rounded filled">play_arrow</span>
+                  抽 5 题开始
+                </button>
+                <div id="empty-bank-help" class="hidden">
+                  <p class="help">题库还是空的。可导入另一端导出的 .bagu-backup，也可导入 UTF-8 CSV 或新增题目。</p>
+                  <div class="actions">
+                    <button type="button" class="secondary" id="btn-empty-transfer">导入题库／备份</button>
+                    <button type="button" class="secondary" id="btn-empty-import">导入 CSV</button>
+                    <button type="button" class="secondary" id="btn-empty-add">新增题目</button>
+                  </div>
+                </div>
+              </div>
+              <div id="experience-practice-options" class="practice-panel hidden">
+                <div class="experience-filters" aria-label="面经专题筛选">
+                  <div class="field"><label for="experience-direction">方向</label><select id="experience-direction"><option value="">全部方向</option></select></div>
+                  <div class="field"><label for="experience-company">公司</label><select id="experience-company"><option value="">全部公司</option></select></div>
+                  <div class="field"><label for="experience-position">岗位</label><select id="experience-position"><option value="">全部岗位</option></select></div>
+                </div>
+                <div class="experience-selection">
+                  <div class="field"><label for="experience-select">专题</label><select id="experience-select"><option value="">请选择专题</option></select></div>
+                  <div class="field"><label for="experience-scope">模拟范围</label><select id="experience-scope" disabled><option value="whole">整套专题</option></select></div>
+                </div>
+                <p class="experience-summary hidden" id="experience-summary"></p>
+                <p class="experience-message" id="experience-message" role="status" aria-live="polite"></p>
+                <button class="cta" type="button" id="btn-start-experience" disabled>
+                  <span class="material-symbols-rounded filled">play_arrow</span>
+                  开始面经模拟
+                </button>
               </div>
             </div>
           </div>
@@ -1727,6 +1845,15 @@
               </button>
             </div>
 
+            <div id="prepare-flow" class="prepare-flow hidden">
+              <p class="prepare-provenance">题包准备提示 · 已复核</p>
+              <div class="prepare-prompt" id="prepare-prompt" role="status" aria-live="polite"></div>
+              <div class="prepare-actions">
+                <button class="cta" type="button" id="btn-prepare-complete" style="margin-top:0">已准备</button>
+                <button class="secondary" type="button" id="btn-prepare-skip">跳过此准备项</button>
+              </div>
+            </div>
+
             <!-- 跳过操作 -->
             <button class="ghost" type="button" id="btn-skip">
               <span class="material-symbols-rounded">cancel</span>
@@ -1763,6 +1890,29 @@
               <h2 id="settings-title">设置</h2>
               <p class="help">评卷模型只用于答题模式；背题模式无需配置模型。</p>
               <div id="settings-model" style="margin-top:14px"></div>
+            </div>
+            <div class="card" id="pack-management-card">
+              <h2>面经题包</h2>
+              <p class="help">题包提供独立的面经模拟，也可选择是否把其中的复习题加入日常复习。安装或升级前会先校验并展示预览。</p>
+              <div class="backup-actions">
+                <button type="button" class="secondary" id="btn-pack-import">
+                  <span class="material-symbols-rounded">inventory_2</span>
+                  导入 .bagu-pack
+                </button>
+              </div>
+              <input type="file" id="pack-file" class="hidden" accept=".bagu-pack,application/zip,application/octet-stream" aria-label="选择面经题包文件">
+              <div id="pack-list" class="pack-list"><div class="empty-state">正在加载题包…</div></div>
+              <section id="pack-preview" class="pack-preview hidden" aria-labelledby="pack-preview-name">
+                <p class="prepare-provenance">安装预览</p>
+                <h3 id="pack-preview-name"></h3>
+                <p class="help" id="pack-preview-meta"></p>
+                <p class="help" id="pack-preview-status"></p>
+                <div class="actions">
+                  <button type="button" class="secondary" id="btn-pack-cancel">取消</button>
+                  <button type="button" class="cta" id="btn-pack-confirm" style="margin-top:0">确认安装</button>
+                </div>
+              </section>
+              <p id="pack-message" class="help" role="status" aria-live="polite"></p>
             </div>
             <div class="card">
               <h2>数据迁移</h2>
@@ -1881,7 +2031,7 @@
           <div class="manage-head">
             <div>
               <h2>题库管理</h2>
-              <p>维护题目和答案，或按固定 CSV 格式批量导入。</p>
+              <p>维护本地题目和答案，或按固定 CSV 格式批量导入；题包题目保留来源并只读。</p>
             </div>
             <div class="manage-actions">
               <button type="button" class="compact-btn" id="btn-download-template">
@@ -2028,8 +2178,9 @@
       function route(value) {
         if (typeof value !== 'string' || value.length > 4096 || value.charAt(0) !== '/') return 'other';
         var path = value.split('?')[0].split('#')[0];
-        if (/^\/api\/(stats|session|draw|skip|answer|answer\/stream|reveal|review|settings|models|models\/test|questions|questions\/import|backup\/(export|inspect|restore)|diagnostics\/(events|export))$/.test(path)) return path;
-        var match = path.match(/^\/api\/(models|questions|submissions)\/[^/]+(?:\/(activate|copy))?$/);
+        if (/^\/api\/(stats|session|session\/complete|draw|skip|answer|answer\/stream|reveal|review|settings|models|models\/test|questions|questions\/import|packs|packs\/(inspect|install)|experiences|backup\/(export|inspect|restore)|diagnostics\/(events|export))$/.test(path)) return path;
+        if (/^\/api\/experiences\/[^/]+(?:\/start)?$/.test(path)) return path.indexOf('/start') > 0 ? '/api/experiences/:id/start' : '/api/experiences/:id';
+        var match = path.match(/^\/api\/(models|questions|submissions|packs)\/[^/]+(?:\/(activate|copy))?$/);
         return match ? '/api/' + match[1] + '/:id' + (match[2] ? '/' + match[2] : '') : 'other';
       }
       function clean(value) {
@@ -2136,6 +2287,11 @@
     let statsState = { review_due: 0 };
     let modelsState = { models: [], active_id: "", presets: [] };
     let questionState = { items: [], total: 0, page: 1, page_size: 20, pages: 1, categories: [] };
+    let packState = { packs: [] };
+    let experienceState = { items: [], filtered: [], detail: null, selectedId: null, requestGeneration: 0 };
+    let practiceMode = "daily";
+    let pendingPackBase64 = "";
+    let pendingPackPreview = null;
     let editingId = null;
     let editingQuestionId = null;
     let testedOk = false;
@@ -2545,7 +2701,7 @@
     function startSpeechInput() {
       if (typeof updateReservation !== "undefined" && updateReservation) { showSpeechError("正在准备安装更新，请稍后再使用语音。"); return; }
       const q = currentQuestion();
-      if (speechInput || !q || !session.session_id || currentView !== "quiz" || currentSessionMode() !== "answer" ||
+      if (speechInput || !q || q.question_type === "prepare" || !session.session_id || currentView !== "quiz" || currentSessionMode() !== "answer" ||
           $("ans").disabled || $("btn-submit").disabled || $("btn-submit").dataset.mode === "next") return;
       $("speech-error").textContent = "";
       $("speech-error").classList.add("hidden");
@@ -2660,18 +2816,23 @@
     }
     function setNativeBusy(operation) {
       nativeBusy = operation;
-      ["btn-question-export", "btn-backup-export", "btn-backup-import", "btn-empty-transfer", "btn-download-template", "btn-diagnostics-export"].forEach((id) => {
+      ["btn-question-export", "btn-backup-export", "btn-backup-import", "btn-empty-transfer", "btn-download-template", "btn-diagnostics-export", "btn-pack-import", "btn-pack-confirm"].forEach((id) => {
         $(id).disabled = Boolean(operation);
       });
+      if (!operation && typeof pendingPackPreview !== "undefined" && pendingPackPreview && ["downgrade", "conflict"].includes(pendingPackPreview.status)) {
+        $("btn-pack-confirm").disabled = true;
+      }
     }
     function startNativeOperation(operation, content) {
       if (typeof updateReservation !== "undefined" && updateReservation) { setNativeMessage("正在准备安装更新，请稍后再操作文件。", true); return; }
       if (!nativeStore || nativeBusy) return;
-      if (operation === "import" && session.session_id) {
-        setNativeMessage("请先回到练习页结束本轮，再恢复备份。", true);
+      if ((operation === "import" || operation === "pack-import") && session.session_id) {
+        const message = operation === "pack-import" ? "请先回到练习页结束本轮，再安装题包。" : "请先回到练习页结束本轮，再恢复备份。";
+        if (operation === "pack-import") setPackMessage(message, true);
+        else setNativeMessage(message, true);
         return;
       }
-      if (!["export", "export-questions", "import", "template", "diagnostics"].includes(operation)) return;
+      if (!["export", "export-questions", "import", "template", "diagnostics", "pack-import"].includes(operation)) return;
       setNativeBusy(operation);
       setNativeMessage("请在系统文件选择器中完成操作…", false);
       try {
@@ -2679,16 +2840,18 @@
         else if (operation === "export") nativeStore.exportBackup();
         else if (operation === "export-questions") nativeStore.exportQuestionBank();
         else if (operation === "import") nativeStore.importBackup();
+        else if (operation === "pack-import") nativeStore.importInterviewPack();
         else nativeStore.saveCsvTemplate(content);
       } catch (_) {
         setNativeBusy("");
         if (operation === "diagnostics") setDiagnosticMessage("无法打开日志导出，请更新应用或重试。", true);
+        else if (operation === "pack-import") setPackMessage("无法打开题包文件选择器，请更新应用或重试。", true);
         else setNativeMessage("无法打开文件选择器，请重试。", true);
       }
     }
     async function handleNativeResult(event) {
       const data = event.detail;
-      if (!data || !["export", "export-questions", "import", "template", "diagnostics"].includes(data.operation) ||
+      if (!data || !["export", "export-questions", "import", "template", "diagnostics", "pack-import"].includes(data.operation) ||
           !["ok", "cancelled", "error", "busy"].includes(data.status)) return;
       // Results can arrive after Activity/process recreation, when JS has no busy flag.
       if (nativeBusy && data.operation !== nativeBusy) return;
@@ -2702,6 +2865,18 @@
       let message = typeof data.message === "string" ? data.message : "文件操作已结束。";
       if (data.operation === "diagnostics") {
         setDiagnosticMessage(message, data.status === "error");
+        return;
+      }
+      if (data.operation === "pack-import") {
+        if (data.status === "ok") {
+          message = "题包安装完成。";
+          try {
+            await loadPacks();
+            await loadExperiences();
+            await refreshQuestionStats();
+          } catch (_) { message += " 请重新打开设置页刷新列表。"; }
+        }
+        setPackMessage(message, data.status === "error");
         return;
       }
       if (data.operation === "import" && data.status === "ok") {
@@ -2793,9 +2968,122 @@
         reader.readAsArrayBuffer(file);
       });
     }
+    function setPackMessage(message, error) {
+      $("pack-message").textContent = message || "";
+      $("pack-message").classList.toggle("error", Boolean(error));
+    }
+
+    function clearInterviewPackPreview() {
+      pendingPackBase64 = "";
+      pendingPackPreview = null;
+      $("pack-preview").classList.add("hidden");
+      $("pack-preview-name").textContent = "";
+      $("pack-preview-meta").textContent = "";
+      $("pack-preview-status").textContent = "";
+      $("btn-pack-confirm").disabled = false;
+    }
+
+    function renderInterviewPackPreview(summary) {
+      const statuses = ["new", "upgrade", "installed", "downgrade", "conflict"];
+      if (!summary || typeof summary.pack_id !== "string" || typeof summary.name !== "string" ||
+          !Number.isInteger(summary.revision) || summary.revision < 1 || typeof summary.display_version !== "string" ||
+          !Number.isInteger(summary.question_count) || summary.question_count < 1 || summary.question_count > 10000 ||
+          !Number.isInteger(summary.experience_count) || summary.experience_count < 0 ||
+          !statuses.includes(summary.status) ||
+          !(summary.installed_revision === null || Number.isInteger(summary.installed_revision))) {
+        throw new Error("题包预览无效");
+      }
+      const labels = {
+        new: "将安装为新题包。",
+        upgrade: `将从 revision ${summary.installed_revision} 升级到 ${summary.revision}。`,
+        installed: "相同 revision 与内容已安装，可幂等确认。",
+        downgrade: `本机 revision ${summary.installed_revision} 更新，不能降级安装。`,
+        conflict: `本机 revision ${summary.installed_revision} 的内容不同，不能覆盖。`
+      };
+      pendingPackPreview = summary;
+      $("pack-preview-name").textContent = summary.name;
+      $("pack-preview-meta").textContent = `${summary.display_version} · revision ${summary.revision} · ${summary.question_count} 道题 · ${summary.experience_count} 个专题`;
+      $("pack-preview-status").textContent = labels[summary.status];
+      $("btn-pack-confirm").disabled = summary.status === "downgrade" || summary.status === "conflict";
+      $("pack-preview").classList.remove("hidden");
+    }
+
+    async function inspectDesktopInterviewPack(file) {
+      if (nativeStore || nativeBusy) return;
+      if (session.session_id) { setPackMessage("请先结束本轮练习，再安装题包。", true); return; }
+      if (!file || file.size <= 0 || file.size > 20 * 1024 * 1024 ||
+          (typeof file.name === "string" && file.name && !file.name.toLowerCase().endsWith(".bagu-pack"))) {
+        setPackMessage("请选择有效且不超过 20 MiB 的 .bagu-pack 文件。", true);
+        clearInterviewPackPreview();
+        return;
+      }
+      clearInterviewPackPreview();
+      setNativeBusy("pack-import");
+      setPackMessage("正在读取并校验题包…", false);
+      try {
+        pendingPackBase64 = await readArchiveFile(file);
+        const summary = await api("POST", "/api/packs/inspect", {archive_base64: pendingPackBase64});
+        renderInterviewPackPreview(summary);
+        if (["downgrade", "conflict"].includes(summary.status)) pendingPackBase64 = "";
+        setPackMessage("请核对预览后明确确认安装。", false);
+      } catch (error) {
+        clearInterviewPackPreview();
+        setPackMessage(error.name === "AbortError" ? "已取消读取，题包未改变。" : "题包读取或校验失败，原数据未改变。", error.name !== "AbortError");
+      } finally {
+        setNativeBusy("");
+      }
+    }
+
+    async function confirmInterviewPackInstall() {
+      if (nativeStore || nativeBusy || !pendingPackBase64 || !pendingPackPreview ||
+          ["downgrade", "conflict"].includes(pendingPackPreview.status)) return;
+      const archiveBase64 = pendingPackBase64;
+      setNativeBusy("pack-import");
+      setPackMessage("正在安装题包…", false);
+      let submitted = false;
+      try {
+        submitted = true;
+        await api("POST", "/api/packs/install", {archive_base64: archiveBase64});
+        clearInterviewPackPreview();
+        await loadPacks();
+        await loadExperiences();
+        await refreshQuestionStats();
+        setPackMessage("题包安装完成。", false);
+      } catch (_) {
+        clearInterviewPackPreview();
+        setPackMessage(submitted ? "未能确认安装结果，请先刷新并核对题包列表；不要重复安装。" : "题包安装失败，原数据未改变。", true);
+      } finally {
+        setNativeBusy("");
+      }
+    }
+
+    function cancelInterviewPackInstall() {
+      if (nativeBusy) return;
+      clearInterviewPackPreview();
+      setPackMessage("已取消安装，题包未改变。", false);
+      $("pack-file").value = "";
+    }
+
+    function chooseInterviewPack() {
+      if (nativeBusy) return;
+      if (session.session_id) { setPackMessage("请先结束本轮练习，再安装题包。", true); return; }
+      if (nativeStore) {
+        if (typeof nativeStore.importInterviewPack !== "function") {
+          setPackMessage("当前应用版本不支持题包导入，请更新应用后重试。", true);
+          return;
+        }
+        setPackMessage("请在系统文件选择器中选择题包，并在原生预览中确认。", false);
+        startNativeOperation("pack-import");
+        return;
+      }
+      clearInterviewPackPreview();
+      $("pack-file").value = "";
+      $("pack-file").click();
+    }
+
     function archivePreviewMessage(summary) {
       if (!summary || !["questions", "progress"].includes(summary.mode) ||
-          ![1, 2].includes(summary.schema_version) || !Number.isInteger(summary.question_count) ||
+          ![1, 2, 3].includes(summary.schema_version) || !Number.isInteger(summary.question_count) ||
           summary.question_count < 0 || summary.question_count > 10000 ||
           typeof summary.created_at !== "string" || typeof summary.app_version !== "string") {
         throw new Error("备份预览无效");
@@ -3154,11 +3442,182 @@
       const memorize = selectedMode === "memorize";
       $("mode-answer").setAttribute("aria-pressed", memorize ? "false" : "true");
       $("mode-memorize").setAttribute("aria-pressed", memorize ? "true" : "false");
-      $("idle-title").textContent = memorize ? "抽一轮，直接背答案" : "抽一轮，逐题作答";
       $("mode-help").textContent = memorize
         ? "每题自动展示题库答案，看完后由你按掌握程度记录。"
         : "先用自己的话回答，再交给模型评判。";
+      updateIdlePracticeCopy();
+    }
+
+    function updateIdlePracticeCopy() {
+      const memorize = selectedMode === "memorize";
+      const experience = practiceMode === "experience";
+      if (experience) {
+        $("idle-title").textContent = memorize ? "选择专题，按顺序背题" : "选择专题，开始面经模拟";
+      } else {
+        $("idle-title").textContent = memorize ? "日常复习，直接背答案" : "日常复习，逐题作答";
+      }
       $("btn-draw").textContent = memorize ? "背 5 题开始" : "抽 5 题开始";
+    }
+
+    function setExperienceMessage(message, error) {
+      $("experience-message").textContent = message || "";
+      $("experience-message").classList.toggle("error", Boolean(error));
+    }
+
+    function experienceFilterOptions(id, values, emptyLabel) {
+      const select = $(id);
+      const current = select.value;
+      const unique = Array.from(new Set(values.filter((value) => typeof value === "string" && value.trim())))
+        .sort((left, right) => left.localeCompare(right, "zh-CN"));
+      select.innerHTML = `<option value="">${emptyLabel}</option>` + unique.map((value) => (
+        `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`
+      )).join("");
+      select.value = unique.includes(current) ? current : "";
+    }
+
+    function renderExperienceFilters() {
+      const items = experienceState.items || [];
+      experienceFilterOptions("experience-direction", items.map((item) => item.direction), "全部方向");
+      experienceFilterOptions("experience-company", items.map((item) => item.company), "全部公司");
+      experienceFilterOptions("experience-position", items.map((item) => item.position), "全部岗位");
+    }
+
+    function resetExperienceDetail() {
+      experienceState.requestGeneration = (Number(experienceState.requestGeneration) || 0) + 1;
+      experienceState.detail = null;
+      $("experience-scope").innerHTML = '<option value="whole">整套专题</option>';
+      $("experience-scope").value = "whole";
+      $("experience-scope").disabled = true;
+      $("experience-summary").classList.add("hidden");
+      $("btn-start-experience").disabled = true;
+      return experienceState.requestGeneration;
+    }
+
+    function renderExperienceOptions() {
+      const direction = $("experience-direction").value;
+      const company = $("experience-company").value;
+      const position = $("experience-position").value;
+      const filtered = (experienceState.items || []).filter((item) => (
+        (!direction || item.direction === direction) &&
+        (!company || item.company === company) &&
+        (!position || item.position === position)
+      ));
+      experienceState.filtered = filtered;
+      const select = $("experience-select");
+      const selected = String(experienceState.selectedId || "");
+      select.innerHTML = filtered.length ? filtered.map((item) => {
+        const companyName = item.company || (item.kind === "topic_set" ? "专题题库" : "未标注公司");
+        const role = item.position || "未标注岗位";
+        return `<option value="${item.id}">${escapeHtml(companyName)} · ${escapeHtml(role)} · ${item.question_count} 题</option>`;
+      }).join("") : '<option value="">没有符合条件的专题</option>';
+      const retained = filtered.some((item) => String(item.id) === selected);
+      select.value = retained ? selected : (filtered.length ? String(filtered[0].id) : "");
+      $("btn-start-experience").disabled = !filtered.length;
+      if (!filtered.length) {
+        experienceState.selectedId = null;
+        resetExperienceDetail();
+      }
+      return filtered;
+    }
+
+    function renderExperienceDetail(detail) {
+      const experience = detail.experience;
+      const sections = Array.isArray(detail.sections) ? detail.sections : [];
+      const scope = $("experience-scope");
+      scope.innerHTML = '<option value="whole">整套专题</option>' + sections.map((section) => (
+        `<option value="section:${section.id}">${escapeHtml(section.title)} · ${section.question_count} 题${section.recommended ? " · 推荐" : ""}</option>`
+      )).join("");
+      const recommended = sections.filter((section) => section.recommended === true);
+      scope.value = recommended.length === 1 ? `section:${recommended[0].id}` : "whole";
+      scope.disabled = false;
+      const company = experience.company || (experience.kind === "topic_set" ? "工程专项题库" : "未标注公司");
+      $("experience-summary").textContent = `${company} · ${experience.position || "未标注岗位"} · ${experience.stage || "未标注阶段"} · ${experience.question_count} 题 / ${experience.section_count} 章`;
+      $("experience-summary").classList.remove("hidden");
+      $("btn-start-experience").disabled = false;
+    }
+
+    async function selectExperience(value) {
+      const id = Number(value);
+      if (!Number.isInteger(id) || id <= 0 || !(experienceState.items || []).some((item) => item.id === id)) {
+        experienceState.selectedId = null;
+        resetExperienceDetail();
+        return;
+      }
+      experienceState.selectedId = id;
+      const requestGeneration = resetExperienceDetail();
+      $("experience-select").value = String(id);
+      setExperienceMessage("正在加载专题章节…", false);
+      try {
+        const detail = await api("GET", "/api/experiences/" + id);
+        if (experienceState.requestGeneration !== requestGeneration || experienceState.selectedId !== id) return;
+        if (!detail || !detail.experience || detail.experience.id !== id || !Array.isArray(detail.sections)) {
+          throw new Error("专题详情无效");
+        }
+        experienceState.detail = detail;
+        renderExperienceDetail(detail);
+        setExperienceMessage("", false);
+      } catch (error) {
+        if (experienceState.requestGeneration !== requestGeneration || experienceState.selectedId !== id) return;
+        setExperienceMessage(error.message || "专题详情加载失败。", true);
+      }
+    }
+
+    async function loadExperiences() {
+      setExperienceMessage("正在加载面经专题…", false);
+      const payload = await api("GET", "/api/experiences");
+      if (!payload || !Array.isArray(payload.experiences)) throw new Error("专题列表无效");
+      experienceState.items = payload.experiences;
+      renderExperienceFilters();
+      const filtered = renderExperienceOptions();
+      if (filtered.length) await selectExperience(Number($("experience-select").value));
+      else setExperienceMessage("尚未安装可用的面经题包。", false);
+      return payload;
+    }
+
+    async function applyExperienceFilters() {
+      const filtered = renderExperienceOptions();
+      if (filtered.length) await selectExperience(Number($("experience-select").value));
+      else setExperienceMessage("没有符合当前筛选条件的面经专题。", false);
+    }
+
+    async function setPracticeMode(mode) {
+      practiceMode = mode === "experience" ? "experience" : "daily";
+      const experience = practiceMode === "experience";
+      $("practice-daily").setAttribute("aria-pressed", experience ? "false" : "true");
+      $("practice-experience").setAttribute("aria-pressed", experience ? "true" : "false");
+      $("daily-practice-options").classList.toggle("hidden", experience);
+      $("experience-practice-options").classList.toggle("hidden", !experience);
+      updateIdlePracticeCopy();
+      if (experience && !(experienceState.items || []).length) {
+        try { await loadExperiences(); }
+        catch (error) { setExperienceMessage(error.message || "专题列表加载失败。", true); }
+      }
+    }
+
+    async function startSelectedExperience() {
+      const id = experienceState.selectedId;
+      if (!Number.isInteger(id) || !experienceState.detail) return;
+      const scope = $("experience-scope").value;
+      const body = {};
+      if (scope !== "whole") {
+        const match = /^section:(\d+)$/.exec(scope);
+        const sectionId = match ? Number(match[1]) : 0;
+        if (!sectionId || !experienceState.detail.sections.some((section) => section.id === sectionId)) return;
+        body.section_id = sectionId;
+      }
+      $("btn-start-experience").disabled = true;
+      setExperienceMessage("正在创建专题会话…", false);
+      try {
+        const opened = await api("POST", "/api/experiences/" + id + "/start", body);
+        rememberSessionMode(opened.session_id, selectedMode);
+        showView("quiz");
+        await refresh();
+      } catch (error) {
+        setExperienceMessage(error.message || "无法开始面经模拟。", true);
+        showContextError("session", error.message || "无法开始面经模拟。", {returnFocus: $("btn-start-experience")});
+      } finally {
+        $("btn-start-experience").disabled = false;
+      }
     }
 
     function escapeHtml(value) {
@@ -3175,7 +3634,8 @@
       }
     }
     function answerMarkup(data) {
-      let html = data.answer
+      let html = data.pack_id && data.answer ? '<p class="answer-provenance">题包参考答案 · 已复核</p>' : "";
+      html += data.answer
         ? `<div class="answer-copy markdown-body">${data.answer_html || escapeHtml(data.answer)}</div>`
         : `<p class="help">这道题暂时没有题库答案。</p>`;
       const url = safeHttpUrl(data.url || "");
@@ -3184,13 +3644,14 @@
       }
       return html;
     }
-    function judgeResultMarkup(out) {
+    function judgeResultMarkup(out, question) {
       const meanings = { again: "需要重学", hard: "掌握不全", good: "基本掌握", easy: "掌握充分" };
       const meaning = meanings[out.grade] || "未知评级";
       let html = `<span class="badge">最终评级 · ${escapeHtml(out.grade)} · ${escapeHtml(meaning)}</span>` +
         `<section class="judge-feedback"><h3>学习反馈</h3><p class="judge-feedback-copy">${escapeHtml(out.comment || "")}</p></section>`;
       if (out.full_answer) {
-        const label = out.answer_source === "stored" ? "标准答案 · 题库" :
+        const label = out.answer_source === "stored" && question && question.pack_id ? "题包参考答案 · 已复核" :
+          out.answer_source === "stored" ? "标准答案 · 题库" :
           out.answer_source === "model" ? "模型参考答案" : "参考答案 · 历史记录";
         const answer = out.full_answer_html || `<p class="judge-feedback-copy">${escapeHtml(out.full_answer)}</p>`;
         html += `<details class="judge-answer"${out.grade === "easy" ? "" : " open"}>` +
@@ -3208,6 +3669,7 @@
       cancelSpeechInput();
       const q = payload.question;
       const out = payload.result;
+      const sessionQuestion = (session.items || []).find((item) => item.id === q.id) || q;
       lastVerdict = out;
       revealGeneration += 1;
       stopJudgeProgress();
@@ -3227,7 +3689,8 @@
           `<div style="margin-top:10px">${answerMarkup({
             answer: out.full_answer,
             answer_html: out.full_answer_html,
-            url: q.url || ""
+            url: q.url || "",
+            pack_id: sessionQuestion.pack_id
           })}</div>`;
         $("answer-flow").classList.add("hidden");
         $("memorize-flow").classList.remove("hidden");
@@ -3242,10 +3705,11 @@
             `<div style="margin-top:10px">${answerMarkup({
               answer: out.full_answer,
               answer_html: out.full_answer_html,
-              url: q.url || ""
+              url: q.url || "",
+              pack_id: sessionQuestion.pack_id
             })}</div>`;
         } else {
-          html = judgeResultMarkup(out);
+          html = judgeResultMarkup(out, sessionQuestion);
         }
         box.innerHTML = html;
         $("answer-flow").classList.remove("hidden");
@@ -3265,6 +3729,7 @@
     }
 
     async function revealCurrentQuestion(q) {
+      if (!q || q.question_type === "prepare") return;
       const generation = ++revealGeneration;
       const box = $("memorize-answer");
       box.textContent = "正在加载答案…";
@@ -3276,7 +3741,7 @@
         });
         const current = currentQuestion();
         if (generation !== revealGeneration || !current || current.id !== q.id) return;
-        box.innerHTML = answerMarkup(out);
+        box.innerHTML = answerMarkup(Object.assign({}, out, {pack_id: q.pack_id}));
         bindAnswerImageFallbacks(box);
         setReviewButtonsDisabled(false);
       } catch (e) {
@@ -3289,7 +3754,7 @@
     async function reviewCurrentQuestion(result) {
       if (speechInput) return;
       const q = currentQuestion();
-      if (!q) return;
+      if (!q || q.question_type === "prepare") return;
       const memorize = currentSessionMode() === "memorize";
       const active = prepareSubmission(session.session_id, q.id, "review");
       if (!active) return;
@@ -3312,7 +3777,7 @@
         const box = $("verdict");
         box.className = "verdict " + out.grade;
         box.innerHTML = `<span class="badge">已记录 · ${escapeHtml(out.grade)}</span>` +
-          (memorize ? "" : `<div style="margin-top:10px">${answerMarkup(out)}</div>`);
+          (memorize ? "" : `<div style="margin-top:10px">${answerMarkup(Object.assign({}, out, {pack_id: q.pack_id}))}</div>`);
         bindAnswerImageFallbacks(box);
         box.classList.remove("hidden");
         session.pending = session.pending.filter((item) => item.id !== q.id);
@@ -3465,6 +3930,7 @@
       $("q-err").classList.add("hidden");
       $("answer-flow").classList.remove("hidden");
       $("memorize-flow").classList.add("hidden");
+      $("prepare-flow").classList.add("hidden");
       $("memorize-answer").classList.remove("hidden");
       $("review-actions").classList.remove("hidden");
       $("btn-review-next").classList.add("hidden");
@@ -3474,11 +3940,13 @@
       $("btn-dont-know").classList.remove("hidden");
       $("btn-dont-know").disabled = false;
       $("btn-skip").disabled = false;
-      $("ans").disabled = false;
-      $("ans").value = loadDraft();
-      updateSpeechControls();
+      $("btn-prepare-complete").disabled = false;
+      $("btn-prepare-skip").disabled = false;
       const q = currentQuestion();
       if (!session.session_id || !q) {
+        $("ans").value = "";
+        $("ans").disabled = false;
+        updateSpeechControls();
         $("idle").classList.remove("hidden");
         $("quiz").classList.add("hidden");
         return;
@@ -3489,11 +3957,58 @@
       $("q-sid").textContent = session.session_id;
       $("q-title").textContent = (q.question.split("｜").pop() || q.question).trim();
       const done = session.items.length - session.pending.length;
+      const position = Number.isInteger(q.position) ? q.position : done + 1;
+      const context = session.session_type === "experience" && q.pack_name ? q.pack_name + " · " :
+        (q.question.includes("｜") ? q.question.split("｜")[0] + " · " : "");
+      if (q.question_type === "prepare") {
+        $("q-meta").textContent = `${context}#${q.id} · 第 ${position} / ${session.items.length} 题 · 准备题`;
+        $("answer-flow").classList.add("hidden");
+        $("memorize-flow").classList.add("hidden");
+        $("prepare-flow").classList.remove("hidden");
+        $("prepare-prompt").textContent = q.preparation_prompt || "";
+        $("ans").value = "";
+        $("ans").disabled = true;
+        updateSpeechControls();
+        return;
+      }
       const memorize = currentSessionMode() === "memorize";
-      $("q-meta").textContent = `${q.question.includes("｜") ? q.question.split("｜")[0] + " · " : ""}#${q.id} · 第 ${done + 1} / ${session.items.length} 题${memorize ? " · 背题模式" : ""}`;
+      $("q-meta").textContent = `${context}#${q.id} · 第 ${position} / ${session.items.length} 题${memorize ? " · 背题模式" : ""}`;
+      $("ans").disabled = false;
+      $("ans").value = loadDraft();
       $("answer-flow").classList.toggle("hidden", memorize);
       $("memorize-flow").classList.toggle("hidden", !memorize);
+      updateSpeechControls();
       if (memorize) revealCurrentQuestion(q);
+    }
+
+    async function completePrepareQuestion(completionType) {
+      const q = currentQuestion();
+      if (!q || q.question_type !== "prepare" || !["prepared", "skipped"].includes(completionType)) return;
+      $("btn-prepare-complete").disabled = true;
+      $("btn-prepare-skip").disabled = true;
+      $("btn-skip").disabled = true;
+      $("q-err").classList.add("hidden");
+      try {
+        const out = await api("POST", "/api/session/complete", {
+          session_id: session.session_id,
+          question_id: q.id,
+          completion_type: completionType
+        });
+        session.pending = session.pending.filter((item) => item.id !== q.id);
+        const stored = session.items.find((item) => item.id === q.id);
+        if (stored) stored.completion_type = completionType;
+        renderRoundProgress();
+        if (out.status === "closed") await advanceQuestion();
+        else renderQuiz();
+      } catch (error) {
+        showContextError("session", error.message, {returnFocus: $("btn-prepare-complete")});
+        $("q-err").textContent = error.message;
+        $("q-err").classList.remove("hidden");
+      } finally {
+        $("btn-prepare-complete").disabled = false;
+        $("btn-prepare-skip").disabled = false;
+        $("btn-skip").disabled = false;
+      }
     }
 
     async function refreshQuestionStats() {
@@ -3729,6 +4244,50 @@
       target.classList.remove("hidden");
     }
 
+    function renderPackRows() {
+      const box = $("pack-list");
+      const packs = packState.packs || [];
+      if (!packs.length) {
+        box.innerHTML = '<div class="empty-state">尚未安装面经题包。导入后可在这里管理日常复习开关。</div>';
+        return;
+      }
+      box.innerHTML = packs.map((pack) => `<article class="pack-item" data-pack-id="${escapeHtml(pack.pack_id)}">
+        <div><h3>${escapeHtml(pack.name)}</h3><div class="pack-meta">
+          <span>${escapeHtml(pack.display_version)}</span><span>revision ${pack.revision}</span>
+          <span>${pack.question_count} 道题</span><span>${pack.experience_count} 个专题</span>
+        </div></div>
+        <label class="pack-toggle"><input type="checkbox" data-pack-toggle="${escapeHtml(pack.pack_id)}"${pack.include_in_review ? " checked" : ""}>加入日常复习</label>
+      </article>`).join("");
+      box.querySelectorAll("[data-pack-toggle]").forEach((control) => {
+        control.addEventListener("change", () => setPackReviewEnabled(control.dataset.packToggle, control.checked, control));
+      });
+    }
+
+    async function loadPacks() {
+      const payload = await api("GET", "/api/packs");
+      if (!payload || !Array.isArray(payload.packs)) throw new Error("题包列表无效");
+      packState = payload;
+      renderPackRows();
+      return payload;
+    }
+
+    async function setPackReviewEnabled(packId, enabled, control) {
+      if (typeof packId !== "string" || !packId || typeof enabled !== "boolean") return;
+      if (control) control.disabled = true;
+      try {
+        const updated = await api("PUT", "/api/packs/" + encodeURIComponent(packId), {include_in_review: enabled});
+        const index = (packState.packs || []).findIndex((pack) => pack.pack_id === packId);
+        if (index >= 0) packState.packs[index] = updated;
+        renderPackRows();
+        await refreshQuestionStats();
+      } catch (error) {
+        if (control) control.checked = !enabled;
+        showContextError("file", error.message, {returnFocus: control || $("btn-pack-import")});
+      } finally {
+        if (control) control.disabled = false;
+      }
+    }
+
     function bindAnswerImageFallbacks(root) {
       root.querySelectorAll("img[data-answer-image]").forEach((img) => {
         const showFallback = () => {
@@ -3748,27 +4307,44 @@
         box.innerHTML = `<div class="empty-state">没有符合条件的题目。可以调整筛选，或新增、导入题目。</div>`;
       } else {
         box.innerHTML = questionState.items.map((item) => {
+          const packOwned = Boolean(item.pack_id);
+          const sources = packOwned && Array.isArray(item.sources) ? item.sources : [];
+          const sourceLinks = sources.map((source) => {
+            const sourceUrl = safeHttpUrl(source.url || "");
+            return sourceUrl ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer">${escapeHtml(source.path)}</a>` : escapeHtml(source.path);
+          }).join("、");
           const url = safeHttpUrl(item.url || "");
-          const urlHtml = url
+          const urlHtml = sourceLinks || (url
             ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">打开来源</a>`
-            : "无来源链接";
+            : "无来源链接");
+          const ownerHtml = packOwned ? `<div class="question-owner">
+            <span>题包：${escapeHtml(item.pack_name || item.pack_id)}</span>
+            <span>稳定 ID：<code>${escapeHtml(item.stable_question_id || "")}</code></span>
+            <span>${item.question_type === "prepare" ? "准备题" : "复习题"}</span>
+            <span>${item.retired ? "已退役" : "已复核"}</span>
+          </div>` : "";
+          const answerLabel = packOwned ? "题包参考答案 · 已复核" : "查看答案";
           const answerHtml = item.answer
-            ? `<details class="question-answer"><summary><span class="material-symbols-rounded" style="font-size:18px;">expand_more</span>查看答案</summary><div class="answer-text markdown-body">${item.answer_html || escapeHtml(item.answer)}</div></details>`
+            ? `<details class="question-answer"><summary><span class="material-symbols-rounded" style="font-size:18px;">expand_more</span>${answerLabel}</summary><div class="answer-text markdown-body">${item.answer_html || escapeHtml(item.answer)}</div></details>`
             : `<div class="question-answer"><span class="help">暂无答案正文</span></div>`;
           const due = item.next_due ? `下次 ${escapeHtml(item.next_due)}` : "尚未复习";
+          const operations = packOwned
+            ? '<div class="question-ops"><span class="question-readonly"><span class="material-symbols-rounded" style="font-size:16px;">lock</span>题包只读</span></div>'
+            : `<div class="question-ops">
+                <button type="button" data-act="edit"><span class="material-symbols-rounded" style="font-size:16px;">edit</span>修改</button>
+                <button type="button" class="danger" data-act="delete"><span class="material-symbols-rounded" style="font-size:16px;">delete</span>删除</button>
+              </div>`;
           return `<article class="question-item" data-id="${item.id}">
             <div>
               <div><span class="pill">${escapeHtml(item.category)}</span> <span class="qid">#${item.id}</span></div>
               <h3>${escapeHtml(item.question)}</h3>
+              ${ownerHtml}
               <div class="question-meta">
                 <span>等级 ${item.level}</span><span>已刷 ${item.times_seen} 次</span><span>答对 ${item.times_right} 次</span><span>${due}</span><span>${urlHtml}</span>
               </div>
               ${answerHtml}
             </div>
-            <div class="question-ops">
-              <button type="button" data-act="edit"><span class="material-symbols-rounded" style="font-size:16px;">edit</span>修改</button>
-              <button type="button" class="danger" data-act="delete"><span class="material-symbols-rounded" style="font-size:16px;">delete</span>删除</button>
-            </div>
+            ${operations}
           </article>`;
         }).join("");
       }
@@ -3845,7 +4421,7 @@
 
     function openQuestionEdit(id) {
       const item = questionState.items.find((q) => q.id === id);
-      if (!item) return;
+      if (!item || item.pack_id) return;
       editingQuestionId = id;
       $("question-edit-title").textContent = `修改题目 #${id}`;
       $("qe-category").value = item.category || "";
@@ -3858,8 +4434,15 @@
     }
 
     // 事件绑定与键盘快捷键
+    $("practice-daily").addEventListener("click", () => setPracticeMode("daily"));
+    $("practice-experience").addEventListener("click", () => setPracticeMode("experience"));
     $("mode-answer").addEventListener("click", () => setStudyMode("answer"));
     $("mode-memorize").addEventListener("click", () => setStudyMode("memorize"));
+    ["experience-direction", "experience-company", "experience-position"].forEach((id) => {
+      $(id).addEventListener("change", applyExperienceFilters);
+    });
+    $("experience-select").addEventListener("change", (event) => selectExperience(Number(event.target.value)));
+    $("btn-start-experience").addEventListener("click", startSelectedExperience);
     $("btn-draw").addEventListener("click", () => draw(5, $("practice-cat").value));
     
     $("btn-skip").addEventListener("click", async () => {
@@ -3884,6 +4467,8 @@
     });
     
     $("btn-review-next").addEventListener("click", advanceQuestion);
+    $("btn-prepare-complete").addEventListener("click", () => completePrepareQuestion("prepared"));
+    $("btn-prepare-skip").addEventListener("click", () => completePrepareQuestion("skipped"));
     $("app-dialog-primary").addEventListener("click", activateAppDialogPrimary);
     $("app-dialog-secondary").addEventListener("click", activateAppDialogSecondary);
     document.addEventListener("keydown", handleAppDialogKeydown);
@@ -3898,7 +4483,7 @@
       }
       const q = currentQuestion();
       const text = $("ans").value.trim();
-      if (!q || !text) return;
+      if (!q || q.question_type === "prepare" || !text) return;
       if (!saveDraft()) return;
       const active = prepareSubmission(session.session_id, q.id, "answer");
       if (!active) return;
@@ -3923,7 +4508,7 @@
         clearDraft(session.session_id, q.id);
         const box = $("verdict");
         box.className = "verdict " + out.grade;
-        box.innerHTML = judgeResultMarkup(out);
+        box.innerHTML = judgeResultMarkup(out, q);
         bindAnswerImageFallbacks(box);
         box.classList.remove("hidden");
         $("btn-dont-know").classList.add("hidden");
@@ -3971,7 +4556,7 @@
     // 全局快捷键：背题模式下的 1, 2, 3, 4 打分
     window.addEventListener("keydown", (e) => {
       if (document.activeElement && ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) return;
-      if (session.session_id && currentSessionMode() === "memorize" && !$("memorize-flow").classList.contains("hidden")) {
+      if (session.session_id && currentQuestion() && currentQuestion().question_type !== "prepare" && currentSessionMode() === "memorize" && !$("memorize-flow").classList.contains("hidden")) {
         const map = { "1": "again", "2": "hard", "3": "good", "4": "easy" };
         if (map[e.key]) {
           e.preventDefault();
@@ -4169,7 +4754,11 @@
       $("q-import-file").click();
     });
     window.addEventListener("bagu-native-result", handleNativeResult);
-    $("btn-nav-settings").addEventListener("click", () => showView("settings"));
+    $("btn-nav-settings").addEventListener("click", async () => {
+      showView("settings");
+      try { await loadPacks(); }
+      catch (error) { setPackMessage(error.message || "题包列表加载失败。", true); }
+    });
     $("btn-empty-transfer").addEventListener("click", () => { showView("settings"); chooseImportArchive(); });
     $("btn-question-export").addEventListener("click", () => nativeStore ? startNativeOperation("export-questions") : exportDesktopArchive("questions"));
     $("btn-backup-export").addEventListener("click", () => nativeStore ? startNativeOperation("export") : exportDesktopArchive("progress"));
@@ -4177,10 +4766,22 @@
     $("btn-backup-import").addEventListener("click", chooseImportArchive);
     $("backup-file").addEventListener("change", (event) => importDesktopArchive(event.target.files[0]));
     $("backup-file").addEventListener("cancel", () => setNativeMessage("已取消选择文件，原数据未改变。", false));
+    $("btn-pack-import").addEventListener("click", chooseInterviewPack);
+    $("btn-pack-confirm").addEventListener("click", confirmInterviewPackInstall);
+    $("btn-pack-cancel").addEventListener("click", cancelInterviewPackInstall);
+    $("pack-file").addEventListener("change", (event) => inspectDesktopInterviewPack(event.target.files[0]));
+    $("pack-file").addEventListener("cancel", () => {
+      clearInterviewPackPreview();
+      setPackMessage("已取消选择，题包未改变。", false);
+    });
     document.querySelectorAll("[data-mobile-view]").forEach((button) => {
       button.addEventListener("click", async () => {
         showView(button.dataset.mobileView);
         if (button.dataset.mobileView === "questions") await loadQuestions(1);
+        if (button.dataset.mobileView === "settings") {
+          try { await loadPacks(); }
+          catch (error) { setPackMessage(error.message || "题包列表加载失败。", true); }
+        }
       });
     });
     if (isAndroidApp) {
@@ -4217,6 +4818,7 @@
     // 初始化启动
     showView("quiz");
     setStudyMode(selectedMode);
+    setPracticeMode("daily");
     const initialCatsCollapsed = appStorage.getItem("bagu-cats-collapsed") === "true";
     setCatsCollapsed(initialCatsCollapsed);
     fetchModels().catch(() => {});

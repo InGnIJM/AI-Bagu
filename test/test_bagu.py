@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import base64
 import datetime as dt
+import hashlib
 import http.client
 import io
 import json
@@ -2540,7 +2541,7 @@ function $(id) { return nodes[id] || (nodes[id] = {
   addEventListener(event, handler) { handlers[id + ':' + event] = handler; }
 }); }
 const appStorage = {setItem(key, value) { storage.set(key, value); }};
-let selectedMode = 'answer';
+let selectedMode = 'answer', practiceMode = 'daily';
 async function api(method, path, body) {
   requests.push({method, path, body});
   return {session_id: 's_test', questions: []};
@@ -4380,13 +4381,21 @@ def judge_v1_db(tmp_path):
 
 def test_judge_v2_migration_preserves_history_and_progress(judge_v1_db):
     db = judge_v1_db
-    question = tuple(db.execute("SELECT * FROM questions").fetchone())
-    session = tuple(db.execute("SELECT * FROM sessions").fetchone())
+    question = tuple(db.execute(
+        "SELECT id,category,question,answer,url,level,times_seen,times_right,next_due,last_reviewed FROM questions"
+    ).fetchone())
+    session = tuple(db.execute(
+        "SELECT id,status,created_at,n,cat FROM sessions"
+    ).fetchone())
     bagu.init_db(db)
     bagu.init_db(db)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == 2
-    assert tuple(db.execute("SELECT * FROM questions").fetchone()) == question
-    assert tuple(db.execute("SELECT * FROM sessions").fetchone()) == session
+    assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert tuple(db.execute(
+        "SELECT id,category,question,answer,url,level,times_seen,times_right,next_due,last_reviewed FROM questions"
+    ).fetchone()) == question
+    assert tuple(db.execute(
+        "SELECT id,status,created_at,n,cat FROM sessions"
+    ).fetchone()) == session
     result = bagu.get_submission_payload(db, "sub_12345678-1234-4234-8234-123456789abc")["result"]
     assert result["answer_source"] is None
     assert result["comment"] == "历史点评" and result["full_answer"] == ""
@@ -4414,7 +4423,7 @@ def test_legacy_schema_advances_without_changing_question_progress(conn):
     conn.execute("PRAGMA user_version=0")
     bagu.init_db(conn)
     bagu.init_db(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     assert tuple(conn.execute("SELECT * FROM questions").fetchone()) == before
 
 
@@ -4432,7 +4441,7 @@ def test_schema_migration_rolls_back_all_ddl_on_failure(tmp_path):
         assert db.execute("SELECT name FROM sqlite_master").fetchall() == []
         assert not db.in_transaction
         bagu.init_db(db)
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
     finally:
         db.close()
 
@@ -4876,7 +4885,9 @@ def test_backup_round_trip_excludes_analysis(conn, tmp_path):
     }
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         exported_text = archive.read("questions.json").decode("utf-8")
-        assert set(archive.namelist()) == {"manifest.json", "questions.json"}
+        assert set(archive.namelist()) == {
+            "manifest.json", "questions.json", "packs.json", "experiences.json"
+        }
     assert "PRIVATE_ANALYSIS" not in exported_text
     assert "result_comment" not in exported_text
 
@@ -5176,3 +5187,2513 @@ HANDLER
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"totalShown": 410, "categoriesShown": ["QA"], "statsCalls": 1}
+
+
+def _create_v2_pack_migration_fixture(path):
+    db = sqlite3.connect(path)
+    db.executescript(
+        """
+        CREATE TABLE questions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            question TEXT NOT NULL,
+            answer TEXT DEFAULT '',
+            url TEXT DEFAULT '',
+            level INTEGER DEFAULT 0,
+            times_seen INTEGER DEFAULT 0,
+            times_right INTEGER DEFAULT 0,
+            next_due DATE,
+            last_reviewed DATE,
+            UNIQUE(category, question)
+        );
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL CHECK (status IN ('open','closed')),
+            created_at TEXT NOT NULL,
+            n INTEGER NOT NULL,
+            cat TEXT
+        );
+        CREATE TABLE session_items (
+            session_id TEXT NOT NULL,
+            question_id INTEGER NOT NULL,
+            grade TEXT,
+            graded_at TEXT,
+            submission_id TEXT,
+            result_comment TEXT,
+            result_full_answer TEXT,
+            result_answer_source TEXT,
+            PRIMARY KEY (session_id, question_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id),
+            FOREIGN KEY (question_id) REFERENCES questions(id)
+        );
+        CREATE UNIQUE INDEX uq_sessions_one_open ON sessions(status) WHERE status='open';
+        CREATE UNIQUE INDEX uq_session_items_submission ON session_items(submission_id)
+            WHERE submission_id IS NOT NULL;
+        INSERT INTO questions VALUES
+            (7,'数据库','旧事务题','旧答案','https://example.test/old',2,9,5,'2026-09-01','2026-08-28'),
+            (3,'系统设计','旧待答题','', '',0,0,0,NULL,NULL);
+        INSERT INTO sessions VALUES('s_hist','closed','2026-08-28T08:00:00',2,NULL);
+        INSERT INTO sessions VALUES('s_open','open','2026-08-29T08:00:00',1,'数据库');
+        INSERT INTO session_items VALUES(
+            's_hist',7,'easy','2026-08-28T08:05:00',
+            'sub_12345678-1234-4234-8234-123456789abc','历史点评','历史答案','stored'
+        );
+        INSERT INTO session_items(session_id,question_id) VALUES('s_hist',3);
+        PRAGMA user_version=2;
+        """
+    )
+    db.commit()
+    db.close()
+
+
+def _canonical_pack_json(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _pack_member_bytes(*, revision=1, mutate=None, manifest_overrides=None):
+    questions = [
+        {
+            "stable_id": "acme-review-1",
+            "question": "Explain a transaction.",
+            "category": "database",
+            "kind": "review",
+            "answer": "SECRET REVIEW ANSWER",
+            "review_status": "reviewed",
+            "retired": False,
+            "sources": [{"path": "interviews/acme.md", "url": "https://example.test/acme"}],
+        },
+        {
+            "stable_id": "acme-prepare-1",
+            "question": "Prepare an incident example.",
+            "category": "system-design",
+            "kind": "prepare",
+            "preparation_prompt": "SECRET PREPARATION PROMPT",
+            "review_status": "reviewed",
+            "retired": False,
+            "sources": [{"path": "interviews/acme.md", "url": "https://example.test/acme"}],
+        },
+    ]
+    experiences = [
+        {
+            "stable_id": "acme-backend-2026",
+            "kind": "interview",
+            "direction": "backend",
+            "company": "Acme",
+            "position": "engineer",
+            "stage": "technical",
+            "sections": [
+                {
+                    "stable_id": "acme-round-1",
+                    "order": 1,
+                    "title": "Round one",
+                    "recommended": True,
+                    "question_ids": ["acme-review-1", "acme-prepare-1"],
+                }
+            ],
+        }
+    ]
+    if mutate:
+        mutate(questions, experiences)
+    questions_raw = _canonical_pack_json(questions)
+    experiences_raw = _canonical_pack_json(experiences)
+    manifest = {
+        "format": "bagu-pack",
+        "schema_version": 1,
+        "pack_id": "interview-fixture",
+        "name": "Fixture interview pack",
+        "revision": revision,
+        "display_version": f"{revision}.0.0",
+        "source_snapshot_sha256": "1" * 64,
+        "question_count": len(questions),
+        "experience_count": len(experiences),
+        "questions_sha256": hashlib.sha256(questions_raw).hexdigest(),
+        "experiences_sha256": hashlib.sha256(experiences_raw).hexdigest(),
+    }
+    manifest.update(manifest_overrides or {})
+    return {
+        "manifest.json": _canonical_pack_json(manifest),
+        "questions.json": questions_raw,
+        "experiences.json": experiences_raw,
+    }
+
+
+def _zip_pack_members(entries, compression=zipfile.ZIP_DEFLATED):
+    output = io.BytesIO()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with zipfile.ZipFile(output, "w", compression=compression) as archive:
+            for name, raw in entries:
+                archive.writestr(name, raw)
+    return output.getvalue()
+
+
+def _pack_archive(*, revision=1, mutate=None, manifest_overrides=None, reverse=False):
+    members = _pack_member_bytes(
+        revision=revision, mutate=mutate, manifest_overrides=manifest_overrides
+    )
+    entries = list(members.items())
+    if reverse:
+        entries.reverse()
+    return _zip_pack_members(entries)
+
+
+def test_v3_migration_preserves_rows_history_and_adds_relationship_constraints(tmp_path):
+    database = tmp_path / "v2-to-v3.db"
+    _create_v2_pack_migration_fixture(database)
+    db = bagu.get_conn(database)
+    try:
+        bagu.init_db(db)
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        question = db.execute("SELECT * FROM questions WHERE id=7").fetchone()
+        assert tuple(question[key] for key in (
+            "category", "question", "answer", "url", "level", "times_seen",
+            "times_right", "next_due", "last_reviewed",
+        )) == (
+            "数据库", "旧事务题", "旧答案", "https://example.test/old", 2, 9, 5,
+            "2026-09-01", "2026-08-28",
+        )
+        assert tuple(question[key] for key in (
+            "pack_id", "stable_question_id", "question_type", "preparation_prompt",
+            "answer_review_status", "retired",
+        )) == (None, None, "review", "", "local", 0)
+        session = db.execute("SELECT * FROM sessions WHERE id='s_hist'").fetchone()
+        assert (session["session_type"], session["experience_id"], session["section_id"]) == (
+            "review", None, None,
+        )
+        items = db.execute(
+            "SELECT question_id,position,grade,completion_type,submission_id,result_comment,"
+            "result_full_answer,result_answer_source FROM session_items "
+            "WHERE session_id='s_hist' ORDER BY position"
+        ).fetchall()
+        assert [tuple(item) for item in items] == [
+            (3, 1, None, None, None, None, None, None),
+            (7, 2, "easy", "graded", "sub_12345678-1234-4234-8234-123456789abc",
+             "历史点评", "历史答案", "stored"),
+        ]
+        question_sql = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='questions'"
+        ).fetchone()[0]
+        assert "UNIQUE(category, question)" not in question_sql
+        indexes = {
+            row["name"]: row for row in db.execute("PRAGMA index_list('questions')")
+        }
+        assert indexes["uq_questions_local_identity"]["partial"] == 1
+        assert indexes["uq_questions_pack_identity"]["partial"] == 1
+        assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT INTO question_sources(question_id,position,source_path,source_url) "
+                "VALUES(999,1,'x.md','https://example.test/x')"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT INTO sessions(id,status,created_at,n) VALUES('s_other','open','2026-08-30',1)"
+            )
+        db.rollback()
+    finally:
+        db.close()
+
+
+def test_v3_migration_failure_rolls_back_all_schema_and_data(tmp_path):
+    database = tmp_path / "v3-rollback.db"
+    _create_v2_pack_migration_fixture(database)
+    db = bagu.get_conn(database)
+    before = list(db.iterdump())
+    db.set_authorizer(
+        lambda action, *args: sqlite3.SQLITE_DENY
+        if action == sqlite3.SQLITE_CREATE_TABLE and args[0] == "question_packs"
+        else sqlite3.SQLITE_OK
+    )
+    try:
+        with pytest.raises(sqlite3.DatabaseError):
+            bagu.init_db(db)
+    finally:
+        db.set_authorizer(None)
+    try:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert list(db.iterdump()) == before
+        assert not db.in_transaction
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("extra_name", ["extra.json", "questions.json", "../escape.json"])
+def test_pack_parser_rejects_extra_duplicate_and_traversal_members(extra_name):
+    members = _pack_member_bytes()
+    entries = list(members.items()) + [(extra_name, b"{}")]
+    with pytest.raises(bagu.PackValidationError):
+        bagu.parse_interview_pack(_zip_pack_members(entries))
+
+
+def test_pack_parser_rejects_duplicate_json_fields_and_noncanonical_json():
+    members = _pack_member_bytes()
+    manifest = members["manifest.json"]
+    members["manifest.json"] = manifest[:-1] + b',"format":"bagu-pack"}'
+    with pytest.raises(bagu.PackValidationError, match="JSON|canonical|duplicate"):
+        bagu.parse_interview_pack(_zip_pack_members(list(members.items())))
+
+
+def _invalid_manifest_pack(case):
+    if case == "boolean-schema":
+        return _pack_archive(manifest_overrides={"schema_version": True})
+    if case == "revision-overflow":
+        return _pack_archive(manifest_overrides={"revision": bagu.SQLITE_INTEGER_MAX + 1})
+    members = _pack_member_bytes()
+    if case == "overlong-integer":
+        members["manifest.json"] = members["manifest.json"].replace(
+            b'"revision":1', b'"revision":' + b"9" * 5000
+        )
+    elif case == "unpaired-surrogate":
+        members["manifest.json"] = members["manifest.json"].replace(
+            b'"name":"Fixture interview pack"', b'"name":"\\ud800"'
+        )
+    else:
+        raise AssertionError(case)
+    return _zip_pack_members(list(members.items()))
+
+
+@pytest.mark.parametrize(
+    "case", ["boolean-schema", "revision-overflow", "overlong-integer", "unpaired-surrogate"]
+)
+def test_pack_invalid_json_values_are_runtime_errors_and_http_400_without_writes(
+    conn, tmp_path, case
+):
+    archive = _invalid_manifest_pack(case)
+    with pytest.raises(bagu.PackValidationError):
+        bagu.parse_interview_pack(archive)
+    before = list(conn.iterdump())
+    body = {"archive_base64": base64.b64encode(archive).decode("ascii")}
+    for endpoint in ("inspect", "install"):
+        code, _, _ = bagu.handle_http(
+            "POST", f"/api/packs/{endpoint}", body, conn, tmp_path
+        )
+        assert code == 400
+        assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize(
+    "compression", [zipfile.ZIP_STORED, zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA]
+)
+def test_pack_parser_accepts_only_deflated_zip_members(compression):
+    try:
+        archive = _zip_pack_members(list(_pack_member_bytes().items()), compression=compression)
+    except RuntimeError as error:
+        pytest.skip(f"compression method unavailable: {error}")
+    with pytest.raises(bagu.PackValidationError, match="DEFLATED|compression"):
+        bagu.parse_interview_pack(archive)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "manifest_overrides", "message"),
+    [
+        (lambda q, e: q[0].update(stable_id="bad id"), None, "stable_id"),
+        (lambda q, e: q[0].update(question="x" * 2001), None, "question"),
+        (lambda q, e: q[0]["sources"][0].update(url="file:///private"), None, "URL"),
+        (lambda q, e: e[0]["sections"][0].update(question_ids=["missing"]), None, "unknown"),
+        (None, {"question_count": 99}, "question_count"),
+        (None, {"questions_sha256": "0" * 64}, "questions_sha256"),
+    ],
+)
+def test_pack_parser_rejects_invalid_payload_contracts(mutate, manifest_overrides, message):
+    archive = _pack_archive(mutate=mutate, manifest_overrides=manifest_overrides)
+    with pytest.raises(bagu.PackValidationError, match=message):
+        bagu.parse_interview_pack(archive)
+
+
+def test_pack_parser_enforces_compressed_and_uncompressed_size_limits(monkeypatch):
+    archive = _pack_archive()
+    monkeypatch.setattr(bagu, "PACK_MAX_COMPRESSED_BYTES", len(archive) - 1)
+    with pytest.raises(bagu.PackValidationError, match="compressed|压缩"):
+        bagu.parse_interview_pack(archive)
+    monkeypatch.setattr(bagu, "PACK_MAX_COMPRESSED_BYTES", len(archive))
+    monkeypatch.setattr(bagu, "PACK_MAX_UNCOMPRESSED_BYTES", 1)
+    with pytest.raises(bagu.PackValidationError, match="uncompressed|解压"):
+        bagu.parse_interview_pack(archive)
+
+
+def test_pack_source_path_length_matches_backup_compatibility_boundary(conn):
+    path_2048 = "p/" + ("x" * 2043) + ".md"
+    assert len(path_2048) == 2048
+    valid = _pack_archive(
+        mutate=lambda questions, experiences: questions[0]["sources"][0].update(
+            path=path_2048
+        )
+    )
+    bagu.install_interview_pack(conn, valid)
+    assert bagu.inspect_backup(bagu.export_backup(conn, app_version="test"))[
+        "pack_question_count"
+    ] == 2
+
+    path_2049 = "p/" + ("x" * 2044) + ".md"
+    assert len(path_2049) == 2049
+    invalid = _pack_archive(
+        revision=2,
+        mutate=lambda questions, experiences: questions[0]["sources"][0].update(
+            path=path_2049
+        ),
+    )
+    before = list(conn.iterdump())
+    with pytest.raises(bagu.PackValidationError, match="source path.*2048"):
+        bagu.install_interview_pack(conn, invalid)
+    assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("case", ["path", "url", "orphan-id"])
+def test_pack_validation_errors_do_not_echo_private_source_or_stable_ids(case):
+    sentinel = "private-pack-sentinel"
+
+    def inject_private_value(questions, experiences):
+        if case == "path":
+            questions[0]["sources"][0]["path"] = "../" + sentinel
+        elif case == "url":
+            questions[0]["sources"][0]["url"] = (
+                "file:///private/source?access_token=" + sentinel
+            )
+        else:
+            questions.append({
+                **questions[0],
+                "stable_id": sentinel,
+                "question": "Orphan private question",
+            })
+
+    archive = _pack_archive(mutate=inject_private_value)
+    with pytest.raises(bagu.PackValidationError) as error:
+        bagu.parse_interview_pack(archive)
+    assert sentinel.lower() not in str(error.value).lower()
+
+
+@pytest.mark.parametrize("case", ["private-path", "query-url", "very-long-path"])
+def test_pack_http_validation_mapper_is_bounded_and_redacted_for_inspect_and_install(
+    conn, tmp_path, case
+):
+    sentinel = "PRIVATE_QUERY_SENTINEL"
+
+    def inject_private_value(questions, experiences):
+        source = questions[0]["sources"][0]
+        if case == "private-path":
+            source["path"] = "../private/" + sentinel
+        elif case == "query-url":
+            source["url"] = "file:///private?access_token=" + sentinel
+        else:
+            source["path"] = "../" + sentinel + ("x" * 100_000)
+
+    archive = _pack_archive(mutate=inject_private_value)
+    body = {"archive_base64": base64.b64encode(archive).decode("ascii")}
+    before = list(conn.iterdump())
+    for endpoint in ("inspect", "install"):
+        code, payload, _ = bagu.handle_http(
+            "POST", f"/api/packs/{endpoint}", body, conn, tmp_path
+        )
+        serialized = json.dumps(payload, ensure_ascii=False)
+        assert code == 400
+        assert sentinel not in serialized
+        assert len(payload["error"]) <= 256
+        assert len(serialized) <= 512
+        assert list(conn.iterdump()) == before
+
+
+def test_pack_first_install_and_zip_metadata_idempotency(conn):
+    archive = _pack_archive()
+    result = bagu.install_interview_pack(conn, archive)
+    assert result["status"] == "installed"
+    pack = conn.execute("SELECT * FROM question_packs").fetchone()
+    assert (pack["pack_id"], pack["revision"], pack["include_in_review"]) == (
+        "interview-fixture", 1, 1,
+    )
+    questions = conn.execute(
+        "SELECT id,stable_question_id,question_type,answer,preparation_prompt,answer_review_status "
+        "FROM questions WHERE pack_id='interview-fixture' ORDER BY stable_question_id"
+    ).fetchall()
+    assert [(row["stable_question_id"], row["question_type"]) for row in questions] == [
+        ("acme-prepare-1", "prepare"), ("acme-review-1", "review")
+    ]
+    assert next(row for row in questions if row["question_type"] == "review")["answer"] == "SECRET REVIEW ANSWER"
+    assert next(row for row in questions if row["question_type"] == "prepare")["preparation_prompt"] == "SECRET PREPARATION PROMPT"
+    assert conn.execute("SELECT COUNT(*) FROM question_sources").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM experiences").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM experience_sections").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM experience_items").fetchone()[0] == 2
+    before = list(conn.iterdump())
+    result = bagu.install_interview_pack(conn, _pack_archive(reverse=True))
+    assert result["status"] == "unchanged"
+    assert list(conn.iterdump()) == before
+
+
+def _add_second_experience(questions, experiences):
+    questions.append({
+        "stable_id": "legacy-review",
+        "question": "Legacy topic question",
+        "category": "legacy-topic",
+        "kind": "review",
+        "answer": "Legacy answer",
+        "review_status": "reviewed",
+        "retired": False,
+        "sources": [{"path": "legacy/topic.md", "url": "https://example.test/legacy"}],
+    })
+    experiences.append({
+        "stable_id": "legacy-topic-set",
+        "kind": "topic_set",
+        "direction": "backend",
+        "company": "",
+        "position": "",
+        "stage": "",
+        "sections": [{
+            "stable_id": "legacy-section",
+            "order": 1,
+            "title": "Legacy",
+            "recommended": True,
+            "question_ids": ["legacy-review"],
+        }],
+    })
+
+
+def _upgrade_and_omit_old_content(questions, experiences):
+    review = questions[0]
+    review.update(
+        question="Explain ACID transaction properties.",
+        answer="Updated answer",
+        retired=True,
+        sources=[{"path": "interviews/new.md", "url": "https://example.test/new"}],
+    )
+    questions[:] = [review]
+    experiences[:] = [experiences[0]]
+    experiences[0]["sections"][0]["question_ids"] = ["acme-review-1"]
+
+
+def test_pack_upgrade_preserves_ids_progress_omissions_and_user_preference(conn):
+    bagu.install_interview_pack(conn, _pack_archive(mutate=_add_second_experience))
+    original = conn.execute(
+        "SELECT id FROM questions WHERE pack_id='interview-fixture' AND stable_question_id='acme-review-1'"
+    ).fetchone()[0]
+    omitted_question = conn.execute(
+        "SELECT id FROM questions WHERE pack_id='interview-fixture' AND stable_question_id='legacy-review'"
+    ).fetchone()[0]
+    omitted_experience = conn.execute(
+        "SELECT id FROM experiences WHERE pack_id='interview-fixture' AND stable_experience_id='legacy-topic-set'"
+    ).fetchone()[0]
+    section_id = conn.execute(
+        "SELECT id FROM experience_sections WHERE stable_section_id='acme-round-1'"
+    ).fetchone()[0]
+    conn.execute("UPDATE questions SET level=2,times_seen=5,times_right=4 WHERE id=?", (original,))
+    conn.commit()
+    bagu.set_pack_review_enabled(conn, "interview-fixture", False)
+
+    result = bagu.install_interview_pack(
+        conn, _pack_archive(revision=2, mutate=_upgrade_and_omit_old_content)
+    )
+
+    assert result["status"] == "upgraded"
+    updated = conn.execute("SELECT * FROM questions WHERE id=?", (original,)).fetchone()
+    assert (updated["question"], updated["answer"], updated["retired"]) == (
+        "Explain ACID transaction properties.", "Updated answer", 1,
+    )
+    assert (updated["level"], updated["times_seen"], updated["times_right"]) == (2, 5, 4)
+    assert conn.execute("SELECT source_path FROM question_sources WHERE question_id=?", (original,)).fetchone()[0] == "interviews/new.md"
+    assert conn.execute("SELECT retired FROM questions WHERE id=?", (omitted_question,)).fetchone()[0] == 0
+    assert conn.execute("SELECT id FROM experiences WHERE id=?", (omitted_experience,)).fetchone()[0] == omitted_experience
+    assert conn.execute("SELECT id FROM experience_sections WHERE stable_section_id='acme-round-1'").fetchone()[0] == section_id
+    assert conn.execute("SELECT include_in_review FROM question_packs").fetchone()[0] == 0
+
+
+def test_pack_rejects_lower_same_revision_conflict_and_question_type_change(conn):
+    bagu.install_interview_pack(conn, _pack_archive())
+    before = list(conn.iterdump())
+    with pytest.raises(bagu.PackConflictError, match="same revision|同 revision|冲突"):
+        bagu.install_interview_pack(
+            conn,
+            _pack_archive(mutate=lambda q, e: q[0].update(answer="different")),
+        )
+    assert list(conn.iterdump()) == before
+
+    bagu.install_interview_pack(conn, _pack_archive(revision=2))
+    before = list(conn.iterdump())
+    with pytest.raises(bagu.PackConflictError, match="lower|降级"):
+        bagu.install_interview_pack(conn, _pack_archive(revision=1))
+    assert list(conn.iterdump()) == before
+
+    def change_type(questions, experiences):
+        questions[0].pop("answer")
+        questions[0]["kind"] = "prepare"
+        questions[0]["preparation_prompt"] = "Changed type"
+
+    with pytest.raises(bagu.PackConflictError, match="type|类型"):
+        bagu.install_interview_pack(conn, _pack_archive(revision=3, mutate=change_type))
+    assert list(conn.iterdump()) == before
+
+
+def test_pack_rejects_orphaned_rows_with_the_same_pack_id(conn):
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute(
+        """INSERT INTO questions(
+               category,question,pack_id,stable_question_id,question_type,answer_review_status
+           ) VALUES('orphan','orphan','interview-fixture','acme-review-1','review','reviewed')"""
+    )
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=ON")
+    before = list(conn.iterdump())
+    with pytest.raises(bagu.PackConflictError, match="pack_id|orphan"):
+        bagu.install_interview_pack(conn, _pack_archive())
+    assert list(conn.iterdump()) == before
+    assert conn.execute("SELECT COUNT(*) FROM question_packs").fetchone()[0] == 0
+
+
+def test_pack_install_http_rejects_orphaned_experience_ownership_without_writes(conn, tmp_path):
+    conn.execute("PRAGMA foreign_keys=OFF")
+    local_question = conn.execute(
+        "INSERT INTO questions(category,question) VALUES('local','historical item')"
+    ).lastrowid
+    experience_id = conn.execute(
+        """INSERT INTO experiences(
+               pack_id,stable_experience_id,kind,direction,company,role,stage,position
+           ) VALUES('interview-fixture','acme-backend-2026','interview','old','Old Co','old','old',1)"""
+    ).lastrowid
+    section_id = conn.execute(
+        """INSERT INTO experience_sections(
+               experience_id,stable_section_id,title,recommended,position
+           ) VALUES(?, 'acme-round-1', 'Historical section', 1, 1)""",
+        (experience_id,),
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO experience_items(section_id,question_id,position) VALUES(?,?,1)",
+        (section_id, local_question),
+    )
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=ON")
+    before = list(conn.iterdump())
+    archive = _pack_archive()
+    code, _, _ = bagu.handle_http(
+        "POST", "/api/packs/install",
+        {"archive_base64": base64.b64encode(archive).decode("ascii")}, conn, tmp_path,
+    )
+    assert code == 409
+    assert list(conn.iterdump()) == before
+    assert conn.execute("SELECT COUNT(*) FROM question_packs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("case", ["downgrade", "same-revision-conflict", "question-type-change"])
+def test_pack_install_http_conflicts_are_409_and_leave_database_unchanged(conn, tmp_path, case):
+    initial = _pack_archive(revision=2 if case == "downgrade" else 1)
+    bagu.install_interview_pack(conn, initial)
+    if case == "downgrade":
+        candidate = _pack_archive(revision=1)
+    elif case == "same-revision-conflict":
+        candidate = _pack_archive(
+            mutate=lambda questions, experiences: questions[0].update(answer="conflict")
+        )
+    else:
+        def change_type(questions, experiences):
+            questions[0].pop("answer")
+            questions[0]["kind"] = "prepare"
+            questions[0]["preparation_prompt"] = "changed type"
+
+        candidate = _pack_archive(revision=2, mutate=change_type)
+    before = list(conn.iterdump())
+    code, _, _ = bagu.handle_http(
+        "POST", "/api/packs/install",
+        {"archive_base64": base64.b64encode(candidate).decode("ascii")}, conn, tmp_path,
+    )
+    assert code == 409
+    assert list(conn.iterdump()) == before
+
+
+def test_pack_upgrade_leaves_an_entirely_omitted_experience_unchanged(conn):
+    def add_leading_experience(questions, experiences):
+        original = list(experiences)
+        _add_second_experience(questions, experiences)
+        experiences[:] = [experiences[-1], *original]
+
+    bagu.install_interview_pack(conn, _pack_archive(mutate=add_leading_experience))
+    before = tuple(conn.execute(
+        "SELECT * FROM experiences WHERE stable_experience_id='legacy-topic-set'"
+    ).fetchone())
+
+    def omit_leading_experience(questions, experiences):
+        questions[:] = [q for q in questions if q["stable_id"] != "legacy-review"]
+        experiences[:] = [e for e in experiences if e["stable_id"] != "legacy-topic-set"]
+
+    bagu.install_interview_pack(
+        conn, _pack_archive(revision=2, mutate=omit_leading_experience)
+    )
+    after = tuple(conn.execute(
+        "SELECT * FROM experiences WHERE stable_experience_id='legacy-topic-set'"
+    ).fetchone())
+    assert after == before
+
+
+def test_pack_install_rolls_back_mid_transaction(conn):
+    conn.execute(
+        """CREATE TRIGGER reject_pack_source BEFORE INSERT ON question_sources
+           WHEN NEW.source_path='interviews/acme.md'
+           BEGIN SELECT RAISE(ABORT, 'blocked source'); END"""
+    )
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="blocked source"):
+        bagu.install_interview_pack(conn, _pack_archive())
+    assert conn.execute("SELECT COUNT(*) FROM question_packs").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM questions WHERE pack_id IS NOT NULL").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM experiences").fetchone()[0] == 0
+    assert not conn.in_transaction
+
+
+def test_pack_question_management_is_read_only_and_local_creation_stays_local(conn, tmp_path):
+    bagu.install_interview_pack(conn, _pack_archive())
+    pack_question = conn.execute(
+        "SELECT id FROM questions WHERE stable_question_id='acme-review-1'"
+    ).fetchone()[0]
+    with pytest.raises(bagu.PackQuestionReadOnlyError):
+        bagu.update_question(conn, pack_question, {"category": "x", "question": "x"})
+    with pytest.raises(bagu.PackQuestionReadOnlyError):
+        bagu.delete_question(conn, pack_question)
+    code, _, _ = bagu.handle_http(
+        "PUT", f"/api/questions/{pack_question}", {"category": "x", "question": "x"}, conn, tmp_path
+    )
+    assert code == 409
+    code, _, _ = bagu.handle_http("DELETE", f"/api/questions/{pack_question}", None, conn, tmp_path)
+    assert code == 409
+
+    created = bagu.create_question(conn, {
+        "category": "database", "question": "Explain a transaction.", "answer": "local"
+    })
+    csv_result = bagu.import_question_csv(
+        conn,
+        "category,question,answer,url\nsystem-design,Prepare an incident example.,local prompt,\n",
+    )
+    assert csv_result["inserted"] == 1
+    assert conn.execute("SELECT pack_id FROM questions WHERE id=?", (created["id"],)).fetchone()[0] is None
+    local_prepare = conn.execute(
+        "SELECT pack_id,question_type FROM questions WHERE question='Prepare an incident example.' AND pack_id IS NULL"
+    ).fetchone()
+    assert tuple(local_prepare) == (None, "review")
+    listed = bagu.list_questions(conn, page_size=100)["items"]
+    public_pack = next(item for item in listed if item["id"] == pack_question)
+    assert public_pack["pack_id"] == "interview-fixture"
+    assert public_pack["pack_name"] == "Fixture interview pack"
+    assert public_pack["stable_question_id"] == "acme-review-1"
+    assert public_pack["question_type"] == "review"
+    assert public_pack["answer_review_status"] == "reviewed"
+    assert public_pack["retired"] is False
+    assert public_pack["sources"] == [
+        {"path": "interviews/acme.md", "url": "https://example.test/acme"}
+    ]
+
+
+def test_legacy_import_and_format_paths_ignore_pack_questions_but_v3_backup_includes_them(
+    conn, monkeypatch
+):
+    bagu.install_interview_pack(conn, _pack_archive())
+    local = bagu.create_question(conn, {
+        "category": "database", "question": "Explain a transaction.",
+        "answer": "local old", "url": "https://local.test/old",
+    })
+    monkeypatch.setattr(bagu, "PAGES", {"database": "https://source.test/db"})
+    monkeypatch.setattr(
+        bagu, "fetch_questions",
+        lambda *args: [("database", "Explain a transaction.", "local imported", "https://source.test/new")],
+    )
+    bagu.import_all(conn)
+    assert conn.execute("SELECT answer FROM questions WHERE id=?", (local["id"],)).fetchone()[0] == "local imported"
+    assert conn.execute(
+        "SELECT answer FROM questions WHERE pack_id='interview-fixture' AND stable_question_id='acme-review-1'"
+    ).fetchone()[0] == "SECRET REVIEW ANSWER"
+
+    conn.execute("UPDATE questions SET answer='legacy format' WHERE id=?", (local["id"],))
+    conn.execute(
+        "UPDATE questions SET answer='pack legacy format' WHERE pack_id='interview-fixture' AND stable_question_id='acme-review-1'"
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        bagu, "fetch_format_references",
+        lambda *args: [("database", "Explain a transaction.", "legacy format", "formatted local")],
+    )
+    report = bagu.repair_answer_formats(conn)
+    assert report["questions"] == 1
+    assert conn.execute("SELECT answer FROM questions WHERE id=?", (local["id"],)).fetchone()[0] == "formatted local"
+    assert conn.execute(
+        "SELECT answer FROM questions WHERE pack_id='interview-fixture' AND stable_question_id='acme-review-1'"
+    ).fetchone()[0] == "pack legacy format"
+
+    exported = bagu.parse_backup(bagu.export_backup(conn, app_version="test"))
+    assert [(item.get("pack_id"), item["question"]) for item in exported] == [
+        (None, "Explain a transaction."),
+        ("interview-fixture", "Prepare an incident example."),
+        ("interview-fixture", "Explain a transaction."),
+    ]
+    restored = _portable_question(
+        category="database", question="Explain a transaction.", answer="restored local"
+    )
+    bagu.restore_backup(conn, _backup_archive([restored]))
+    assert conn.execute("SELECT answer FROM questions WHERE id=?", (local["id"],)).fetchone()[0] == "restored local"
+    assert conn.execute(
+        "SELECT answer FROM questions WHERE pack_id='interview-fixture' AND stable_question_id='acme-review-1'"
+    ).fetchone()[0] == "pack legacy format"
+
+
+def test_draw_and_stats_share_pack_review_eligibility_switch(conn):
+    bagu.install_interview_pack(conn, _pack_archive())
+    local = bagu.create_question(conn, {"category": "local", "question": "Local review"})
+    enabled = bagu.stats(conn)
+    assert enabled["total"] == 2
+    assert {row["category"] for row in enabled["by_cat"]} == {"database", "local"}
+
+    bagu.set_pack_review_enabled(conn, "interview-fixture", False)
+    disabled = bagu.stats(conn)
+    assert disabled["total"] == 1
+    assert [row["category"] for row in disabled["by_cat"]] == ["local"]
+    sid, rows = bagu.draw(conn, 10)
+    assert [row["id"] for row in rows] == [local["id"]]
+    bagu.skip_session(conn, sid)
+
+    bagu.set_pack_review_enabled(conn, "interview-fixture", True)
+    sid, rows = bagu.draw(conn, 10)
+    assert {row["question"] for row in rows} == {"Local review", "Explain a transaction."}
+    positions = conn.execute(
+        "SELECT position FROM session_items WHERE session_id=? ORDER BY position", (sid,)
+    ).fetchall()
+    assert [row[0] for row in positions] == [1, 2]
+
+
+def test_pack_http_inspect_install_list_preference_and_open_session_statuses(conn, tmp_path):
+    archive = _pack_archive()
+    encoded = base64.b64encode(archive).decode("ascii")
+    body = {"archive_base64": encoded}
+    code, preview, _ = bagu.handle_http("POST", "/api/packs/inspect", body, conn, tmp_path)
+    assert code == 200 and preview["status"] == "new" and preview["installed_revision"] is None
+    preview_text = json.dumps(preview, ensure_ascii=False)
+    assert "SECRET REVIEW ANSWER" not in preview_text
+    assert "SECRET PREPARATION PROMPT" not in preview_text
+
+    code, installed, _ = bagu.handle_http("POST", "/api/packs/install", body, conn, tmp_path)
+    assert code == 201 and installed["status"] == "installed"
+    code, unchanged, _ = bagu.handle_http("POST", "/api/packs/install", body, conn, tmp_path)
+    assert code == 200 and unchanged["status"] == "unchanged"
+    code, payload, _ = bagu.handle_http("GET", "/api/packs", None, conn, tmp_path)
+    assert code == 200 and payload["packs"][0]["pack_id"] == "interview-fixture"
+    code, updated, _ = bagu.handle_http(
+        "PUT", "/api/packs/interview-fixture", {"include_in_review": False}, conn, tmp_path
+    )
+    assert code == 200 and updated["include_in_review"] is False
+    assert bagu.handle_http(
+        "PUT", "/api/packs/interview-fixture", {"include_in_review": True, "extra": 1}, conn, tmp_path
+    )[0] == 400
+    assert bagu.handle_http(
+        "PUT", "/api/packs/missing", {"include_in_review": True}, conn, tmp_path
+    )[0] == 404
+
+    bagu.create_question(conn, {"category": "local", "question": "open"})
+    bagu.draw(conn, 1, "local")
+    assert bagu.handle_http("POST", "/api/packs/install", body, conn, tmp_path)[0] == 409
+
+
+def test_pack_http_rejects_invalid_body_and_canonical_base64(conn, tmp_path):
+    archive = _pack_archive()
+    encoded = base64.b64encode(archive).decode("ascii")
+    assert bagu.handle_http("POST", "/api/packs/inspect", {}, conn, tmp_path)[0] == 400
+    assert bagu.handle_http(
+        "POST", "/api/packs/inspect", {"archive_base64": encoded + "\n"}, conn, tmp_path
+    )[0] == 400
+    assert bagu.handle_http(
+        "POST", "/api/packs/install", {"archive_base64": encoded, "extra": True}, conn, tmp_path
+    )[0] == 400
+
+
+def _ordered_experience_archive(*, question_count=None):
+    def mutate(questions, experiences):
+        if question_count is not None:
+            questions[:] = []
+            stable_ids = []
+            for number in range(1, question_count + 1):
+                stable_id = f"ordered-{number:03d}"
+                stable_ids.append(stable_id)
+                questions.append({
+                    "stable_id": stable_id,
+                    "question": f"Ordered question {number}",
+                    "category": "ordered",
+                    "kind": "review",
+                    "answer": f"Answer {number}",
+                    "review_status": "reviewed",
+                    "retired": False,
+                    "sources": [{
+                        "path": "interviews/ordered.md",
+                        "url": "https://example.test/ordered",
+                    }],
+                })
+            experiences[0]["sections"] = [{
+                "stable_id": "ordered-all",
+                "order": 1,
+                "title": "All questions",
+                "recommended": True,
+                "question_ids": stable_ids,
+            }]
+            return
+        questions.extend([
+            {
+                "stable_id": "acme-review-2",
+                "question": "Explain isolation levels.",
+                "category": "database",
+                "kind": "review",
+                "answer": "Isolation answer",
+                "review_status": "reviewed",
+                "retired": False,
+                "sources": [{"path": "interviews/acme.md", "url": "https://example.test/acme"}],
+            },
+            {
+                "stable_id": "acme-retired",
+                "question": "Retired question.",
+                "category": "database",
+                "kind": "review",
+                "answer": "Retired answer",
+                "review_status": "reviewed",
+                "retired": True,
+                "sources": [{"path": "interviews/acme.md", "url": "https://example.test/acme"}],
+            },
+        ])
+        experiences[0]["sections"] = [
+            {
+                "stable_id": "acme-round-1",
+                "order": 1,
+                "title": "Round one",
+                "recommended": False,
+                "question_ids": ["acme-prepare-1", "acme-review-1"],
+            },
+            {
+                "stable_id": "acme-round-2",
+                "order": 2,
+                "title": "Round two",
+                "recommended": True,
+                "question_ids": ["acme-review-2", "acme-retired"],
+            },
+        ]
+
+    return _pack_archive(mutate=mutate)
+
+
+def _installed_experience_ids(conn, archive=None):
+    bagu.install_interview_pack(conn, archive or _pack_archive())
+    experience = conn.execute(
+        "SELECT id FROM experiences WHERE stable_experience_id='acme-backend-2026'"
+    ).fetchone()[0]
+    sections = {
+        row["stable_section_id"]: row["id"]
+        for row in conn.execute(
+            "SELECT id,stable_section_id FROM experience_sections WHERE experience_id=?",
+            (experience,),
+        )
+    }
+    questions = {
+        row["stable_question_id"]: row["id"]
+        for row in conn.execute(
+            "SELECT id,stable_question_id FROM questions WHERE pack_id='interview-fixture'"
+        )
+    }
+    return experience, sections, questions
+
+
+def test_experience_http_list_and_detail_include_recommended_active_counts(conn, tmp_path):
+    experience_id, sections, _ = _installed_experience_ids(
+        conn, _ordered_experience_archive()
+    )
+
+    code, listed, _ = bagu.handle_http("GET", "/api/experiences", None, conn, tmp_path)
+    assert code == 200
+    assert len(listed["experiences"]) == 1
+    summary = listed["experiences"][0]
+    assert summary == {
+        "id": experience_id,
+        "stable_experience_id": "acme-backend-2026",
+        "pack_id": "interview-fixture",
+        "pack_name": "Fixture interview pack",
+        "kind": "interview",
+        "direction": "backend",
+        "company": "Acme",
+        "position": "engineer",
+        "stage": "technical",
+        "section_count": 2,
+        "question_count": 3,
+        "recommended_section_id": sections["acme-round-2"],
+    }
+
+    code, detail, _ = bagu.handle_http(
+        "GET", f"/api/experiences/{experience_id}", None, conn, tmp_path
+    )
+    assert code == 200
+    assert detail["experience"] == summary
+    assert detail["sections"] == [
+        {
+            "id": sections["acme-round-1"],
+            "stable_section_id": "acme-round-1",
+            "position": 1,
+            "title": "Round one",
+            "recommended": False,
+            "question_count": 2,
+        },
+        {
+            "id": sections["acme-round-2"],
+            "stable_section_id": "acme-round-2",
+            "position": 2,
+            "title": "Round two",
+            "recommended": True,
+            "question_count": 1,
+        },
+    ]
+    assert bagu.handle_http("GET", "/api/experiences/999999", None, conn, tmp_path)[0] == 404
+
+
+def test_experience_start_whole_and_section_freeze_active_pack_order(conn, tmp_path):
+    experience_id, sections, questions = _installed_experience_ids(
+        conn, _ordered_experience_archive()
+    )
+    bagu.set_pack_review_enabled(conn, "interview-fixture", False)
+
+    code, started, _ = bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start", {}, conn, tmp_path
+    )
+    assert code == 200
+    assert started["session_type"] == "experience"
+    assert [item["stable_question_id"] for item in started["questions"]] == [
+        "acme-prepare-1", "acme-review-1", "acme-review-2",
+    ]
+    assert [item["position"] for item in started["questions"]] == [1, 2, 3]
+    assert "preparation_prompt" in started["questions"][0]
+    assert all(
+        "preparation_prompt" not in item for item in started["questions"][1:]
+    )
+    assert [row[0] for row in conn.execute(
+        "SELECT question_id FROM session_items WHERE session_id=? ORDER BY position",
+        (started["session_id"],),
+    )] == [
+        questions["acme-prepare-1"],
+        questions["acme-review-1"],
+        questions["acme-review-2"],
+    ]
+    bagu.skip_session(conn, started["session_id"])
+
+    code, section_started, _ = bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start",
+        {"section_id": sections["acme-round-2"]}, conn, tmp_path,
+    )
+    assert code == 200
+    assert [item["stable_question_id"] for item in section_started["questions"]] == [
+        "acme-review-2"
+    ]
+    assert section_started["section"]["id"] == sections["acme-round-2"]
+
+    bagu.skip_session(conn, section_started["session_id"])
+    before = list(conn.iterdump())
+    assert bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start", {"section_id": "bad"}, conn, tmp_path
+    )[0] == 400
+    assert bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start", {"section_id": 999999}, conn, tmp_path
+    )[0] == 404
+    assert bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start", {"extra": True}, conn, tmp_path
+    )[0] == 400
+    assert list(conn.iterdump()) == before
+
+
+def test_experience_123_item_order_and_open_session_survive_reconnect(tmp_path):
+    database = tmp_path / "experience-resume.db"
+    conn = bagu.get_conn(database)
+    bagu.init_db(conn)
+    experience_id, _, _ = _installed_experience_ids(
+        conn, _ordered_experience_archive(question_count=123)
+    )
+    code, started, _ = bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start", {}, conn, tmp_path
+    )
+    assert code == 200
+    assert len(started["questions"]) == 123
+    assert [item["position"] for item in started["questions"]] == list(range(1, 124))
+    session_id = started["session_id"]
+    conn.close()
+
+    reopened = bagu.get_conn(database)
+    try:
+        bagu.init_db(reopened)
+        code, payload, _ = bagu.handle_http("GET", "/api/session", None, reopened, tmp_path)
+        assert code == 200
+        assert payload["session_id"] == session_id
+        assert payload["session_type"] == "experience"
+        assert [item["stable_question_id"] for item in payload["items"]] == [
+            f"ordered-{number:03d}" for number in range(1, 124)
+        ]
+        assert [item["position"] for item in payload["pending"]] == list(range(1, 124))
+    finally:
+        reopened.close()
+
+
+def test_review_in_experience_grades_once_replays_submission_and_mixed_completion_closes(conn, tmp_path):
+    experience_id, _, questions = _installed_experience_ids(conn)
+    _, started, _ = bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start", {}, conn, tmp_path
+    )
+    session_id = started["session_id"]
+    review_id = questions["acme-review-1"]
+    prepare_id = questions["acme-prepare-1"]
+    submission_id = "sub_12345678-1234-4123-8123-123456789abc"
+
+    first = bagu.review_question(conn, session_id, review_id, "good", submission_id)
+    scheduled = tuple(conn.execute(
+        "SELECT level,times_seen,times_right,next_due,last_reviewed FROM questions WHERE id=?",
+        (review_id,),
+    ).fetchone())
+    replay = bagu.review_question(conn, session_id, review_id, "good", submission_id)
+    assert replay == first
+    assert tuple(conn.execute(
+        "SELECT level,times_seen,times_right,next_due,last_reviewed FROM questions WHERE id=?",
+        (review_id,),
+    ).fetchone()) == scheduled
+    assert conn.execute(
+        "SELECT completion_type FROM session_items WHERE session_id=? AND question_id=?",
+        (session_id, review_id),
+    ).fetchone()[0] == "graded"
+    assert conn.execute("SELECT status FROM sessions WHERE id=?", (session_id,)).fetchone()[0] == "open"
+
+    code, completed, _ = bagu.handle_http(
+        "POST", "/api/session/complete",
+        {"session_id": session_id, "question_id": prepare_id, "completion_type": "prepared"},
+        conn, tmp_path,
+    )
+    assert code == 200
+    assert completed == {
+        "session_id": session_id,
+        "question_id": prepare_id,
+        "completion_type": "prepared",
+        "replayed": False,
+        "status": "closed",
+    }
+
+
+def _render_recovered_submission_provenance(payload):
+    html = (Path(__file__).parents[1] / "web" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    helpers = html[
+        html.index("    function escapeHtml"):
+        html.index("    async function revealCurrentQuestion")
+    ]
+    script = r'''
+const nodes = {};
+function makeClassList() {
+  const values = new Set();
+  return {
+    add(value) { values.add(value); },
+    remove(value) { values.delete(value); },
+    contains(value) { return values.has(value); }
+  };
+}
+function $(id) {
+  return nodes[id] || (nodes[id] = {
+    innerHTML: '', textContent: '', value: '', disabled: false, className: '', dataset: {},
+    classList: makeClassList()
+  });
+}
+globalThis.document = {querySelectorAll() { return []; }};
+let session = {session_id: null, items: [], pending: []};
+let lastVerdict = null, revealGeneration = 0;
+function cancelSpeechInput() {} function stopJudgeProgress() {}
+function bindAnswerImageFallbacks() {} function updateSpeechControls() {}
+function currentSessionMode() { return 'answer'; }
+const payload = ''' + json.dumps(payload, ensure_ascii=False) + ";\n" + helpers + r'''
+function render(candidate) {
+  renderRecoveredSubmission(candidate, {flow: 'answer'});
+  return $('verdict').innerHTML;
+}
+const pack = render(payload);
+const local = render({...payload, question: {...payload.question, pack_id: null}});
+const model = render({...payload, result: {...payload.result, answer_source: 'model'}});
+const history = render({...payload, result: {...payload.result, answer_source: null}});
+process.stdout.write(JSON.stringify({pack, local, model, history}));
+'''
+    completed = subprocess.run(
+        ["node", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
+
+
+@pytest.mark.parametrize("close_mode", ["complete", "skip"])
+def test_pack_submission_recovery_after_closed_experience_exposes_only_pack_identity(
+    conn, tmp_path, close_mode
+):
+    archive = _pack_archive()
+    code, _, _ = bagu.handle_http(
+        "POST",
+        "/api/packs/install",
+        {"archive_base64": base64.b64encode(archive).decode("ascii")},
+        conn,
+        tmp_path,
+    )
+    assert code == 201
+    code, listed, _ = bagu.handle_http("GET", "/api/experiences", None, conn, tmp_path)
+    assert code == 200
+    experience_id = listed["experiences"][0]["id"]
+    code, started, _ = bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start", {}, conn, tmp_path
+    )
+    assert code == 200
+    review = next(item for item in started["questions"] if item["question_type"] == "review")
+    prepare = next(item for item in started["questions"] if item["question_type"] == "prepare")
+    submission_id = "sub_12345678-1234-4234-8234-123456789abc"
+    code, _, _ = bagu.handle_http(
+        "POST",
+        "/api/review",
+        {
+            "session_id": started["session_id"],
+            "question_id": review["id"],
+            "result": "good",
+            "submission_id": submission_id,
+        },
+        conn,
+        tmp_path,
+    )
+    assert code == 200
+    if close_mode == "complete":
+        code, closed, _ = bagu.handle_http(
+            "POST",
+            "/api/session/complete",
+            {
+                "session_id": started["session_id"],
+                "question_id": prepare["id"],
+                "completion_type": "prepared",
+            },
+            conn,
+            tmp_path,
+        )
+    else:
+        code, closed, _ = bagu.handle_http(
+            "POST", "/api/skip", {"session_id": started["session_id"]}, conn, tmp_path
+        )
+    assert code == 200 and closed["status"] == "closed"
+    assert bagu.get_open_session(conn) is None
+
+    # Recovery must use the saved result snapshot and provenance, not expose the
+    # pack's current answer, preparation prompt, sources, or management metadata.
+    conn.execute(
+        "UPDATE questions SET answer='LATEST PACK ANSWER MUST NOT LEAK' WHERE id=?",
+        (review["id"],),
+    )
+    conn.commit()
+    code, recovered, _ = bagu.handle_http(
+        "GET", f"/api/submissions/{submission_id}", None, conn, tmp_path
+    )
+
+    assert code == 200
+    provenance = _render_recovered_submission_provenance(recovered)
+    assert "题包参考答案 · 已复核" in provenance["pack"]
+    assert "标准答案 · 题库" in provenance["local"]
+    assert "模型参考答案" in provenance["model"]
+    assert "参考答案 · 历史记录" in provenance["history"]
+    assert recovered["question"] == {
+        "id": review["id"],
+        "category": "database",
+        "question": "Explain a transaction.",
+        "url": "https://example.test/acme",
+        "times_seen": 1,
+        "grade": "good",
+        "pack_id": "interview-fixture",
+    }
+    assert recovered["result"]["full_answer"] == "SECRET REVIEW ANSWER"
+    serialized = json.dumps(recovered, ensure_ascii=False)
+    assert "LATEST PACK ANSWER MUST NOT LEAK" not in serialized
+    assert "SECRET PREPARATION PROMPT" not in serialized
+
+
+def test_prepare_completion_replays_same_value_after_close_and_rejects_conflict(conn, tmp_path):
+    experience_id, sections, questions = _installed_experience_ids(conn)
+    _, started, _ = bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start",
+        {"section_id": sections["acme-round-1"]}, conn, tmp_path,
+    )
+    session_id = started["session_id"]
+    prepare_id = questions["acme-prepare-1"]
+    review_id = questions["acme-review-1"]
+    bagu.grade(conn, session_id, review_id, "easy")
+    before_schedule = tuple(conn.execute(
+        "SELECT level,times_seen,times_right,next_due,last_reviewed FROM questions WHERE id=?",
+        (prepare_id,),
+    ).fetchone())
+    body = {"session_id": session_id, "question_id": prepare_id, "completion_type": "skipped"}
+
+    first = bagu.handle_http("POST", "/api/session/complete", body, conn, tmp_path)
+    replay = bagu.handle_http("POST", "/api/session/complete", body, conn, tmp_path)
+    conflict = bagu.handle_http(
+        "POST", "/api/session/complete", {**body, "completion_type": "prepared"}, conn, tmp_path
+    )
+    assert first[0] == replay[0] == 200
+    assert first[1]["replayed"] is False and replay[1]["replayed"] is True
+    assert first[1]["status"] == replay[1]["status"] == "closed"
+    assert conflict[0] == 400
+    assert tuple(conn.execute(
+        "SELECT level,times_seen,times_right,next_due,last_reviewed FROM questions WHERE id=?",
+        (prepare_id,),
+    ).fetchone()) == before_schedule
+    item = conn.execute(
+        "SELECT completion_type,grade,graded_at,submission_id FROM session_items "
+        "WHERE session_id=? AND question_id=?", (session_id, prepare_id),
+    ).fetchone()
+    assert tuple(item) == ("skipped", None, None, None)
+
+
+def test_prepare_is_rejected_before_all_scoring_paths_and_model_calls(conn):
+    experience_id, _, questions = _installed_experience_ids(conn)
+    session_id, _ = bagu.start_experience(conn, experience_id)
+    prepare_id = questions["acme-prepare-1"]
+    calls = []
+
+    def fail_chat(*args):
+        calls.append(args)
+        raise AssertionError("prepare question reached model")
+
+    operations = [
+        lambda: bagu.grade(conn, session_id, prepare_id, "good"),
+        lambda: bagu.reveal_answer(conn, session_id, prepare_id),
+        lambda: bagu.review_question(conn, session_id, prepare_id, "good"),
+        lambda: bagu.judge_answer(conn, session_id, prepare_id, "answer", chat_fn=fail_chat),
+        lambda: list(bagu.stream_answer_events(conn, {
+            "session_id": session_id, "question_id": prepare_id, "text": "answer"
+        }, stream_fn=fail_chat)),
+    ]
+    for operation in operations:
+        with pytest.raises(bagu.GradeRejected, match="prepare|准备"):
+            operation()
+    assert calls == []
+    item = conn.execute(
+        "SELECT completion_type,grade FROM session_items WHERE session_id=? AND question_id=?",
+        (session_id, prepare_id),
+    ).fetchone()
+    assert tuple(item) == (None, None)
+
+
+def test_daily_and_experience_sessions_share_ordered_global_open_lock(conn, tmp_path):
+    experience_id, _, questions = _installed_experience_ids(conn)
+    local = bagu.create_question(conn, {"category": "local", "question": "Daily question"})
+    daily_session, _ = bagu.draw(conn, 1, "local")
+
+    code, blocked, _ = bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start", {}, conn, tmp_path
+    )
+    assert code == 409
+    assert blocked["session_id"] == daily_session
+    assert blocked["pending_ids"] == [local["id"]]
+    bagu.skip_session(conn, daily_session)
+
+    experience_session, _ = bagu.start_experience(conn, experience_id)
+    code, blocked, _ = bagu.handle_http("POST", "/api/draw", {"n": 1}, conn, tmp_path)
+    assert code == 409
+    assert blocked["session_id"] == experience_session
+    assert blocked["pending_ids"] == [
+        questions["acme-review-1"], questions["acme-prepare-1"]
+    ]
+
+
+def test_experience_skip_closes_without_changing_item_or_schedule_snapshots(conn):
+    experience_id, _, _ = _installed_experience_ids(conn)
+    session_id, _ = bagu.start_experience(conn, experience_id)
+    questions_before = [tuple(row) for row in conn.execute(
+        "SELECT id,level,times_seen,times_right,next_due,last_reviewed FROM questions ORDER BY id"
+    )]
+    items_before = [tuple(row) for row in conn.execute(
+        "SELECT question_id,grade,graded_at,submission_id,completion_type FROM session_items "
+        "WHERE session_id=? ORDER BY position", (session_id,),
+    )]
+
+    assert bagu.skip_session(conn, session_id) == session_id
+
+    assert [tuple(row) for row in conn.execute(
+        "SELECT id,level,times_seen,times_right,next_due,last_reviewed FROM questions ORDER BY id"
+    )] == questions_before
+    assert [tuple(row) for row in conn.execute(
+        "SELECT question_id,grade,graded_at,submission_id,completion_type FROM session_items "
+        "WHERE session_id=? ORDER BY position", (session_id,),
+    )] == items_before
+
+
+@pytest.mark.parametrize("completion", [None, "graded", "easy", "", 1, [], "prepared"])
+def test_prepare_complete_http_rejects_invalid_or_review_targets_without_writes(
+    conn, tmp_path, completion
+):
+    experience_id, _, questions = _installed_experience_ids(conn)
+    session_id, _ = bagu.start_experience(conn, experience_id)
+    body = {
+        "session_id": session_id,
+        "question_id": questions["acme-review-1"],
+        "completion_type": completion,
+    }
+    before = list(conn.iterdump())
+    code, _, _ = bagu.handle_http("POST", "/api/session/complete", body, conn, tmp_path)
+    assert code == 400
+    assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("body", [[], {"section_id": None}])
+def test_experience_start_requires_exact_object_and_integer_section_without_writes(
+    conn, tmp_path, body
+):
+    experience_id, _, _ = _installed_experience_ids(conn)
+    before = list(conn.iterdump())
+    code, _, _ = bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start", body, conn, tmp_path
+    )
+    assert code == 400
+    assert list(conn.iterdump()) == before
+
+
+def test_closed_prepare_only_session_still_rejects_direct_grade_as_prepare(conn, tmp_path):
+    def prepare_only(questions, experiences):
+        questions[:] = [
+            question for question in questions
+            if question["stable_id"] == "acme-prepare-1"
+        ]
+        experiences[0]["sections"][0]["question_ids"] = ["acme-prepare-1"]
+
+    experience_id, _, questions = _installed_experience_ids(
+        conn, _pack_archive(mutate=prepare_only)
+    )
+    session_id, _ = bagu.start_experience(conn, experience_id)
+    result = bagu.complete_prepare_question(
+        conn, session_id, questions["acme-prepare-1"], "prepared"
+    )
+    assert result["status"] == "closed"
+    with pytest.raises(bagu.GradeRejected, match="prepare|准备"):
+        bagu.grade(conn, session_id, questions["acme-prepare-1"], "easy")
+
+
+def test_partial_prepare_completion_removes_only_that_position_from_all_pending_views(
+    conn, tmp_path
+):
+    experience_id, _, questions = _installed_experience_ids(conn)
+    session_id, _ = bagu.start_experience(conn, experience_id)
+    bagu.complete_prepare_question(
+        conn, session_id, questions["acme-prepare-1"], "skipped"
+    )
+
+    payload = bagu._session_payload(conn)
+    assert [item["position"] for item in payload["items"]] == [1, 2]
+    assert [item["position"] for item in payload["pending"]] == [1]
+    assert payload["items"][1]["completion_type"] == "skipped"
+    code, blocked, _ = bagu.handle_http("POST", "/api/draw", {"n": 1}, conn, tmp_path)
+    assert code == 409
+    assert blocked["pending_ids"] == [questions["acme-review-1"]]
+
+
+def test_anomalous_cached_prepare_submission_is_rejected_by_every_grading_replay_path(conn):
+    experience_id, _, questions = _installed_experience_ids(conn)
+    session_id, _ = bagu.start_experience(conn, experience_id)
+    prepare_id = questions["acme-prepare-1"]
+    submission_id = "sub_87654321-4321-4321-8321-cba987654321"
+    conn.execute(
+        """UPDATE session_items
+           SET grade='good',graded_at='2026-08-30',submission_id=?,
+               result_comment='anomalous',result_full_answer='must not replay',
+               result_answer_source='model',completion_type='graded'
+           WHERE session_id=? AND question_id=?""",
+        (submission_id, session_id, prepare_id),
+    )
+    conn.commit()
+    model_calls = []
+
+    def fail_model(*args):
+        model_calls.append(args)
+        raise AssertionError("anomalous prepare replay reached model")
+
+    operations = [
+        lambda: bagu._preflight_grade(conn, session_id, prepare_id, submission_id),
+        lambda: bagu._record_grade(
+            conn, session_id, prepare_id, "good",
+            submission_id=submission_id, allow_replay=True,
+        ),
+        lambda: bagu.review_question(
+            conn, session_id, prepare_id, "good", submission_id
+        ),
+        lambda: bagu.judge_answer(
+            conn, session_id, prepare_id, "answer",
+            chat_fn=fail_model, submission_id=submission_id,
+        ),
+        lambda: list(bagu.stream_answer_events(
+            conn,
+            {
+                "session_id": session_id,
+                "question_id": prepare_id,
+                "text": "answer",
+                "submission_id": submission_id,
+            },
+            stream_fn=fail_model,
+        )),
+    ]
+    before = list(conn.iterdump())
+    for operation in operations:
+        with pytest.raises(bagu.GradeRejected, match="prepare|准备"):
+            operation()
+        assert list(conn.iterdump()) == before
+    assert model_calls == []
+
+
+def test_experience_and_question_core_ids_require_bounded_exact_integers(conn):
+    experience_id, sections, questions = _installed_experience_ids(conn)
+    session_id, _ = bagu.start_experience(conn, experience_id)
+    huge = bagu.SQLITE_INTEGER_MAX + 1
+    invalid_calls = [
+        lambda: bagu.get_experience_detail(conn, huge),
+        lambda: bagu.get_experience_detail(conn, True),
+        lambda: bagu.start_experience(conn, [], None),
+        lambda: bagu.start_experience(conn, experience_id, huge),
+        lambda: bagu.start_experience(conn, experience_id, False),
+        lambda: bagu.complete_prepare_question(conn, session_id, huge, "prepared"),
+        lambda: bagu.complete_prepare_question(conn, session_id, True, "prepared"),
+        lambda: bagu.complete_prepare_question(conn, session_id, [], "prepared"),
+        lambda: bagu._preflight_grade(conn, session_id, huge),
+        lambda: bagu.reveal_answer(conn, session_id, huge),
+        lambda: bagu.update_question(conn, huge, {}),
+        lambda: bagu.delete_question(conn, huge),
+        lambda: bagu._judge_context(conn, session_id, huge, "answer", require_model=False),
+        lambda: list(bagu.stream_answer_events(conn, {
+            "session_id": session_id, "question_id": [], "text": "answer"
+        }, stream_fn=lambda *_: ())),
+    ]
+    before = list(conn.iterdump())
+    for call in invalid_calls:
+        with pytest.raises(ValueError, match="整数|范围|id"):
+            call()
+        assert list(conn.iterdump()) == before
+    assert sections["acme-round-1"] > 0 and questions["acme-review-1"] > 0
+
+
+@pytest.mark.parametrize("section_id", [True, [], bagu.SQLITE_INTEGER_MAX + 1])
+def test_experience_start_http_rejects_bool_unhashable_and_huge_section_ids_without_writes(
+    conn, tmp_path, section_id
+):
+    experience_id, _, _ = _installed_experience_ids(conn)
+    before = list(conn.iterdump())
+    code, _, _ = bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start",
+        {"section_id": section_id}, conn, tmp_path,
+    )
+    assert code == 400
+    assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("question_id", [True, [], bagu.SQLITE_INTEGER_MAX + 1])
+def test_prepare_complete_http_rejects_bool_unhashable_and_huge_question_ids_without_writes(
+    conn, tmp_path, question_id
+):
+    experience_id, _, _ = _installed_experience_ids(conn)
+    session_id, _ = bagu.start_experience(conn, experience_id)
+    before = list(conn.iterdump())
+    code, _, _ = bagu.handle_http(
+        "POST", "/api/session/complete",
+        {
+            "session_id": session_id,
+            "question_id": question_id,
+            "completion_type": "prepared",
+        },
+        conn, tmp_path,
+    )
+    assert code == 400
+    assert list(conn.iterdump()) == before
+
+
+def test_huge_experience_urls_are_controlled_errors_without_writes(conn, tmp_path):
+    _installed_experience_ids(conn)
+    huge = bagu.SQLITE_INTEGER_MAX + 1
+    before = list(conn.iterdump())
+    assert bagu.handle_http(
+        "GET", f"/api/experiences/{huge}", None, conn, tmp_path
+    )[0] in {400, 404}
+    assert bagu.handle_http(
+        "POST", f"/api/experiences/{huge}/start", {}, conn, tmp_path
+    )[0] in {400, 404}
+    assert list(conn.iterdump()) == before
+
+
+def test_extreme_numeric_experience_urls_are_controlled_and_bounded_without_writes(
+    conn, tmp_path
+):
+    _installed_experience_ids(conn)
+    extreme_id = "9" * 5000
+    before = list(conn.iterdump())
+    for method, suffix, body in (
+        ("GET", "", None),
+        ("POST", "/start", {}),
+    ):
+        code, payload, _ = bagu.handle_http(
+            method, f"/api/experiences/{extreme_id}{suffix}", body, conn, tmp_path
+        )
+        assert code in {400, 404}
+        assert len(json.dumps(payload, ensure_ascii=False)) <= 512
+        assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("question_id", [True, [], "1", bagu.SQLITE_INTEGER_MAX + 1])
+def test_all_scoring_http_routes_reject_non_exact_or_unbounded_question_ids(
+    conn, tmp_path, question_id
+):
+    experience_id, _, _ = _installed_experience_ids(conn)
+    session_id, _ = bagu.start_experience(conn, experience_id)
+    before = list(conn.iterdump())
+    requests = [
+        ("/api/answer", {
+            "session_id": session_id, "question_id": question_id, "text": "answer"
+        }),
+        ("/api/reveal", {
+            "session_id": session_id, "question_id": question_id
+        }),
+        ("/api/review", {
+            "session_id": session_id, "question_id": question_id, "result": "good"
+        }),
+    ]
+    for path, body in requests:
+        code, _, _ = bagu.handle_http("POST", path, body, conn, tmp_path)
+        assert code == 400
+        assert list(conn.iterdump()) == before
+
+
+def test_question_management_http_rejects_unbounded_url_id_without_writes(conn, tmp_path):
+    huge = bagu.SQLITE_INTEGER_MAX + 1
+    before = list(conn.iterdump())
+    assert bagu.handle_http(
+        "PUT", f"/api/questions/{huge}",
+        {"category": "x", "question": "x", "answer": "", "url": ""},
+        conn, tmp_path,
+    )[0] == 400
+    assert bagu.handle_http(
+        "DELETE", f"/api/questions/{huge}", None, conn, tmp_path
+    )[0] == 400
+    assert list(conn.iterdump()) == before
+
+
+def test_concurrent_experience_start_creates_one_complete_session_and_one_conflict(tmp_path):
+    database = tmp_path / "concurrent-experience.db"
+    setup = bagu.get_conn(database)
+    bagu.init_db(setup)
+    experience_id, _, questions = _installed_experience_ids(setup)
+    setup.close()
+    barrier = threading.Barrier(2)
+    results = []
+    result_lock = threading.Lock()
+
+    def worker():
+        connection = bagu.get_conn(database)
+        try:
+            barrier.wait(timeout=5)
+            try:
+                session_id, _ = bagu.start_experience(connection, experience_id)
+                result = ("started", session_id)
+            except bagu.SessionOpenError as error:
+                result = ("blocked", error.session_id, error.pending_ids)
+            with result_lock:
+                results.append(result)
+        finally:
+            connection.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(result[0] for result in results) == ["blocked", "started"]
+
+    verify = bagu.get_conn(database)
+    try:
+        sessions = verify.execute("SELECT id,status,n FROM sessions").fetchall()
+        assert len(sessions) == 1
+        assert (sessions[0]["status"], sessions[0]["n"]) == ("open", 2)
+        items = verify.execute(
+            "SELECT question_id,position,completion_type FROM session_items ORDER BY position"
+        ).fetchall()
+        assert [(row["question_id"], row["position"], row["completion_type"]) for row in items] == [
+            (questions["acme-review-1"], 1, None),
+            (questions["acme-prepare-1"], 2, None),
+        ]
+        blocked = next(result for result in results if result[0] == "blocked")
+        assert blocked[1] == sessions[0]["id"]
+        assert blocked[2] == [questions["acme-review-1"], questions["acme-prepare-1"]]
+    finally:
+        verify.close()
+
+
+def test_session_payload_preserves_review_keys_and_never_leaks_review_answers(conn):
+    experience_id, _, _ = _installed_experience_ids(conn)
+    session_id, _ = bagu.start_experience(conn, experience_id)
+    payload = bagu._session_payload(conn)
+    assert {"session_id", "n", "cat", "items", "pending"} <= set(payload)
+    assert payload["session_id"] == session_id
+    review_item = next(item for item in payload["items"] if item["question_type"] == "review")
+    prepare_item = next(item for item in payload["items"] if item["question_type"] == "prepare")
+    assert "answer" not in review_item and "preparation_prompt" not in review_item
+    assert "answer" not in prepare_item and prepare_item["preparation_prompt"] == "SECRET PREPARATION PROMPT"
+
+    bagu.skip_session(conn, session_id)
+    local = bagu.create_question(conn, {
+        "category": "local", "question": "Compatibility question", "answer": "hidden"
+    })
+    review_session, _ = bagu.draw(conn, 1, "local")
+    review_payload = bagu._session_payload(conn)
+    assert review_payload["session_id"] == review_session
+    assert review_payload["session_type"] == "review"
+    assert "experience" not in review_payload and "section" not in review_payload
+    assert {"id", "category", "question", "url", "times_seen", "grade"} <= set(
+        review_payload["items"][0]
+    )
+    assert review_payload["items"][0]["id"] == local["id"]
+    assert "answer" not in review_payload["items"][0]
+
+
+def _rewrite_v3_backup(archive_bytes, mutate):
+    """Rewrite a v3 fixture while keeping member authentication valid."""
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        questions = json.loads(archive.read("questions.json"))
+        packs = json.loads(archive.read("packs.json"))
+        experiences = json.loads(archive.read("experiences.json"))
+    mutate(manifest, questions, packs, experiences)
+    questions_raw = json.dumps(
+        questions, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    packs_raw = json.dumps(
+        packs, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    experiences_raw = json.dumps(
+        experiences, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    manifest.update({
+        "questions_sha256": hashlib.sha256(questions_raw).hexdigest(),
+        "packs_sha256": hashlib.sha256(packs_raw).hexdigest(),
+        "experiences_sha256": hashlib.sha256(experiences_raw).hexdigest(),
+    })
+    manifest_raw = json.dumps(
+        manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return _zip_members([
+        ("manifest.json", manifest_raw),
+        ("questions.json", questions_raw),
+        ("packs.json", packs_raw),
+        ("experiences.json", experiences_raw),
+    ])
+
+
+def _refresh_backup_pack_manifest_identity(pack):
+    original_manifest = {
+        "format": "bagu-pack",
+        "schema_version": 1,
+        "pack_id": pack["pack_id"],
+        "name": pack["name"],
+        "revision": pack["revision"],
+        "display_version": pack["display_version"],
+        "source_snapshot_sha256": pack["source_snapshot_sha256"],
+        "question_count": pack["question_count"],
+        "experience_count": pack["experience_count"],
+        "questions_sha256": pack["questions_sha256"],
+        "experiences_sha256": pack["experiences_sha256"],
+    }
+    pack["manifest_sha256"] = hashlib.sha256(
+        json.dumps(
+            original_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _valid_v2_backup(questions, mode="progress"):
+    questions_raw = json.dumps(
+        questions, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    manifest = {
+        "format": "bagu-backup",
+        "schema_version": 2,
+        "mode": mode,
+        "created_at": "2026-08-30T00:00:00Z",
+        "app_version": "0.1.0-beta.1",
+        "question_count": len(questions),
+        "questions_sha256": hashlib.sha256(questions_raw).hexdigest(),
+    }
+    return _zip_members([
+        ("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()),
+        ("questions.json", questions_raw),
+    ])
+
+
+def test_backup_v3_progress_round_trip_restores_pack_snapshot_structure_and_progress(
+    conn, tmp_path
+):
+    bagu.install_interview_pack(conn, _ordered_experience_archive())
+    bagu.set_pack_review_enabled(conn, "interview-fixture", False)
+    conn.execute(
+        """INSERT INTO questions(
+               category,question,answer,url,level,times_seen,times_right,next_due,last_reviewed
+           ) VALUES(?,?,?,?,?,?,?,?,?)""",
+        ("local", "Local backup question", "Local answer", "https://local.test/q",
+         2, 7, 6, "2026-09-10", "2026-08-30"),
+    ).lastrowid
+    review_id = conn.execute(
+        "SELECT id FROM questions WHERE pack_id='interview-fixture' "
+        "AND stable_question_id='acme-review-1'"
+    ).fetchone()[0]
+    conn.execute(
+        """UPDATE questions SET level=3,times_seen=9,times_right=8,
+                   next_due='2026-09-12',last_reviewed='2026-08-30' WHERE id=?""",
+        (review_id,),
+    )
+    conn.commit()
+
+    archive = bagu.export_backup(conn, app_version="test", mode="progress")
+    summary = bagu.inspect_backup(archive)
+    parsed = bagu.parse_backup(archive)
+    with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
+        manifest = json.loads(zipped.read("manifest.json"))
+        member_names = set(zipped.namelist())
+        archive_text = "\n".join(
+            zipped.read(name).decode("utf-8") for name in zipped.namelist()
+        )
+
+    assert member_names == {
+        "manifest.json", "questions.json", "packs.json", "experiences.json"
+    }
+    assert set(manifest) == {
+        "format", "schema_version", "mode", "created_at", "app_version",
+        "question_count", "local_question_count", "pack_question_count",
+        "pack_count", "experience_count", "questions_sha256", "packs_sha256",
+        "experiences_sha256",
+    }
+    assert summary == {
+        "schema_version": 3,
+        "mode": "progress",
+        "question_count": 5,
+        "local_question_count": 1,
+        "pack_question_count": 4,
+        "pack_count": 1,
+        "experience_count": 1,
+        "created_at": manifest["created_at"],
+        "app_version": "test",
+    }
+    assert parsed[0]["question"] == "Local backup question"
+    assert parsed[0]["level"] == 2
+    assert [item["stable_id"] for item in parsed[1:]] == [
+        "acme-prepare-1", "acme-retired", "acme-review-1", "acme-review-2"
+    ]
+    assert next(item for item in parsed if item.get("stable_id") == "acme-review-1")[
+        "times_seen"
+    ] == 9
+    assert next(item for item in parsed if item.get("stable_id") == "acme-prepare-1")[
+        "times_seen"
+    ] == 0
+    assert "session_items" not in archive_text
+    assert "result_comment" not in archive_text
+
+    restored_db = bagu.get_conn(tmp_path / "restored-v3.db")
+    bagu.init_db(restored_db)
+    try:
+        result = bagu.restore_backup(restored_db, archive)
+        assert result == {"added": 5, "updated": 0, "total": 5}
+        assert restored_db.execute(
+            "SELECT include_in_review FROM question_packs WHERE pack_id='interview-fixture'"
+        ).fetchone()[0] == 0
+        restored_local = restored_db.execute(
+            "SELECT * FROM questions WHERE pack_id IS NULL AND category='local'"
+        ).fetchone()
+        assert restored_local["question"] == "Local backup question"
+        assert (restored_local["level"], restored_local["times_seen"]) == (2, 7)
+        restored_review = restored_db.execute(
+            "SELECT * FROM questions WHERE pack_id='interview-fixture' "
+            "AND stable_question_id='acme-review-1'"
+        ).fetchone()
+        restored_prepare = restored_db.execute(
+            "SELECT * FROM questions WHERE pack_id='interview-fixture' "
+            "AND stable_question_id='acme-prepare-1'"
+        ).fetchone()
+        assert (restored_review["level"], restored_review["times_seen"]) == (3, 9)
+        assert tuple(restored_prepare[key] for key in (
+            "level", "times_seen", "times_right", "next_due", "last_reviewed"
+        )) == (0, 0, 0, None, None)
+        assert restored_db.execute(
+            "SELECT source_path,source_url FROM question_sources "
+            "WHERE question_id=? ORDER BY position", (restored_review["id"],)
+        ).fetchall()[0][0] == "interviews/acme.md"
+        structure = restored_db.execute(
+            """SELECT e.position,s.position,i.position,q.stable_question_id
+               FROM experiences e
+               JOIN experience_sections s ON s.experience_id=e.id
+               JOIN experience_items i ON i.section_id=s.id
+               JOIN questions q ON q.id=i.question_id
+               WHERE e.pack_id='interview-fixture'
+               ORDER BY e.position,s.position,i.position"""
+        ).fetchall()
+        assert [(row[0], row[1], row[2], row[3]) for row in structure] == [
+            (1, 1, 1, "acme-prepare-1"),
+            (1, 1, 2, "acme-review-1"),
+            (1, 2, 1, "acme-review-2"),
+            (1, 2, 2, "acme-retired"),
+        ]
+        assert restored_db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+    finally:
+        restored_db.close()
+
+
+def test_backup_v3_questions_mode_updates_content_preserves_ids_and_target_progress(
+    conn, tmp_path
+):
+    bagu.install_interview_pack(conn, _pack_archive())
+    bagu.set_pack_review_enabled(conn, "interview-fixture", False)
+    source_pack_id = conn.execute(
+        "SELECT id FROM questions WHERE stable_question_id='acme-review-1'"
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE questions SET answer='Backup content',level=2,times_seen=4,times_right=3 "
+        "WHERE id=?", (source_pack_id,)
+    )
+    conn.execute(
+        """INSERT INTO questions(category,question,answer,level,times_seen,times_right)
+           VALUES('local','same local','Backup local',2,4,3)"""
+    )
+    conn.commit()
+    archive = bagu.export_backup(conn, app_version="test", mode="questions")
+
+    target = bagu.get_conn(tmp_path / "questions-target.db")
+    bagu.init_db(target)
+    try:
+        bagu.install_interview_pack(target, _pack_archive())
+        target_pack = target.execute(
+            "SELECT id FROM questions WHERE stable_question_id='acme-review-1'"
+        ).fetchone()[0]
+        target.execute(
+            """UPDATE questions SET level=3,times_seen=11,times_right=9,
+                      next_due='2026-09-20',last_reviewed='2026-08-30' WHERE id=?""",
+            (target_pack,),
+        )
+        target_local = target.execute(
+            """INSERT INTO questions(
+                   category,question,answer,level,times_seen,times_right,next_due,last_reviewed
+               ) VALUES('local','same local','Old local',3,12,10,'2026-09-21','2026-08-30')"""
+        ).lastrowid
+        target.commit()
+
+        bagu.restore_backup(target, archive)
+
+        pack = target.execute("SELECT * FROM questions WHERE id=?", (target_pack,)).fetchone()
+        local = target.execute("SELECT * FROM questions WHERE id=?", (target_local,)).fetchone()
+        assert pack["answer"] == "Backup content"
+        assert tuple(pack[key] for key in (
+            "level", "times_seen", "times_right", "next_due", "last_reviewed"
+        )) == (3, 11, 9, "2026-09-20", "2026-08-30")
+        assert local["answer"] == "Backup local"
+        assert tuple(local[key] for key in (
+            "level", "times_seen", "times_right", "next_due", "last_reviewed"
+        )) == (3, 12, 10, "2026-09-21", "2026-08-30")
+        assert target.execute(
+            "SELECT include_in_review FROM question_packs WHERE pack_id='interview-fixture'"
+        ).fetchone()[0] == 0
+    finally:
+        target.close()
+
+
+def test_backup_v1_and_v2_archives_keep_historical_restore_semantics(conn):
+    v1 = _backup_archive([_portable_question(
+        category="legacy", question="v1", answer="one", level=2,
+        times_seen=5, times_right=4, next_due="2026-09-01", last_reviewed="2026-08-30",
+    )])
+    v2_questions = _valid_v2_backup([{
+        "category": "legacy", "question": "v2 questions", "answer": "two", "url": ""
+    }], mode="questions")
+    v2_progress = _valid_v2_backup([_portable_question(
+        category="legacy", question="v2 progress", answer="three", level=1,
+        times_seen=3, times_right=2,
+    )])
+
+    assert bagu.inspect_backup(v1)["schema_version"] == 1
+    assert bagu.inspect_backup(v2_questions)["mode"] == "questions"
+    assert bagu.inspect_backup(v2_progress)["mode"] == "progress"
+    assert [item["question"] for item in bagu.parse_backup(v2_questions)] == ["v2 questions"]
+    bagu.restore_backup(conn, v1)
+    bagu.restore_backup(conn, v2_questions)
+    bagu.restore_backup(conn, v2_progress)
+    assert conn.execute(
+        "SELECT level,times_seen FROM questions WHERE question='v1'"
+    ).fetchone()[:] == (2, 5)
+    assert conn.execute(
+        "SELECT level,times_seen FROM questions WHERE question='v2 questions'"
+    ).fetchone()[:] == (0, 0)
+    assert conn.execute(
+        "SELECT level,times_seen FROM questions WHERE question='v2 progress'"
+    ).fetchone()[:] == (1, 3)
+
+
+@pytest.mark.parametrize("case", [
+    "unknown-pack", "bad-source-url", "prepare-progress", "broken-reference",
+    "duplicate-experience-order", "invalid-pack-experience-count",
+])
+def test_backup_v3_rejects_invalid_pack_snapshot_before_any_write(conn, case):
+    bagu.install_interview_pack(conn, _pack_archive())
+    archive = bagu.export_backup(conn, app_version="test", mode="progress")
+
+    def mutate(manifest, questions, packs, experiences):
+        if case == "unknown-pack":
+            questions["pack"][0]["pack_id"] = "missing-pack"
+        elif case == "bad-source-url":
+            questions["pack"][0]["sources"][0]["url"] = "file:///private/source"
+        elif case == "prepare-progress":
+            prepare = next(item for item in questions["pack"] if item["kind"] == "prepare")
+            prepare["times_seen"] = 1
+        elif case == "broken-reference":
+            experiences[0]["sections"][0]["question_ids"][0] = "missing-question"
+        elif case == "duplicate-experience-order":
+            duplicate = json.loads(json.dumps(experiences[0]))
+            duplicate["stable_id"] = "other-experience"
+            experiences.append(duplicate)
+            manifest["experience_count"] += 1
+        else:
+            packs[0]["experience_count"] = 0
+
+    invalid = _rewrite_v3_backup(archive, mutate)
+    before = list(conn.iterdump())
+    with pytest.raises(ValueError):
+        bagu.restore_backup(conn, invalid)
+    assert list(conn.iterdump()) == before
+
+
+def test_backup_v3_rejects_cross_section_duplicate_before_inspect_restore_or_http_write(
+    conn, tmp_path
+):
+    bagu.install_interview_pack(conn, _pack_archive())
+    archive = bagu.export_backup(conn, app_version="test", mode="progress")
+
+    def duplicate_across_sections(manifest, questions, packs, experiences):
+        experiences[0]["sections"].append({
+            "stable_id": "acme-round-2",
+            "order": 2,
+            "title": "Round two",
+            "recommended": False,
+            "question_ids": ["acme-review-1"],
+        })
+
+    invalid = _rewrite_v3_backup(archive, duplicate_across_sections)
+    before = list(conn.iterdump())
+
+    with pytest.raises(ValueError, match="专题.*重复|重复.*专题"):
+        bagu.inspect_backup(invalid)
+    with pytest.raises(ValueError, match="专题.*重复|重复.*专题"):
+        bagu.restore_backup(conn, invalid)
+    assert list(conn.iterdump()) == before
+
+    body = {"archive_base64": base64.b64encode(invalid).decode("ascii")}
+    for endpoint in ("inspect", "restore"):
+        code, payload, _ = bagu.handle_http(
+            "POST", f"/api/backup/{endpoint}", body, conn, tmp_path
+        )
+        assert code == 400
+        assert payload["error"]
+        assert list(conn.iterdump()) == before
+
+
+def test_corrupted_cross_section_duplicate_starts_as_controlled_domain_and_http_error(
+    conn, tmp_path
+):
+    experience_id, _, questions = _installed_experience_ids(conn)
+    section_id = conn.execute(
+        """INSERT INTO experience_sections(
+               experience_id,stable_section_id,title,recommended,position
+           ) VALUES(?, 'corrupt-round', 'Corrupt round', 0, 2)""",
+        (experience_id,),
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO experience_items(section_id,question_id,position) VALUES(?,?,1)",
+        (section_id, questions["acme-review-1"]),
+    )
+    conn.commit()
+    before = list(conn.iterdump())
+
+    with pytest.raises(ValueError, match="专题.*重复|重复.*题目"):
+        bagu.start_experience(conn, experience_id)
+    assert list(conn.iterdump()) == before
+
+    code, payload, _ = bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start", {}, conn, tmp_path
+    )
+    assert code == 400
+    assert payload["error"]
+    assert list(conn.iterdump()) == before
+    assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+
+
+def test_backup_restore_current_relationships_win_over_retained_target_section_conflicts(
+    conn
+):
+    experience_id, _, questions = _installed_experience_ids(conn)
+    archive = bagu.export_backup(conn, app_version="test")
+    retained_section = conn.execute(
+        """INSERT INTO experience_sections(
+               experience_id,stable_section_id,title,recommended,position
+           ) VALUES(?, 'target-only-round', 'Target only', 0, 2)""",
+        (experience_id,),
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO experience_items(section_id,question_id,position) VALUES(?,?,1)",
+        (retained_section, questions["acme-review-1"]),
+    )
+    conn.commit()
+
+    bagu.restore_backup(conn, archive)
+
+    retained = conn.execute(
+        """SELECT s.id,s.position,i.question_id
+           FROM experience_sections s
+           LEFT JOIN experience_items i ON i.section_id=s.id
+           WHERE s.stable_section_id='target-only-round'"""
+    ).fetchone()
+    assert (retained["id"], retained["position"], retained["question_id"]) == (
+        retained_section, 2, None,
+    )
+    session_id, items = bagu.start_experience(conn, experience_id)
+    assert [item["stable_question_id"] for item in items] == [
+        "acme-review-1", "acme-prepare-1",
+    ]
+    bagu.skip_session(conn, session_id)
+
+
+@pytest.mark.parametrize("case", ["downgrade", "same-revision-conflict", "type-change"])
+def test_backup_v3_pack_conflicts_roll_back_local_pack_and_preference_together(
+    conn, tmp_path, case
+):
+    bagu.install_interview_pack(conn, _pack_archive(revision=2 if case == "downgrade" else 1))
+    bagu.create_question(conn, {
+        "category": "local", "question": "atomic", "answer": "target"
+    })
+    source = bagu.get_conn(tmp_path / f"backup-source-{case}.db")
+    bagu.init_db(source)
+    try:
+        bagu.install_interview_pack(source, _pack_archive(revision=1))
+        bagu.set_pack_review_enabled(source, "interview-fixture", False)
+        bagu.create_question(source, {
+            "category": "local", "question": "atomic", "answer": "archive"
+        })
+        archive = bagu.export_backup(source, app_version="test", mode="progress")
+    finally:
+        source.close()
+
+    if case == "same-revision-conflict":
+        def conflict_identity(manifest, questions, packs, experiences):
+            packs[0]["name"] = "Conflicting same-revision pack"
+            _refresh_backup_pack_manifest_identity(packs[0])
+
+        archive = _rewrite_v3_backup(
+            archive,
+            conflict_identity,
+        )
+    elif case == "type-change":
+        def change_type(manifest, questions, packs, experiences):
+            item = next(q for q in questions["pack"] if q["stable_id"] == "acme-review-1")
+            item["kind"] = "prepare"
+            item["preparation_prompt"] = item.pop("answer")
+            for field in ("level", "times_seen", "times_right"):
+                item[field] = 0
+            item["next_due"] = None
+            item["last_reviewed"] = None
+            packs[0]["revision"] = 2
+            packs[0]["display_version"] = "2.0.0"
+            _refresh_backup_pack_manifest_identity(packs[0])
+
+        archive = _rewrite_v3_backup(archive, change_type)
+
+    before = list(conn.iterdump())
+    with pytest.raises(bagu.PackConflictError):
+        bagu.restore_backup(conn, archive)
+    assert list(conn.iterdump()) == before
+
+
+def test_backup_v3_restore_is_blocked_by_open_session_before_pack_writes(
+    conn, tmp_path
+):
+    source = bagu.get_conn(tmp_path / "open-session-source.db")
+    bagu.init_db(source)
+    try:
+        bagu.install_interview_pack(source, _pack_archive())
+        archive = bagu.export_backup(source, app_version="test")
+    finally:
+        source.close()
+    bagu.create_question(conn, {"category": "local", "question": "open"})
+    session_id, _ = bagu.draw(conn, 1)
+    before = list(conn.iterdump())
+
+    with pytest.raises(bagu.SessionOpenError) as error:
+        bagu.restore_backup(conn, archive)
+
+    assert error.value.session_id == session_id
+    assert list(conn.iterdump()) == before
+    assert conn.execute("SELECT COUNT(*) FROM question_packs").fetchone()[0] == 0
+
+
+def test_backup_v3_rejects_unpaired_surrogate_in_local_question_text(conn):
+    bagu.create_question(conn, {
+        "category": "local", "question": "safe text", "answer": "answer"
+    })
+    archive = bagu.export_backup(conn, app_version="test")
+    with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
+        manifest = json.loads(zipped.read("manifest.json"))
+        questions = json.loads(zipped.read("questions.json"))
+        packs_raw = zipped.read("packs.json")
+        experiences_raw = zipped.read("experiences.json")
+    questions["local"][0]["question"] = "\ud800"
+    questions_raw = json.dumps(
+        questions, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("ascii")
+    manifest["questions_sha256"] = hashlib.sha256(questions_raw).hexdigest()
+    manifest_raw = json.dumps(
+        manifest, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    invalid = _zip_members([
+        ("manifest.json", manifest_raw),
+        ("questions.json", questions_raw),
+        ("packs.json", packs_raw),
+        ("experiences.json", experiences_raw),
+    ])
+
+    with pytest.raises(ValueError, match="Unicode|文本"):
+        bagu.parse_backup(invalid)
+
+
+def test_backup_restore_http_returns_409_for_pack_revision_conflict_without_writes(
+    conn, tmp_path
+):
+    bagu.install_interview_pack(conn, _pack_archive(revision=2))
+    source = bagu.get_conn(tmp_path / "http-conflict-source.db")
+    bagu.init_db(source)
+    try:
+        bagu.install_interview_pack(source, _pack_archive(revision=1))
+        archive = bagu.export_backup(source, app_version="test")
+    finally:
+        source.close()
+    before = list(conn.iterdump())
+
+    code, payload, _ = bagu.handle_http(
+        "POST", "/api/backup/restore",
+        {"archive_base64": base64.b64encode(archive).decode("ascii")}, conn, tmp_path,
+    )
+
+    assert code == 409
+    assert "revision" in payload["error"]
+    assert list(conn.iterdump()) == before
+
+
+def test_backup_v3_exports_cumulative_retained_pack_questions_and_experiences(conn):
+    def add_legacy(questions, experiences):
+        _add_second_experience(questions, experiences)
+
+    bagu.install_interview_pack(conn, _pack_archive(mutate=add_legacy))
+
+    def omit_legacy(questions, experiences):
+        questions[:] = [q for q in questions if q["stable_id"] != "legacy-review"]
+        experiences[:] = [e for e in experiences if e["stable_id"] != "legacy-topic-set"]
+
+    bagu.install_interview_pack(conn, _pack_archive(revision=2, mutate=omit_legacy))
+    archive = bagu.export_backup(conn, app_version="test")
+    with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
+        questions = json.loads(zipped.read("questions.json"))
+        experiences = json.loads(zipped.read("experiences.json"))
+        packs = json.loads(zipped.read("packs.json"))
+
+    assert {item["stable_id"] for item in questions["pack"]} == {
+        "acme-review-1", "acme-prepare-1", "legacy-review"
+    }
+    assert {item["stable_id"] for item in experiences} == {
+        "acme-backend-2026", "legacy-topic-set"
+    }
+    assert packs[0]["question_count"] == 2
+    assert packs[0]["experience_count"] == 1
+
+
+def test_backup_v3_cumulative_retained_sections_preserve_historical_structure(
+    conn, tmp_path
+):
+    bagu.install_interview_pack(conn, _pack_archive())
+
+    def replace_section(questions, experiences):
+        experiences[0]["sections"] = [{
+            "stable_id": "acme-round-2",
+            "order": 1,
+            "title": "Round two",
+            "recommended": True,
+            "question_ids": ["acme-review-1", "acme-prepare-1"],
+        }]
+
+    bagu.install_interview_pack(
+        conn, _pack_archive(revision=2, mutate=replace_section)
+    )
+    relations = conn.execute(
+        """SELECT s.stable_section_id,q.stable_question_id
+           FROM experience_sections s
+           LEFT JOIN experience_items i ON i.section_id=s.id
+           LEFT JOIN questions q ON q.id=i.question_id
+           ORDER BY s.position,i.position"""
+    ).fetchall()
+    assert [tuple(row) for row in relations] == [
+        ("acme-round-1", None),
+        ("acme-round-2", "acme-review-1"),
+        ("acme-round-2", "acme-prepare-1"),
+    ]
+    experience_id = conn.execute(
+        "SELECT id FROM experiences WHERE stable_experience_id='acme-backend-2026'"
+    ).fetchone()[0]
+    code, detail, _ = bagu.handle_http(
+        "GET", f"/api/experiences/{experience_id}", None, conn, tmp_path
+    )
+    assert code == 200
+    sections_by_stable = {
+        section["stable_section_id"]: section for section in detail["sections"]
+    }
+    assert sections_by_stable["acme-round-1"]["question_count"] == 0
+    assert sections_by_stable["acme-round-2"]["question_count"] == 2
+    before_empty_start = list(conn.iterdump())
+    code, payload, _ = bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start",
+        {"section_id": sections_by_stable["acme-round-1"]["id"]}, conn, tmp_path,
+    )
+    assert code == 400
+    assert "没有可用题目" in payload["error"]
+    assert list(conn.iterdump()) == before_empty_start
+
+    code, started, _ = bagu.handle_http(
+        "POST", f"/api/experiences/{experience_id}/start", {}, conn, tmp_path
+    )
+    assert code == 200
+    assert [item["stable_question_id"] for item in started["questions"]] == [
+        "acme-review-1", "acme-prepare-1",
+    ]
+    bagu.skip_session(conn, started["session_id"])
+    archive = bagu.export_backup(conn, app_version="test")
+    with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
+        experiences = json.loads(zipped.read("experiences.json"))
+    assert [(section["stable_id"], section["order"], section["recommended"])
+            for section in experiences[0]["sections"]] == [
+        ("acme-round-1", 1, True),
+        ("acme-round-2", 2, True),
+    ]
+
+    target = bagu.get_conn(tmp_path / "retained-sections.db")
+    bagu.init_db(target)
+    try:
+        bagu.restore_backup(target, archive)
+        restored = target.execute(
+            """SELECT stable_section_id,position,recommended
+               FROM experience_sections ORDER BY position"""
+        ).fetchall()
+        assert [tuple(row) for row in restored] == [
+            ("acme-round-1", 1, 1), ("acme-round-2", 2, 1)
+        ]
+    finally:
+        target.close()
+
+
+def test_backup_v3_question_limit_does_not_cap_experience_count(conn, monkeypatch):
+    def one_question_two_experiences(questions, experiences):
+        questions[:] = [questions[0]]
+        experiences[0]["sections"][0]["question_ids"] = ["acme-review-1"]
+        experiences.append({
+            "stable_id": "acme-backend-follow-up",
+            "kind": "interview",
+            "direction": "backend",
+            "company": "Acme",
+            "position": "engineer",
+            "stage": "follow-up",
+            "sections": [{
+                "stable_id": "acme-follow-up-round",
+                "order": 1,
+                "title": "Follow-up",
+                "recommended": True,
+                "question_ids": ["acme-review-1"],
+            }],
+        })
+
+    bagu.install_interview_pack(
+        conn, _pack_archive(mutate=one_question_two_experiences)
+    )
+    monkeypatch.setattr(bagu, "BACKUP_MAX_QUESTIONS", 1)
+
+    archive = bagu.export_backup(conn, app_version="test")
+
+    assert bagu.inspect_backup(archive)["question_count"] == 1
+    assert bagu.inspect_backup(archive)["experience_count"] == 2
+
+
+def test_export_backup_uses_one_sqlite_read_snapshot_across_all_v3_members(tmp_path):
+    database = tmp_path / "snapshot.db"
+    setup = bagu.get_conn(database)
+    bagu.init_db(setup)
+    setup.execute("PRAGMA journal_mode=WAL")
+    bagu.install_interview_pack(setup, _pack_archive(revision=1))
+    setup.close()
+
+    begin_upgrade = threading.Event()
+    upgrade_done = threading.Event()
+    writer_errors = []
+
+    def upgrade_pack():
+        writer = bagu.get_conn(database)
+        try:
+            assert begin_upgrade.wait(10)
+
+            def revision_two(questions, experiences):
+                questions[0]["answer"] = "REVISION TWO ANSWER"
+                experiences[0]["sections"][0]["title"] = "Revision two section"
+
+            bagu.install_interview_pack(
+                writer, _pack_archive(revision=2, mutate=revision_two)
+            )
+        except BaseException as error:  # surfaced deterministically in the test thread
+            writer_errors.append(error)
+        finally:
+            writer.close()
+            upgrade_done.set()
+
+    thread = threading.Thread(target=upgrade_pack)
+    thread.start()
+    reader = bagu.get_conn(database)
+    gate_used = False
+
+    def pause_before_pack_metadata(statement):
+        nonlocal gate_used
+        if not gate_used and "SELECT * FROM question_packs ORDER BY pack_id" in statement:
+            gate_used = True
+            begin_upgrade.set()
+            upgrade_done.wait(10)
+
+    reader.set_trace_callback(pause_before_pack_metadata)
+    try:
+        archive = bagu.export_backup(reader, app_version="test")
+    finally:
+        reader.set_trace_callback(None)
+        thread.join(timeout=10)
+    try:
+        assert gate_used and upgrade_done.is_set() and not thread.is_alive()
+        assert writer_errors == []
+        assert not reader.in_transaction
+        with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
+            packs = json.loads(zipped.read("packs.json"))
+            questions = json.loads(zipped.read("questions.json"))
+            experiences = json.loads(zipped.read("experiences.json"))
+        review = next(
+            item for item in questions["pack"] if item["stable_id"] == "acme-review-1"
+        )
+        assert packs[0]["revision"] == 1
+        assert packs[0]["display_version"] == "1.0.0"
+        assert review["answer"] == "SECRET REVIEW ANSWER"
+        assert experiences[0]["sections"][0]["title"] == "Round one"
+        assert reader.execute(
+            "SELECT revision FROM question_packs WHERE pack_id='interview-fixture'"
+        ).fetchone()[0] == 2
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("name", "Tampered display name"),
+    ("questions_sha256", "f" * 64),
+    ("question_count", 1),
+])
+def test_backup_v3_reconstructs_original_pack_manifest_identity_before_restore(
+    conn, field, value
+):
+    bagu.install_interview_pack(conn, _pack_archive())
+    archive = bagu.export_backup(conn, app_version="test")
+    original_question_id = conn.execute(
+        "SELECT id FROM questions WHERE stable_question_id='acme-review-1'"
+    ).fetchone()[0]
+    # A valid same-revision backup is idempotent and preserves the target ID.
+    bagu.restore_backup(conn, archive)
+    assert conn.execute(
+        "SELECT id FROM questions WHERE stable_question_id='acme-review-1'"
+    ).fetchone()[0] == original_question_id
+
+    def tamper_metadata(manifest, questions, packs, experiences):
+        packs[0][field] = value
+
+    tampered = _rewrite_v3_backup(archive, tamper_metadata)
+    before = list(conn.iterdump())
+
+    with pytest.raises(ValueError, match="manifest|身份|identity"):
+        bagu.restore_backup(conn, tampered)
+
+    assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("unsafe_url", [
+    "file:///private/question.md",
+    "javascript:alert(1)",
+    "https://user:password@example.test/question",
+    "https://@example.test/question",
+])
+def test_backup_v3_local_question_url_requires_safe_http_or_https(conn, unsafe_url):
+    bagu.create_question(conn, {
+        "category": "local", "question": "URL safety", "answer": "answer", "url": ""
+    })
+    archive = bagu.export_backup(conn, app_version="test")
+
+    def replace_url(manifest, questions, packs, experiences):
+        questions["local"][0]["url"] = unsafe_url
+
+    invalid = _rewrite_v3_backup(archive, replace_url)
+
+    with pytest.raises(ValueError, match="URL|HTTP"):
+        bagu.parse_backup(invalid)
+
+
+@pytest.mark.parametrize("member", ["source-path", "source-url"])
+def test_backup_http_validation_errors_never_echo_source_content_and_are_bounded(
+    conn, tmp_path, member
+):
+    bagu.install_interview_pack(conn, _pack_archive())
+    archive = bagu.export_backup(conn, app_version="test")
+    sentinel = "TOP_SECRET_BACKUP_SOURCE_SENTINEL"
+
+    def inject_secret(manifest, questions, packs, experiences):
+        source = questions["pack"][0]["sources"][0]
+        if member == "source-path":
+            source["path"] = "../" + sentinel + ("x" * 130_000)
+        else:
+            source["url"] = "file:///" + sentinel
+
+    invalid = _rewrite_v3_backup(archive, inject_secret)
+    code, payload, _ = bagu.handle_http(
+        "POST", "/api/backup/inspect",
+        {"archive_base64": base64.b64encode(invalid).decode("ascii")}, conn, tmp_path,
+    )
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert code == 400
+    assert sentinel not in serialized
+    assert len(serialized) <= 1024
+
+
+def test_project_agent_rules_describe_current_v3_pack_experience_and_backup_contract():
+    rules = (Path(__file__).parents[1] / "AGENTS.md").read_text(encoding="utf-8")
+    required_facts = (
+        "PRAGMA user_version = 3",
+        "question_packs",
+        "question_sources",
+        "experiences",
+        "experience_sections",
+        "experience_items",
+        "review|prepare",
+        "review|experience",
+        "graded|prepared|skipped",
+        "GET /api/packs",
+        "POST /api/packs/inspect",
+        "POST /api/packs/install",
+        "PUT /api/packs/:id",
+        "GET /api/experiences",
+        "GET /api/experiences/:id",
+        "POST /api/experiences/:id/start",
+        "POST /api/session/complete",
+        "packs.json",
+        "experiences.json",
+        "兼容 v1/v2",
+        "不内置",
+        "不公开",
+    )
+    for fact in required_facts:
+        assert fact in rules
+    assert "当前 `PRAGMA user_version = 2`" not in rules
+    assert ".bagu-backup` v2 仅含" not in rules

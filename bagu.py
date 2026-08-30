@@ -4,6 +4,7 @@
 import argparse
 import ast
 import base64
+import contextlib
 import contextvars
 import csv
 import datetime as dt
@@ -25,6 +26,7 @@ import stat
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 import zipfile
@@ -36,7 +38,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "bagu.db"
-DATABASE_VERSION = 2
+DATABASE_VERSION = 3
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
 LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
@@ -98,7 +100,11 @@ MAX_IMPORT_ROWS = 5000
 BACKUP_MAX_COMPRESSED_BYTES = 20 * 1024 * 1024
 BACKUP_MAX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 BACKUP_MAX_QUESTIONS = 10000
-BACKUP_MEMBER_NAMES = {"manifest.json", "questions.json"}
+BACKUP_HTTP_ERROR_MAX_CHARS = 512
+BACKUP_MEMBER_NAMES = frozenset(("manifest.json", "questions.json"))
+BACKUP_V3_MEMBER_NAMES = frozenset((
+    "manifest.json", "questions.json", "packs.json", "experiences.json",
+))
 BACKUP_QUESTION_FIELDS = {
     "category", "question", "answer", "url", "level", "times_seen",
     "times_right", "next_due", "last_reviewed",
@@ -107,6 +113,48 @@ BACKUP_MANIFEST_FIELDS = {
     "format", "schema_version", "created_at", "app_version", "question_count",
     "questions_sha256",
 }
+BACKUP_V3_MANIFEST_FIELDS = frozenset((
+    "format", "schema_version", "mode", "created_at", "app_version",
+    "question_count", "local_question_count", "pack_question_count",
+    "pack_count", "experience_count", "questions_sha256", "packs_sha256",
+    "experiences_sha256",
+))
+BACKUP_V3_PACK_FIELDS = frozenset((
+    "pack_id", "name", "revision", "display_version", "source_snapshot_sha256",
+    "question_count", "experience_count", "questions_sha256", "experiences_sha256",
+    "manifest_sha256", "include_in_review",
+))
+BACKUP_V3_PACK_QUESTION_FIELDS = frozenset((
+    "pack_id", "stable_id", "category", "question", "kind", "review_status",
+    "retired", "sources",
+))
+BACKUP_V3_EXPERIENCE_FIELDS = frozenset((
+    "pack_id", "stable_id", "kind", "direction", "company", "position", "stage",
+    "order", "sections",
+))
+PACK_MAX_COMPRESSED_BYTES = 20 * 1024 * 1024
+PACK_MAX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
+PACK_MAX_QUESTIONS = 10000
+PACK_SOURCE_PATH_MAX_CHARS = 2048
+PACK_HTTP_ERROR_MAX_CHARS = 256
+PACK_MEMBER_NAMES = frozenset(("manifest.json", "questions.json", "experiences.json"))
+PACK_MANIFEST_FIELDS = frozenset((
+    "format", "schema_version", "pack_id", "name", "revision", "display_version",
+    "source_snapshot_sha256", "question_count", "experience_count",
+    "questions_sha256", "experiences_sha256",
+))
+PACK_QUESTION_BASE_FIELDS = frozenset((
+    "stable_id", "question", "category", "kind", "review_status", "retired", "sources",
+))
+PACK_EXPERIENCE_FIELDS = frozenset((
+    "stable_id", "kind", "direction", "company", "position", "stage", "sections",
+))
+PACK_STABLE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*\Z")
+DAILY_QUESTION_ELIGIBILITY_SQL = (
+    "q.question_type='review' AND q.retired=0 AND "
+    "(q.pack_id IS NULL OR EXISTS (SELECT 1 FROM question_packs p "
+    "WHERE p.pack_id=q.pack_id AND p.include_in_review=1))"
+)
 SQLITE_INTEGER_MAX = 2**63 - 1
 ANSWER_IMAGE_RE = re.compile(
     r"\[图片[：:](?P<alt>[^\]\r\n]*)\]\((?P<url>https?://[^\s)]+)\)", re.I
@@ -129,81 +177,322 @@ SUBMISSION_ID_RE = re.compile(
 def get_conn(db_path=None):
     conn = sqlite3.connect(str(db_path or DB_PATH))
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+def _table_names(conn):
+    return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+def _create_question_pack_table(conn):
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS question_packs (
+            pack_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            display_version TEXT NOT NULL,
+            source_snapshot_sha256 TEXT NOT NULL,
+            question_count INTEGER NOT NULL CHECK (question_count >= 0),
+            experience_count INTEGER NOT NULL CHECK (experience_count >= 0),
+            questions_sha256 TEXT NOT NULL,
+            experiences_sha256 TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL,
+            include_in_review INTEGER NOT NULL DEFAULT 1 CHECK (include_in_review IN (0,1)),
+            installed_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"""
+    )
+
+
+def _create_v3_question_table(conn, name="questions"):
+    conn.execute(
+        f"""CREATE TABLE {name} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            question TEXT NOT NULL,
+            answer TEXT DEFAULT '',
+            url TEXT DEFAULT '',
+            level INTEGER DEFAULT 0,
+            times_seen INTEGER DEFAULT 0,
+            times_right INTEGER DEFAULT 0,
+            next_due DATE,
+            last_reviewed DATE,
+            pack_id TEXT,
+            stable_question_id TEXT,
+            question_type TEXT NOT NULL DEFAULT 'review' CHECK (question_type IN ('review','prepare')),
+            preparation_prompt TEXT NOT NULL DEFAULT '',
+            answer_review_status TEXT NOT NULL DEFAULT 'local' CHECK (answer_review_status IN ('local','reviewed')),
+            retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0,1)),
+            CHECK ((pack_id IS NULL AND stable_question_id IS NULL) OR
+                   (pack_id IS NOT NULL AND stable_question_id IS NOT NULL)),
+            FOREIGN KEY (pack_id) REFERENCES question_packs(pack_id)
+        )"""
+    )
+
+
+def _create_v3_session_table(conn, name="sessions"):
+    conn.execute(
+        f"""CREATE TABLE {name} (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL CHECK (status IN ('open','closed')),
+            created_at TEXT NOT NULL,
+            n INTEGER NOT NULL,
+            cat TEXT,
+            session_type TEXT NOT NULL DEFAULT 'review' CHECK (session_type IN ('review','experience')),
+            experience_id INTEGER,
+            section_id INTEGER,
+            FOREIGN KEY (experience_id) REFERENCES experiences(id),
+            FOREIGN KEY (section_id) REFERENCES experience_sections(id)
+        )"""
+    )
+
+
+def _create_v3_session_items_table(
+    conn, name="session_items", sessions_name="sessions", questions_name="questions"
+):
+    conn.execute(
+        f"""CREATE TABLE {name} (
+            session_id TEXT NOT NULL,
+            question_id INTEGER NOT NULL,
+            grade TEXT,
+            graded_at TEXT,
+            submission_id TEXT,
+            result_comment TEXT,
+            result_full_answer TEXT,
+            result_answer_source TEXT,
+            position INTEGER NOT NULL DEFAULT 1 CHECK (position >= 1),
+            completion_type TEXT CHECK (completion_type IN ('graded','prepared','skipped')),
+            PRIMARY KEY (session_id, question_id),
+            FOREIGN KEY (session_id) REFERENCES {sessions_name}(id),
+            FOREIGN KEY (question_id) REFERENCES {questions_name}(id)
+        )"""
+    )
+
+
+def _create_v3_pack_relationship_tables(conn):
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS question_sources (
+            question_id INTEGER NOT NULL,
+            position INTEGER NOT NULL CHECK (position >= 1),
+            source_path TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            UNIQUE (question_id, position),
+            FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS experiences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pack_id TEXT NOT NULL,
+            stable_experience_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('interview','topic_set')),
+            direction TEXT NOT NULL,
+            company TEXT NOT NULL,
+            role TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            position INTEGER NOT NULL CHECK (position >= 1),
+            UNIQUE (pack_id, stable_experience_id),
+            UNIQUE (pack_id, position),
+            FOREIGN KEY (pack_id) REFERENCES question_packs(pack_id)
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS experience_sections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            experience_id INTEGER NOT NULL,
+            stable_section_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            recommended INTEGER NOT NULL CHECK (recommended IN (0,1)),
+            position INTEGER NOT NULL CHECK (position >= 1),
+            UNIQUE (experience_id, stable_section_id),
+            UNIQUE (experience_id, position),
+            FOREIGN KEY (experience_id) REFERENCES experiences(id)
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS experience_items (
+            section_id INTEGER NOT NULL,
+            question_id INTEGER NOT NULL,
+            position INTEGER NOT NULL CHECK (position >= 1),
+            PRIMARY KEY (section_id, question_id),
+            UNIQUE (section_id, position),
+            FOREIGN KEY (section_id) REFERENCES experience_sections(id),
+            FOREIGN KEY (question_id) REFERENCES questions(id)
+        )"""
+    )
+
+
+def _create_v3_indexes(conn):
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_questions_local_identity
+           ON questions(category, question) WHERE pack_id IS NULL"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_questions_pack_identity
+           ON questions(pack_id, stable_question_id) WHERE pack_id IS NOT NULL"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_one_open
+           ON sessions(status) WHERE status='open'"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_session_items_submission
+           ON session_items(submission_id) WHERE submission_id IS NOT NULL"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_session_items_position
+           ON session_items(session_id, position)"""
+    )
+
+
+def _create_empty_v3_schema(conn):
+    _create_question_pack_table(conn)
+    _create_v3_question_table(conn)
+    _create_v3_pack_relationship_tables(conn)
+    _create_v3_session_table(conn)
+    _create_v3_session_items_table(conn)
+    _create_v3_indexes(conn)
+
+
+def _ensure_legacy_schema(conn):
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS questions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            question TEXT NOT NULL,
+            answer TEXT DEFAULT '',
+            url TEXT DEFAULT '',
+            level INTEGER DEFAULT 0,
+            times_seen INTEGER DEFAULT 0,
+            times_right INTEGER DEFAULT 0,
+            next_due DATE,
+            last_reviewed DATE,
+            UNIQUE(category, question)
+        )"""
+    )
+    question_columns = {row[1] for row in conn.execute("PRAGMA table_info(questions)")}
+    if "answer" not in question_columns:
+        conn.execute("ALTER TABLE questions ADD COLUMN answer TEXT DEFAULT ''")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL CHECK (status IN ('open','closed')),
+            created_at TEXT NOT NULL,
+            n INTEGER NOT NULL,
+            cat TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS session_items (
+            session_id TEXT NOT NULL,
+            question_id INTEGER NOT NULL,
+            grade TEXT,
+            graded_at TEXT,
+            PRIMARY KEY (session_id, question_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id),
+            FOREIGN KEY (question_id) REFERENCES questions(id)
+        )"""
+    )
+    item_columns = {row[1] for row in conn.execute("PRAGMA table_info(session_items)")}
+    for name in ("submission_id", "result_comment", "result_full_answer", "result_answer_source"):
+        if name not in item_columns:
+            conn.execute(f"ALTER TABLE session_items ADD COLUMN {name} TEXT")
+
+
+def _has_complete_v3_schema(conn):
+    required_tables = {
+        "question_packs", "questions", "question_sources", "experiences",
+        "experience_sections", "experience_items", "sessions", "session_items",
+    }
+    if not required_tables <= _table_names(conn):
+        return False
+    return {
+        "pack_id", "stable_question_id", "question_type", "preparation_prompt",
+        "answer_review_status", "retired",
+    } <= {row[1] for row in conn.execute("PRAGMA table_info(questions)")} and {
+        "position", "completion_type",
+    } <= {row[1] for row in conn.execute("PRAGMA table_info(session_items)")}
+
+
+def _repair_open_sessions(conn):
+    open_sessions = conn.execute(
+        "SELECT id FROM sessions WHERE status='open' ORDER BY created_at DESC, rowid DESC"
+    ).fetchall()
+    repaired = [row[0] for row in open_sessions[1:]]
+    if repaired:
+        placeholders = ",".join("?" for _ in repaired)
+        conn.execute(f"UPDATE sessions SET status='closed' WHERE id IN ({placeholders})", repaired)
+    return [row[0] for row in open_sessions], repaired
+
+
+def _migrate_legacy_to_v3(conn):
+    _create_question_pack_table(conn)
+    _create_v3_question_table(conn, "questions_v3_new")
+    # SQLite resolves the nullable session context parents when rows are
+    # inserted, so create the empty v3 relationship tables before copying.
+    _create_v3_pack_relationship_tables(conn)
+    _create_v3_session_table(conn, "sessions_v3_new")
+    _create_v3_session_items_table(
+        conn, "session_items_v3_new", "sessions_v3_new", "questions_v3_new"
+    )
+    conn.execute(
+        """INSERT INTO questions_v3_new(
+               id,category,question,answer,url,level,times_seen,times_right,next_due,last_reviewed
+           )
+           SELECT id,category,question,answer,url,level,times_seen,times_right,next_due,last_reviewed
+           FROM questions"""
+    )
+    conn.execute(
+        """INSERT INTO sessions_v3_new(id,status,created_at,n,cat)
+           SELECT id,status,created_at,n,cat FROM sessions"""
+    )
+    conn.execute(
+        """INSERT INTO session_items_v3_new(
+               session_id,question_id,grade,graded_at,submission_id,result_comment,
+               result_full_answer,result_answer_source,position,completion_type
+           )
+           SELECT i.session_id,i.question_id,i.grade,i.graded_at,i.submission_id,i.result_comment,
+                  i.result_full_answer,i.result_answer_source,
+                  (SELECT COUNT(*) FROM session_items prior
+                   WHERE prior.session_id=i.session_id AND prior.question_id <= i.question_id),
+                  CASE WHEN i.grade IS NOT NULL THEN 'graded' ELSE NULL END
+           FROM session_items i"""
+    )
+    conn.execute("DROP TABLE session_items")
+    conn.execute("DROP TABLE sessions")
+    conn.execute("DROP TABLE questions")
+    conn.execute("ALTER TABLE questions_v3_new RENAME TO questions")
+    conn.execute("ALTER TABLE sessions_v3_new RENAME TO sessions")
+    conn.execute("ALTER TABLE session_items_v3_new RENAME TO session_items")
+    _create_v3_indexes(conn)
 
 
 def init_db(conn):
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version > DATABASE_VERSION:
         raise ValueError("数据库版本高于当前程序支持的版本")
+    conn.execute("PRAGMA foreign_keys=ON")
+    if version == DATABASE_VERSION:
+        return
     conn.execute("SAVEPOINT bagu_schema")
+    open_sessions = []
+    repaired_open_sessions = []
     try:
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS questions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                category TEXT NOT NULL,
-                question TEXT NOT NULL,
-                answer TEXT DEFAULT '',
-                url TEXT DEFAULT '',
-                level INTEGER DEFAULT 0,
-                times_seen INTEGER DEFAULT 0,
-                times_right INTEGER DEFAULT 0,
-                next_due DATE,
-                last_reviewed DATE,
-                UNIQUE(category, question)
-            )"""
-        )
-        question_columns = {row[1] for row in conn.execute("PRAGMA table_info(questions)")}
-        if "answer" not in question_columns:
-            conn.execute("ALTER TABLE questions ADD COLUMN answer TEXT DEFAULT ''")
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                status TEXT NOT NULL CHECK (status IN ('open','closed')),
-                created_at TEXT NOT NULL,
-                n INTEGER NOT NULL,
-                cat TEXT
-            )"""
-        )
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS session_items (
-                session_id TEXT NOT NULL,
-                question_id INTEGER NOT NULL,
-                grade TEXT,
-                graded_at TEXT,
-                PRIMARY KEY (session_id, question_id),
-                FOREIGN KEY (session_id) REFERENCES sessions(id),
-                FOREIGN KEY (question_id) REFERENCES questions(id)
-            )"""
-        )
-        item_columns = {row[1] for row in conn.execute("PRAGMA table_info(session_items)")}
-        for name in ("submission_id", "result_comment", "result_full_answer", "result_answer_source"):
-            if name not in item_columns:
-                conn.execute(f"ALTER TABLE session_items ADD COLUMN {name} TEXT")
-        open_sessions = conn.execute(
-            """SELECT id FROM sessions WHERE status='open'
-               ORDER BY created_at DESC, rowid DESC"""
-        ).fetchall()
-        repaired_open_sessions = []
-        if len(open_sessions) > 1:
-            repaired_open_sessions = [row["id"] for row in open_sessions[1:]]
-            placeholders = ",".join("?" for _ in repaired_open_sessions)
-            conn.execute(
-                f"UPDATE sessions SET status='closed' WHERE id IN ({placeholders})",
-                repaired_open_sessions,
-            )
-        conn.execute(
-            """CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_one_open
-               ON sessions(status) WHERE status='open'"""
-        )
-        conn.execute(
-            """CREATE UNIQUE INDEX IF NOT EXISTS uq_session_items_submission
-               ON session_items(submission_id) WHERE submission_id IS NOT NULL"""
-        )
-        # Every API request inspects the schema. Rewriting an unchanged version
-        # upgrades parallel readers to competing writers during page startup.
-        if version != DATABASE_VERSION:
-            conn.execute(f"PRAGMA user_version={DATABASE_VERSION}")
+        tables = _table_names(conn)
+        if not (tables - {"sqlite_sequence"}):
+            _create_empty_v3_schema(conn)
+        elif _has_complete_v3_schema(conn):
+            open_sessions, repaired_open_sessions = _repair_open_sessions(conn)
+            _create_v3_indexes(conn)
+        else:
+            _ensure_legacy_schema(conn)
+            open_sessions, repaired_open_sessions = _repair_open_sessions(conn)
+            _migrate_legacy_to_v3(conn)
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError("数据库迁移后外键校验失败")
+        conn.execute(f"PRAGMA user_version={DATABASE_VERSION}")
         conn.execute("RELEASE SAVEPOINT bagu_schema")
     except Exception:
         conn.execute("ROLLBACK TO SAVEPOINT bagu_schema")
@@ -214,7 +503,7 @@ def init_db(conn):
         log_event(
             "db.repair_multiple_open_sessions",
             level="WARNING",
-            kept_session_id=open_sessions[0]["id"],
+            kept_session_id=open_sessions[0],
             closed_count=len(repaired_open_sessions),
         )
 
@@ -222,6 +511,23 @@ def init_db(conn):
 def new_session_id():
     day = dt.date.today().strftime("%Y%m%d")
     return f"s_{day}_{secrets.token_hex(4)}"
+
+
+def _require_db_id(value, field):
+    if type(value) is not int or not 1 <= value <= SQLITE_INTEGER_MAX:
+        raise ValueError(f"{field} 必须是 1 到 {SQLITE_INTEGER_MAX} 之间的整数")
+    return value
+
+
+def _parse_url_db_id(value, field):
+    if (
+        not isinstance(value, str)
+        or not value.isascii()
+        or not value.isdigit()
+        or len(value) > len(str(SQLITE_INTEGER_MAX))
+    ):
+        raise ValueError(f"{field} 必须是有效的数据库整数")
+    return _require_db_id(int(value), field)
 
 
 def get_open_session(conn):
@@ -622,7 +928,9 @@ def repair_answer_formats(conn, *, include_history=False, dry_run=False):
         raise ValueError("修复格式前请先结束当前数据库事务")
     if conn.execute("PRAGMA user_version").fetchone()[0] != DATABASE_VERSION:
         raise ValueError("格式修复仅支持当前数据库版本；请另行备份并升级数据库")
-    questions = conn.execute("SELECT id, category, question, answer FROM questions").fetchall()
+    questions = conn.execute(
+        "SELECT id, category, question, answer FROM questions WHERE pack_id IS NULL"
+    ).fetchall()
     categories = {row["category"] for row in questions}
     references = {}
     for category, url in PAGES.items():
@@ -785,7 +1093,9 @@ def import_all(conn, *, code_only=False):
     total_new = 0
     total_updated = 0
     existing = {}
-    for row in conn.execute("SELECT id, category, question, answer, url FROM questions"):
+    for row in conn.execute(
+        "SELECT id, category, question, answer, url FROM questions WHERE pack_id IS NULL"
+    ):
         existing.setdefault(_question_identity(row["category"], row["question"]), []).append(row)
     for cat, url in PAGES.items():
         try:
@@ -851,6 +1161,641 @@ class QuestionInUseError(Exception):
     pass
 
 
+class PackValidationError(ValueError):
+    pass
+
+
+class PackConflictError(Exception):
+    pass
+
+
+class PackQuestionReadOnlyError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class InterviewPackPayload:
+    manifest: dict
+    questions: list
+    experiences: list
+    manifest_sha256: str
+    member_sha256: dict
+
+
+def _pack_fail(message):
+    raise PackValidationError(message)
+
+
+def _pack_json_bytes(value):
+    try:
+        return json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    except (UnicodeEncodeError, ValueError, OverflowError) as exc:
+        raise PackValidationError("pack JSON cannot be encoded canonically") from exc
+
+
+def _pack_limited_text(value, label, maximum, *, allow_empty=False):
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
+        _pack_fail(f"{label} must be a {'string' if allow_empty else 'non-empty string'}")
+    if len(value) > maximum:
+        _pack_fail(f"{label} exceeds {maximum} characters")
+
+
+def _pack_stable_id(value, label):
+    _pack_limited_text(value, label, 128)
+    if not PACK_STABLE_ID_RE.fullmatch(value):
+        _pack_fail(f"{label} must be a portable ASCII stable_id")
+
+
+def _pack_sha256(value, label):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        _pack_fail(f"{label} must be a lowercase 64-character SHA-256")
+
+
+def _pack_source_path(value):
+    _pack_limited_text(value, "source path", PACK_SOURCE_PATH_MAX_CHARS)
+    normalized = unicodedata.normalize("NFC", value)
+    if (
+        value != normalized
+        or "\\" in value
+        or value.startswith("/")
+        or ":" in value
+        or any(part in ("", ".", "..") for part in value.split("/"))
+    ):
+        _pack_fail("source path must be a normalized relative path")
+    return value
+
+
+def _validate_pack_url(value):
+    _pack_limited_text(value, "source URL", 2048)
+    if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value):
+        _pack_fail("source URL is invalid")
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        _pack_fail("source URL is invalid")
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.netloc
+        or "@" in parsed.netloc
+        or not hostname
+        or parsed.username
+        or parsed.password
+    ):
+        _pack_fail("source URL is invalid")
+    if port is not None and not 0 <= port <= 65535:
+        _pack_fail("source URL is invalid")
+    try:
+        ascii_hostname = hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        _pack_fail("source URL is invalid")
+    hostname_value = ascii_hostname.rstrip(".")
+    labels = hostname_value.split(".")
+    if not hostname_value or len(hostname_value) > 253 or any(
+        not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+        for label in labels
+    ):
+        _pack_fail("source URL is invalid")
+
+
+def _validate_pack_sources(sources):
+    if not isinstance(sources, list) or not sources:
+        _pack_fail("sources must contain at least one source")
+    for source in sources:
+        if not isinstance(source, dict) or set(source) != {"path", "url"}:
+            _pack_fail("sources entries must contain path and URL")
+        _pack_source_path(source["path"])
+        _validate_pack_url(source["url"])
+
+
+def validate_interview_pack_payload(manifest, questions, experiences):
+    """Validate the exact public .bagu-pack JSON contract without database access."""
+    if not isinstance(manifest, dict) or set(manifest) != PACK_MANIFEST_FIELDS:
+        _pack_fail("manifest has invalid fields")
+    if (
+        manifest.get("format") != "bagu-pack"
+        or type(manifest.get("schema_version")) is not int
+        or manifest["schema_version"] != 1
+    ):
+        _pack_fail("manifest format or schema_version is invalid")
+    _pack_stable_id(manifest.get("pack_id"), "manifest pack_id")
+    _pack_limited_text(manifest.get("name"), "manifest name", 200)
+    _pack_limited_text(manifest.get("display_version"), "manifest display_version", 200)
+    if (
+        type(manifest.get("revision")) is not int
+        or not 1 <= manifest["revision"] <= SQLITE_INTEGER_MAX
+    ):
+        _pack_fail("manifest revision is invalid")
+    for field in ("source_snapshot_sha256", "questions_sha256", "experiences_sha256"):
+        _pack_sha256(manifest.get(field), f"manifest {field}")
+    if not isinstance(questions, list) or not questions:
+        _pack_fail("questions must be a non-empty list")
+    if len(questions) > PACK_MAX_QUESTIONS:
+        _pack_fail(f"questions exceeds limit of {PACK_MAX_QUESTIONS}")
+    if type(manifest.get("question_count")) is not int or manifest["question_count"] != len(questions):
+        _pack_fail("manifest question_count mismatch")
+    if not isinstance(experiences, list):
+        _pack_fail("experiences must be a list")
+    if type(manifest.get("experience_count")) is not int or manifest["experience_count"] != len(experiences):
+        _pack_fail("manifest experience_count mismatch")
+
+    question_ids = set()
+    for index, question in enumerate(questions):
+        if not isinstance(question, dict):
+            _pack_fail(f"question {index} must be an object")
+        kind = question.get("kind")
+        result_field = "answer" if kind == "review" else "preparation_prompt" if kind == "prepare" else None
+        if result_field is None:
+            _pack_fail(f"question {index} has invalid kind")
+        if set(question) != PACK_QUESTION_BASE_FIELDS | {result_field}:
+            _pack_fail(f"question {index} has invalid fields")
+        _pack_stable_id(question["stable_id"], f"question {index} stable_id")
+        _pack_limited_text(question["question"], f"question {index} question", 2000)
+        _pack_limited_text(question["category"], f"question {index} category", 100)
+        _pack_limited_text(question[result_field], f"question {index} {result_field}", 100000)
+        if question["stable_id"] in question_ids:
+            _pack_fail("duplicate question stable_id")
+        question_ids.add(question["stable_id"])
+        if question["review_status"] != "reviewed":
+            _pack_fail("question review_status must be reviewed")
+        if type(question["retired"]) is not bool:
+            _pack_fail("question retired must be a boolean")
+        _validate_pack_sources(question["sources"])
+
+    seen_experiences = set()
+    referenced_questions = set()
+    for experience in experiences:
+        if not isinstance(experience, dict) or set(experience) != PACK_EXPERIENCE_FIELDS:
+            _pack_fail("experience has invalid fields")
+        _pack_stable_id(experience["stable_id"], "experience stable_id")
+        if experience["stable_id"] in seen_experiences:
+            _pack_fail("duplicate experience stable_id")
+        seen_experiences.add(experience["stable_id"])
+        _pack_limited_text(experience["direction"], "experience direction", 200)
+        if experience["kind"] == "interview":
+            for field in ("company", "position", "stage"):
+                _pack_limited_text(experience[field], f"experience {field}", 200)
+        elif experience["kind"] == "topic_set":
+            for field in ("company", "position", "stage"):
+                _pack_limited_text(experience[field], f"experience {field}", 200, allow_empty=True)
+        else:
+            _pack_fail("experience has invalid kind")
+        sections = experience["sections"]
+        if not isinstance(sections, list) or not sections:
+            _pack_fail("experience sections must be a non-empty list")
+        section_ids = set()
+        in_experience = set()
+        recommended_count = 0
+        for expected_position, section in enumerate(sections, start=1):
+            if not isinstance(section, dict) or set(section) != {
+                "stable_id", "order", "title", "recommended", "question_ids"
+            }:
+                _pack_fail("section has invalid fields")
+            _pack_stable_id(section["stable_id"], "section stable_id")
+            if section["stable_id"] in section_ids:
+                _pack_fail("duplicate section stable_id")
+            section_ids.add(section["stable_id"])
+            if type(section["order"]) is not int or section["order"] != expected_position:
+                _pack_fail("section order must be consecutive starting at 1")
+            _pack_limited_text(section["title"], "section title", 200)
+            if type(section["recommended"]) is not bool:
+                _pack_fail("section recommended must be a boolean")
+            recommended_count += int(section["recommended"])
+            ids = section["question_ids"]
+            if not isinstance(ids, list) or not ids:
+                _pack_fail("section question_ids must be a non-empty list")
+            for stable_id in ids:
+                if stable_id not in question_ids:
+                    _pack_fail("experience contains an unknown question reference")
+                if stable_id in in_experience:
+                    _pack_fail("experience contains a duplicate question reference")
+                in_experience.add(stable_id)
+                referenced_questions.add(stable_id)
+        if recommended_count != 1:
+            _pack_fail("experience must contain exactly one recommended section")
+    orphaned = question_ids - referenced_questions
+    if orphaned:
+        _pack_fail("pack contains orphan questions")
+    if hashlib.sha256(_pack_json_bytes(questions)).hexdigest() != manifest["questions_sha256"]:
+        _pack_fail("manifest questions_sha256 mismatch")
+    if hashlib.sha256(_pack_json_bytes(experiences)).hexdigest() != manifest["experiences_sha256"]:
+        _pack_fail("manifest experiences_sha256 mismatch")
+
+
+def _load_pack_json(raw, name):
+    def reject_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                _pack_fail(f"{name} contains duplicate JSON fields")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda value: _pack_fail(f"{name} contains invalid JSON number"),
+        )
+    except PackValidationError:
+        raise
+    except (UnicodeDecodeError, ValueError, OverflowError, RecursionError) as exc:
+        raise PackValidationError(f"{name} is not valid UTF-8 JSON") from exc
+    if raw != _pack_json_bytes(value):
+        _pack_fail(f"{name} must use canonical JSON")
+    return value
+
+
+def parse_interview_pack(data):
+    """Strictly parse all canonical members before any database mutation."""
+    if not isinstance(data, (bytes, bytearray)):
+        _pack_fail("pack must be ZIP bytes")
+    raw = bytes(data)
+    if len(raw) > PACK_MAX_COMPRESSED_BYTES:
+        _pack_fail("pack compressed size exceeds 20 MiB")
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw), "r") as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if any(
+                not name or "/" in name or "\\" in name or name in (".", "..")
+                for name in names
+            ):
+                _pack_fail("pack ZIP member path is invalid")
+            if len(names) != len(set(names)):
+                _pack_fail("pack ZIP members must not be duplicated")
+            if len(infos) != len(PACK_MEMBER_NAMES) or set(names) != PACK_MEMBER_NAMES:
+                _pack_fail("pack contains unexpected ZIP members")
+            if any(info.flag_bits & 0x1 for info in infos):
+                _pack_fail("encrypted pack members are not supported")
+            if any(info.compress_type != zipfile.ZIP_DEFLATED for info in infos):
+                _pack_fail("pack ZIP members must use DEFLATED compression")
+            if sum(info.file_size for info in infos) > PACK_MAX_UNCOMPRESSED_BYTES:
+                _pack_fail("pack uncompressed size exceeds 50 MiB")
+            members = {name: archive.read(name) for name in PACK_MEMBER_NAMES}
+    except PackValidationError:
+        raise
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, zlib.error) as exc:
+        raise PackValidationError("pack is not a valid ZIP file") from exc
+    if sum(len(value) for value in members.values()) > PACK_MAX_UNCOMPRESSED_BYTES:
+        _pack_fail("pack uncompressed size exceeds 50 MiB")
+    manifest = _load_pack_json(members["manifest.json"], "manifest.json")
+    questions = _load_pack_json(members["questions.json"], "questions.json")
+    experiences = _load_pack_json(members["experiences.json"], "experiences.json")
+    validate_interview_pack_payload(manifest, questions, experiences)
+    return InterviewPackPayload(
+        manifest=manifest,
+        questions=questions,
+        experiences=experiences,
+        manifest_sha256=hashlib.sha256(members["manifest.json"]).hexdigest(),
+        member_sha256={
+            name: hashlib.sha256(members[name]).hexdigest() for name in sorted(PACK_MEMBER_NAMES)
+        },
+    )
+
+
+def _pack_row_public(row):
+    return {
+        "pack_id": row["pack_id"],
+        "name": row["name"],
+        "revision": row["revision"],
+        "display_version": row["display_version"],
+        "source_snapshot_sha256": row["source_snapshot_sha256"],
+        "question_count": row["question_count"],
+        "experience_count": row["experience_count"],
+        "questions_sha256": row["questions_sha256"],
+        "experiences_sha256": row["experiences_sha256"],
+        "manifest_sha256": row["manifest_sha256"],
+        "include_in_review": bool(row["include_in_review"]),
+        "installed_at": row["installed_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def list_interview_packs(conn):
+    rows = conn.execute("SELECT * FROM question_packs ORDER BY name COLLATE NOCASE, pack_id").fetchall()
+    return {"packs": [_pack_row_public(row) for row in rows]}
+
+
+def inspect_interview_pack(conn, data):
+    payload = parse_interview_pack(data)
+    manifest = payload.manifest
+    current = conn.execute(
+        "SELECT revision,manifest_sha256 FROM question_packs WHERE pack_id=?",
+        (manifest["pack_id"],),
+    ).fetchone()
+    if current is None:
+        status = "new"
+        installed_revision = None
+    elif manifest["revision"] < current["revision"]:
+        status = "downgrade"
+        installed_revision = current["revision"]
+    elif manifest["revision"] > current["revision"]:
+        status = "upgrade"
+        installed_revision = current["revision"]
+    elif payload.manifest_sha256 == current["manifest_sha256"]:
+        status = "installed"
+        installed_revision = current["revision"]
+    else:
+        status = "conflict"
+        installed_revision = current["revision"]
+    return {
+        "pack_id": manifest["pack_id"],
+        "name": manifest["name"],
+        "revision": manifest["revision"],
+        "display_version": manifest["display_version"],
+        "source_snapshot_sha256": manifest["source_snapshot_sha256"],
+        "question_count": manifest["question_count"],
+        "experience_count": manifest["experience_count"],
+        "questions_sha256": manifest["questions_sha256"],
+        "experiences_sha256": manifest["experiences_sha256"],
+        "manifest_sha256": payload.manifest_sha256,
+        "member_sha256": payload.member_sha256,
+        "installed_revision": installed_revision,
+        "status": status,
+    }
+
+
+def _move_existing_positions(conn, table, rows, highest_position):
+    if not rows:
+        return
+    offset = highest_position + len(rows) + 1
+    for index, row in enumerate(rows, start=1):
+        conn.execute(
+            f"UPDATE {table} SET position=? WHERE id=?",
+            (offset + index, row["id"]),
+        )
+
+
+def _available_positions(count, reserved):
+    positions = []
+    candidate = 1
+    while len(positions) < count:
+        if candidate not in reserved:
+            positions.append(candidate)
+        candidate += 1
+    return positions
+
+
+def _remove_incoming_relationships_from_omitted_sections(
+    conn, omitted_sections, incoming_question_ids
+):
+    """Keep historical section identity while current relationships win conflicts."""
+    incoming_question_ids = set(incoming_question_ids)
+    if not incoming_question_ids:
+        return
+    for section in omitted_sections:
+        for item in conn.execute(
+            "SELECT question_id FROM experience_items WHERE section_id=?",
+            (section["id"],),
+        ).fetchall():
+            if item["question_id"] in incoming_question_ids:
+                conn.execute(
+                    "DELETE FROM experience_items WHERE section_id=? AND question_id=?",
+                    (section["id"], item["question_id"]),
+                )
+
+
+def _install_pack_experiences(conn, pack_id, experiences, question_ids):
+    existing = conn.execute(
+        "SELECT id,stable_experience_id,position FROM experiences WHERE pack_id=? ORDER BY position,id",
+        (pack_id,),
+    ).fetchall()
+    by_stable = {row["stable_experience_id"]: row for row in existing}
+    payload_ids = {experience["stable_id"] for experience in experiences}
+    omitted_experiences = [
+        row for row in existing if row["stable_experience_id"] not in payload_ids
+    ]
+    included_experiences = [
+        row for row in existing if row["stable_experience_id"] in payload_ids
+    ]
+    _move_existing_positions(
+        conn, "experiences", included_experiences,
+        max((row["position"] for row in existing), default=0),
+    )
+    experience_positions = _available_positions(
+        len(experiences), {row["position"] for row in omitted_experiences}
+    )
+    for position, experience in zip(experience_positions, experiences):
+        old = by_stable.get(experience["stable_id"])
+        if old:
+            experience_id = old["id"]
+            conn.execute(
+                """UPDATE experiences SET kind=?,direction=?,company=?,role=?,stage=?,position=?
+                   WHERE id=?""",
+                (
+                    experience["kind"], experience["direction"], experience["company"],
+                    experience["position"], experience["stage"], position, experience_id,
+                ),
+            )
+        else:
+            cursor = conn.execute(
+                """INSERT INTO experiences(
+                       pack_id,stable_experience_id,kind,direction,company,role,stage,position
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    pack_id, experience["stable_id"], experience["kind"], experience["direction"],
+                    experience["company"], experience["position"], experience["stage"], position,
+                ),
+            )
+            experience_id = cursor.lastrowid
+        sections = conn.execute(
+            """SELECT id,stable_section_id,position FROM experience_sections
+               WHERE experience_id=? ORDER BY position,id""",
+            (experience_id,),
+        ).fetchall()
+        sections_by_stable = {row["stable_section_id"]: row for row in sections}
+        payload_section_ids = {section["stable_id"] for section in experience["sections"]}
+        omitted_sections = [
+            row for row in sections if row["stable_section_id"] not in payload_section_ids
+        ]
+        incoming_question_ids = {
+            question_ids[stable_question_id]
+            for section in experience["sections"]
+            for stable_question_id in section["question_ids"]
+        }
+        _remove_incoming_relationships_from_omitted_sections(
+            conn, omitted_sections, incoming_question_ids
+        )
+        included_sections = [
+            row for row in sections if row["stable_section_id"] in payload_section_ids
+        ]
+        _move_existing_positions(
+            conn, "experience_sections", included_sections,
+            max((row["position"] for row in sections), default=0),
+        )
+        section_positions = _available_positions(
+            len(experience["sections"]), {row["position"] for row in omitted_sections}
+        )
+        for section_position, section in zip(section_positions, experience["sections"]):
+            old_section = sections_by_stable.get(section["stable_id"])
+            if old_section:
+                section_id = old_section["id"]
+                conn.execute(
+                    """UPDATE experience_sections
+                       SET title=?,recommended=?,position=? WHERE id=?""",
+                    (section["title"], int(section["recommended"]), section_position, section_id),
+                )
+            else:
+                cursor = conn.execute(
+                    """INSERT INTO experience_sections(
+                           experience_id,stable_section_id,title,recommended,position
+                       ) VALUES(?,?,?,?,?)""",
+                    (
+                        experience_id, section["stable_id"], section["title"],
+                        int(section["recommended"]), section_position,
+                    ),
+                )
+                section_id = cursor.lastrowid
+            conn.execute("DELETE FROM experience_items WHERE section_id=?", (section_id,))
+            for item_position, stable_question_id in enumerate(section["question_ids"], start=1):
+                conn.execute(
+                    "INSERT INTO experience_items(section_id,question_id,position) VALUES(?,?,?)",
+                    (section_id, question_ids[stable_question_id], item_position),
+                )
+
+
+def install_interview_pack(conn, data):
+    payload = parse_interview_pack(data)
+    manifest = payload.manifest
+    pack_id = manifest["pack_id"]
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        blocked = _backup_open_session_error(conn)
+        if blocked:
+            raise blocked
+        current = conn.execute(
+            "SELECT * FROM question_packs WHERE pack_id=?", (pack_id,)
+        ).fetchone()
+        if current:
+            if manifest["revision"] < current["revision"]:
+                raise PackConflictError("pack revision is lower than the installed revision")
+            if manifest["revision"] == current["revision"]:
+                if payload.manifest_sha256 != current["manifest_sha256"]:
+                    raise PackConflictError("same revision has conflicting content")
+                conn.commit()
+                result = _pack_row_public(current)
+                result["status"] = "unchanged"
+                return result
+        existing_questions = {
+            row["stable_question_id"]: row
+            for row in conn.execute(
+                "SELECT id,stable_question_id,question_type FROM questions WHERE pack_id=?",
+                (pack_id,),
+            )
+        }
+        existing_experience = conn.execute(
+            "SELECT 1 FROM experiences WHERE pack_id=? LIMIT 1", (pack_id,)
+        ).fetchone()
+        if current is None and (existing_questions or existing_experience):
+            raise PackConflictError("pack_id conflicts with orphaned pack-owned rows")
+        for question in payload.questions:
+            old = existing_questions.get(question["stable_id"])
+            if old and old["question_type"] != question["kind"]:
+                raise PackConflictError(
+                    f"question type changed for stable_id {question['stable_id']}"
+                )
+        now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if current is None:
+            conn.execute(
+                """INSERT INTO question_packs(
+                       pack_id,name,revision,display_version,source_snapshot_sha256,
+                       question_count,experience_count,questions_sha256,experiences_sha256,
+                       manifest_sha256,include_in_review,installed_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    pack_id, manifest["name"], manifest["revision"], manifest["display_version"],
+                    manifest["source_snapshot_sha256"], manifest["question_count"],
+                    manifest["experience_count"], manifest["questions_sha256"],
+                    manifest["experiences_sha256"], payload.manifest_sha256, 1, now, now,
+                ),
+            )
+        question_ids = {}
+        for question in payload.questions:
+            answer = question["answer"] if question["kind"] == "review" else ""
+            prompt = question["preparation_prompt"] if question["kind"] == "prepare" else ""
+            first_url = question["sources"][0]["url"]
+            old = existing_questions.get(question["stable_id"])
+            if old:
+                question_id = old["id"]
+                conn.execute(
+                    """UPDATE questions
+                       SET category=?,question=?,answer=?,url=?,preparation_prompt=?,
+                           answer_review_status='reviewed',retired=?
+                       WHERE id=?""",
+                    (
+                        question["category"], question["question"], answer, first_url, prompt,
+                        int(question["retired"]), question_id,
+                    ),
+                )
+            else:
+                cursor = conn.execute(
+                    """INSERT INTO questions(
+                           category,question,answer,url,pack_id,stable_question_id,question_type,
+                           preparation_prompt,answer_review_status,retired
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        question["category"], question["question"], answer, first_url, pack_id,
+                        question["stable_id"], question["kind"], prompt, "reviewed",
+                        int(question["retired"]),
+                    ),
+                )
+                question_id = cursor.lastrowid
+            question_ids[question["stable_id"]] = question_id
+            conn.execute("DELETE FROM question_sources WHERE question_id=?", (question_id,))
+            for position, source in enumerate(question["sources"], start=1):
+                conn.execute(
+                    """INSERT INTO question_sources(question_id,position,source_path,source_url)
+                       VALUES(?,?,?,?)""",
+                    (question_id, position, source["path"], source["url"]),
+                )
+        _install_pack_experiences(conn, pack_id, payload.experiences, question_ids)
+        if current is not None:
+            conn.execute(
+                """UPDATE question_packs
+                   SET name=?,revision=?,display_version=?,source_snapshot_sha256=?,
+                       question_count=?,experience_count=?,questions_sha256=?,experiences_sha256=?,
+                       manifest_sha256=?,updated_at=?
+                   WHERE pack_id=?""",
+                (
+                    manifest["name"], manifest["revision"], manifest["display_version"],
+                    manifest["source_snapshot_sha256"], manifest["question_count"],
+                    manifest["experience_count"], manifest["questions_sha256"],
+                    manifest["experiences_sha256"], payload.manifest_sha256, now, pack_id,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    row = conn.execute("SELECT * FROM question_packs WHERE pack_id=?", (pack_id,)).fetchone()
+    result = _pack_row_public(row)
+    result["status"] = "installed" if current is None else "upgraded"
+    return result
+
+
+def set_pack_review_enabled(conn, pack_id, include_in_review):
+    if type(include_in_review) is not bool:
+        raise PackValidationError("include_in_review must be a boolean")
+    try:
+        cursor = conn.execute(
+            "UPDATE question_packs SET include_in_review=? WHERE pack_id=?",
+            (int(include_in_review), pack_id),
+        )
+        if cursor.rowcount != 1:
+            raise LookupError(f"pack not found: {pack_id}")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return _pack_row_public(
+        conn.execute("SELECT * FROM question_packs WHERE pack_id=?", (pack_id,)).fetchone()
+    )
+
+
 def _clean_question(data):
     if not isinstance(data, dict):
         raise QuestionValidationError("题目数据必须是对象")
@@ -878,13 +1823,177 @@ def _clean_question(data):
 
 
 def _backup_json_bytes(value):
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    try:
+        return json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    except (UnicodeEncodeError, ValueError, OverflowError) as error:
+        raise ValueError("备份 JSON 无法安全编码") from error
+
+
+@dataclass(frozen=True)
+class BackupPayload:
+    summary: dict
+    local_questions: list
+    pack_questions: list
+    packs: list
+    experiences: list
+
+
+def _backup_utc_timestamp():
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _backup_source_rows(conn, question_id):
+    return [
+        {"path": row["source_path"], "url": row["source_url"]}
+        for row in conn.execute(
+            """SELECT source_path,source_url FROM question_sources
+               WHERE question_id=? ORDER BY position""",
+            (question_id,),
+        )
+    ]
+
+
+def _export_backup_experiences(conn):
+    exported = []
+    for experience in conn.execute(
+        """SELECT id,pack_id,stable_experience_id,kind,direction,company,role,stage,position
+           FROM experiences ORDER BY pack_id,position,id"""
+    ):
+        sections = []
+        for section in conn.execute(
+            """SELECT id,stable_section_id,title,recommended,position
+               FROM experience_sections WHERE experience_id=? ORDER BY position,id""",
+            (experience["id"],),
+        ):
+            question_ids = [
+                row["stable_question_id"]
+                for row in conn.execute(
+                    """SELECT q.stable_question_id FROM experience_items i
+                       JOIN questions q ON q.id=i.question_id
+                       WHERE i.section_id=? ORDER BY i.position,q.id""",
+                    (section["id"],),
+                )
+            ]
+            sections.append({
+                "stable_id": section["stable_section_id"],
+                "order": section["position"],
+                "title": section["title"],
+                "recommended": bool(section["recommended"]),
+                "question_ids": question_ids,
+            })
+        exported.append({
+            "pack_id": experience["pack_id"],
+            "stable_id": experience["stable_experience_id"],
+            "kind": experience["kind"],
+            "direction": experience["direction"],
+            "company": experience["company"],
+            "position": experience["role"],
+            "stage": experience["stage"],
+            "order": experience["position"],
+            "sections": sections,
+        })
+    return exported
+
+
+@contextlib.contextmanager
+def _backup_read_snapshot(conn):
+    """Hold one SQLite snapshot for every SELECT used by a portable export."""
+    savepoint = "bagu_backup_export_snapshot"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        yield
+    except BaseException:
+        try:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        finally:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    else:
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
+def _collect_backup_snapshot(conn, mode):
+    with _backup_read_snapshot(conn):
+        local_rows = conn.execute(
+            """SELECT category, question, answer, url, level, times_seen, times_right,
+                      next_due, last_reviewed
+               FROM questions WHERE pack_id IS NULL ORDER BY category, question LIMIT ?""",
+            (BACKUP_MAX_QUESTIONS + 1,),
+        ).fetchall()
+        pack_rows = conn.execute(
+            """SELECT id,pack_id,stable_question_id,category,question,answer,question_type,
+                      preparation_prompt,answer_review_status,retired,level,times_seen,
+                      times_right,next_due,last_reviewed
+               FROM questions WHERE pack_id IS NOT NULL
+               ORDER BY pack_id,stable_question_id LIMIT ?""",
+            (BACKUP_MAX_QUESTIONS + 1,),
+        ).fetchall()
+        if len(local_rows) + len(pack_rows) > BACKUP_MAX_QUESTIONS:
+            raise ValueError("备份最多包含 10000 道题")
+        fields = (
+            BACKUP_QUESTION_FIELDS
+            if mode == "progress"
+            else set(QUESTION_IMPORT_FIELDS)
+        )
+        local_questions = [{key: row[key] for key in fields} for row in local_rows]
+        for index, question in enumerate(local_questions, start=1):
+            for key in ("answer", "url"):
+                if question[key] is None:
+                    question[key] = ""
+            _validate_backup_question(question, index, mode, 3)
+        local_questions.sort(key=lambda item: (item["category"], item["question"]))
+
+        pack_questions = []
+        progress_fields = (
+            "level", "times_seen", "times_right", "next_due", "last_reviewed",
+        )
+        for row in pack_rows:
+            item = {
+                "pack_id": row["pack_id"],
+                "stable_id": row["stable_question_id"],
+                "category": row["category"],
+                "question": row["question"],
+                "kind": row["question_type"],
+                "review_status": row["answer_review_status"],
+                "retired": bool(row["retired"]),
+                "sources": _backup_source_rows(conn, row["id"]),
+            }
+            if row["question_type"] == "review":
+                item["answer"] = row["answer"] if row["answer"] is not None else ""
+            elif row["question_type"] == "prepare":
+                item["preparation_prompt"] = row["preparation_prompt"]
+            else:
+                raise ValueError("题包题类型不合法")
+            if mode == "progress":
+                item.update({field: row[field] for field in progress_fields})
+            pack_questions.append(item)
+
+        packs = [
+            {
+                "pack_id": row["pack_id"],
+                "name": row["name"],
+                "revision": row["revision"],
+                "display_version": row["display_version"],
+                "source_snapshot_sha256": row["source_snapshot_sha256"],
+                "question_count": row["question_count"],
+                "experience_count": row["experience_count"],
+                "questions_sha256": row["questions_sha256"],
+                "experiences_sha256": row["experiences_sha256"],
+                "manifest_sha256": row["manifest_sha256"],
+                "include_in_review": bool(row["include_in_review"]),
+            }
+            for row in conn.execute("SELECT * FROM question_packs ORDER BY pack_id")
+        ]
+        experiences = _export_backup_experiences(conn)
+    return local_questions, pack_questions, packs, experiences
 
 
 def export_backup(conn, app_version=None, mode="progress"):
-    """Export question content, optionally with progress, never session data."""
+    """Export a cumulative v3 content snapshot without sessions or analysis."""
     if mode not in ("questions", "progress"):
         raise ValueError("备份 mode 必须是 questions 或 progress")
     if app_version is None:
@@ -892,42 +2001,41 @@ def export_backup(conn, app_version=None, mode="progress"):
             app_version = json.loads((Path(__file__).parent / "version.json").read_text(encoding="utf-8"))["versionName"]
         except (OSError, ValueError, KeyError, TypeError) as e:
             raise ValueError("无法读取应用版本") from e
-    rows = conn.execute(
-        """SELECT category, question, answer, url, level, times_seen, times_right,
-                  next_due, last_reviewed
-           FROM questions ORDER BY category, question LIMIT ?""",
-        (BACKUP_MAX_QUESTIONS + 1,),
-    ).fetchall()
-    if len(rows) > BACKUP_MAX_QUESTIONS:
-        raise ValueError("备份最多包含 10000 道题")
-    fields = BACKUP_QUESTION_FIELDS if mode == "progress" else set(QUESTION_IMPORT_FIELDS)
-    questions = [{key: row[key] for key in fields} for row in rows]
-    for index, question in enumerate(questions, start=1):
-        # Older databases allow null optional text; v2 emits canonical strings.
-        for key in ("answer", "url"):
-            if question[key] is None:
-                question[key] = ""
-        _validate_backup_question(question, index, mode)
-    questions.sort(key=lambda item: (item["category"], item["question"]))
-    questions_bytes = _backup_json_bytes(questions)
+    local_questions, pack_questions, packs, experiences = _collect_backup_snapshot(
+        conn, mode
+    )
+    questions_document = {"local": local_questions, "pack": pack_questions}
+    questions_bytes = _backup_json_bytes(questions_document)
+    packs_bytes = _backup_json_bytes(packs)
+    experiences_bytes = _backup_json_bytes(experiences)
     manifest = {
         "format": "bagu-backup",
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": mode,
-        "created_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        ),
+        "created_at": _backup_utc_timestamp(),
         "app_version": app_version,
-        "question_count": len(questions),
+        "question_count": len(local_questions) + len(pack_questions),
+        "local_question_count": len(local_questions),
+        "pack_question_count": len(pack_questions),
+        "pack_count": len(packs),
+        "experience_count": len(experiences),
         "questions_sha256": hashlib.sha256(questions_bytes).hexdigest(),
+        "packs_sha256": hashlib.sha256(packs_bytes).hexdigest(),
+        "experiences_sha256": hashlib.sha256(experiences_bytes).hexdigest(),
     }
     manifest_bytes = _backup_json_bytes(manifest)
-    if len(manifest_bytes) + len(questions_bytes) > BACKUP_MAX_UNCOMPRESSED_BYTES:
+    members = {
+        "manifest.json": manifest_bytes,
+        "questions.json": questions_bytes,
+        "packs.json": packs_bytes,
+        "experiences.json": experiences_bytes,
+    }
+    if sum(len(value) for value in members.values()) > BACKUP_MAX_UNCOMPRESSED_BYTES:
         raise ValueError("备份解压后不能超过 50 MiB")
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("manifest.json", manifest_bytes)
-        archive.writestr("questions.json", questions_bytes)
+        for name in ("manifest.json", "questions.json", "packs.json", "experiences.json"):
+            archive.writestr(name, members[name])
     payload = out.getvalue()
     # Keep export and restore on the same format/field/byte contract, before
     # either caller can write or report a successful portable archive.
@@ -949,8 +2057,44 @@ def _load_backup_json(raw, name):
             raw.decode("utf-8"), object_pairs_hook=reject_duplicates,
             parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"{name} 含非法数字")),
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as e:
+    except (UnicodeDecodeError, json.JSONDecodeError, OverflowError, RecursionError) as e:
         raise ValueError(f"{name} 不是有效 UTF-8 JSON") from e
+
+
+def _validate_backup_text(value, field, maximum, *, allow_empty=False):
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
+        raise ValueError(f"{field} 必须是{'可为空的' if allow_empty else '非空'}文本")
+    if len(value) > maximum:
+        raise ValueError(f"{field} 不能超过 {maximum} 个字符")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError(f"{field} 含无效 Unicode") from error
+    return value
+
+
+def _validate_backup_sha(value, field):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError(f"{field} 不合法")
+    return value
+
+
+def _validate_backup_count(value, field, maximum=None):
+    if maximum is None:
+        maximum = BACKUP_MAX_QUESTIONS
+    if type(value) is not int or not 0 <= value <= maximum:
+        raise ValueError(f"{field} 不合法")
+    return value
+
+
+def _validate_backup_created_at(value):
+    if not isinstance(value, str):
+        raise ValueError("manifest created_at 不合法")
+    try:
+        dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as error:
+        raise ValueError("manifest created_at 必须是 UTC 时间") from error
+    return value
 
 
 def _validate_backup_date(value, field):
@@ -965,18 +2109,7 @@ def _validate_backup_date(value, field):
     return value
 
 
-def _validate_backup_question(item, index, mode="progress", schema_version=2):
-    fields = BACKUP_QUESTION_FIELDS if mode == "progress" else set(QUESTION_IMPORT_FIELDS)
-    if not isinstance(item, dict) or set(item) != fields:
-        raise ValueError(f"第 {index} 道题字段不合法")
-    if schema_version == 2 and any(not isinstance(item[field], str) for field in QUESTION_IMPORT_FIELDS):
-        raise ValueError(f"第 {index} 道题内容字段必须是字符串")
-    try:
-        cleaned = _clean_question(item)
-    except QuestionValidationError as e:
-        raise ValueError(f"第 {index} 道题：{e}") from e
-    if mode == "questions":
-        return cleaned
+def _validate_backup_progress(item, index):
     progress = {}
     for field in ("level", "times_seen", "times_right"):
         value = item[field]
@@ -987,67 +2120,344 @@ def _validate_backup_question(item, index, mode="progress", schema_version=2):
         raise ValueError(f"第 {index} 道题 level 超出范围")
     if progress["times_right"] > progress["times_seen"]:
         raise ValueError(f"第 {index} 道题 times_right 不能大于 times_seen")
-    cleaned.update(progress)
-    cleaned["next_due"] = _validate_backup_date(item["next_due"], "next_due")
-    cleaned["last_reviewed"] = _validate_backup_date(item["last_reviewed"], "last_reviewed")
+    progress["next_due"] = _validate_backup_date(item["next_due"], "next_due")
+    progress["last_reviewed"] = _validate_backup_date(
+        item["last_reviewed"], "last_reviewed"
+    )
+    return progress
+
+
+def _validate_backup_question(item, index, mode="progress", schema_version=2):
+    fields = BACKUP_QUESTION_FIELDS if mode == "progress" else set(QUESTION_IMPORT_FIELDS)
+    if not isinstance(item, dict) or set(item) != fields:
+        raise ValueError(f"第 {index} 道题字段不合法")
+    if schema_version in (2, 3) and any(
+        not isinstance(item[field], str) for field in QUESTION_IMPORT_FIELDS
+    ):
+        raise ValueError(f"第 {index} 道题内容字段必须是字符串")
+    if schema_version == 3:
+        _validate_backup_text(item["category"], f"第 {index} 道题分类", 100)
+        _validate_backup_text(item["question"], f"第 {index} 道题题干", 2000)
+        _validate_backup_text(
+            item["answer"], f"第 {index} 道题答案", 100000, allow_empty=True
+        )
+        _validate_backup_text(
+            item["url"], f"第 {index} 道题 URL", 2048, allow_empty=True
+        )
+        if item["url"]:
+            try:
+                _validate_pack_url(item["url"])
+            except PackValidationError:
+                raise ValueError(
+                    f"第 {index} 道题 URL 必须是安全的 HTTP(S) 地址"
+                ) from None
+    try:
+        cleaned = _clean_question(item)
+    except QuestionValidationError as e:
+        raise ValueError(f"第 {index} 道题：{e}") from e
+    if mode == "questions":
+        return cleaned
+    cleaned.update(_validate_backup_progress(item, index))
     return cleaned
 
 
-def _parse_backup(data):
-    """Fully validate a .bagu-backup archive before it can mutate a database."""
-    if not isinstance(data, (bytes, bytearray)):
-        raise ValueError("备份必须是 ZIP 字节数据")
-    raw = bytes(data)
-    if len(raw) > BACKUP_MAX_COMPRESSED_BYTES:
-        raise ValueError("备份压缩文件不能超过 20 MiB")
+def _validate_backup_pack_question(item, index, mode):
+    if not isinstance(item, dict):
+        raise ValueError(f"第 {index} 道题包题必须是对象")
+    kind = item.get("kind")
+    content_field = (
+        "answer" if kind == "review"
+        else "preparation_prompt" if kind == "prepare"
+        else None
+    )
+    if content_field is None:
+        raise ValueError(f"第 {index} 道题包题 kind 不合法")
+    fields = BACKUP_V3_PACK_QUESTION_FIELDS | {content_field}
+    if mode == "progress":
+        fields |= {
+            "level", "times_seen", "times_right", "next_due", "last_reviewed",
+        }
+    if set(item) != fields:
+        raise ValueError(f"第 {index} 道题包题字段不合法")
+    _pack_stable_id(item["pack_id"], f"backup question {index} pack_id")
+    _pack_stable_id(item["stable_id"], f"backup question {index} stable_id")
+    _validate_backup_text(item["category"], f"第 {index} 道题分类", 100)
+    _validate_backup_text(item["question"], f"第 {index} 道题题干", 2000)
+    _validate_backup_text(item[content_field], f"第 {index} 道题内容", 100000)
+    if item["review_status"] != "reviewed":
+        raise ValueError(f"第 {index} 道题必须已复核")
+    if type(item["retired"]) is not bool:
+        raise ValueError(f"第 {index} 道题 retired 必须是布尔值")
     try:
-        with zipfile.ZipFile(io.BytesIO(raw), "r") as archive:
-            infos = archive.infolist()
-            names = [info.filename for info in infos]
-            if len(infos) != len(BACKUP_MEMBER_NAMES) or set(names) != BACKUP_MEMBER_NAMES:
-                raise ValueError("备份只能包含 manifest.json 和 questions.json")
-            if len(set(names)) != len(names):
-                raise ValueError("备份 ZIP 成员不能重复")
-            if any(info.flag_bits & 0x1 for info in infos):
-                raise ValueError("不支持加密备份")
-            if any("/" in name or "\\" in name or name in {".", ".."} for name in names):
-                raise ValueError("备份 ZIP 路径不合法")
-            if sum(info.file_size for info in infos) > BACKUP_MAX_UNCOMPRESSED_BYTES:
-                raise ValueError("备份解压后不能超过 50 MiB")
-            manifest_raw = archive.read("manifest.json")
-            questions_raw = archive.read("questions.json")
-    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, zlib.error) as e:
-        raise ValueError("备份不是有效 ZIP 文件") from e
-    if len(manifest_raw) + len(questions_raw) > BACKUP_MAX_UNCOMPRESSED_BYTES:
-        raise ValueError("备份解压后不能超过 50 MiB")
-    manifest = _load_backup_json(manifest_raw, "manifest.json")
-    questions = _load_backup_json(questions_raw, "questions.json")
-    if not isinstance(manifest, dict):
-        raise ValueError("manifest.json 字段不合法")
-    version = manifest.get("schema_version")
-    if type(version) is not int or version not in (1, 2):
-        raise ValueError("不支持的备份格式或 schema_version")
+        _validate_pack_sources(item["sources"])
+    except PackValidationError:
+        raise ValueError(f"第 {index} 道题 sources 不合法") from None
+    source_identities = set()
+    for source in item["sources"]:
+        _validate_backup_text(source["path"], "来源路径", 2048)
+        identity = (source["path"], source["url"])
+        if identity in source_identities:
+            raise ValueError(f"第 {index} 道题含重复来源")
+        source_identities.add(identity)
+    cleaned = dict(item)
+    cleaned["sources"] = [dict(source) for source in item["sources"]]
+    if mode == "progress":
+        progress = _validate_backup_progress(item, index)
+        if kind == "prepare" and tuple(progress.values()) != (0, 0, 0, None, None):
+            raise ValueError("准备类题目不能包含调度进度")
+    return cleaned
+
+
+def _validate_backup_pack(item, index):
+    if not isinstance(item, dict) or set(item) != BACKUP_V3_PACK_FIELDS:
+        raise ValueError(f"第 {index} 个题包字段不合法")
+    _pack_stable_id(item["pack_id"], f"backup pack {index} pack_id")
+    _validate_backup_text(item["name"], f"第 {index} 个题包名称", 200)
+    _validate_backup_text(item["display_version"], f"第 {index} 个题包版本", 200)
+    if type(item["revision"]) is not int or not 1 <= item["revision"] <= SQLITE_INTEGER_MAX:
+        raise ValueError(f"第 {index} 个题包 revision 不合法")
+    if type(item["question_count"]) is not int or not 1 <= item["question_count"] <= BACKUP_MAX_QUESTIONS:
+        raise ValueError(f"第 {index} 个题包 question_count 不合法")
+    if (
+        type(item["experience_count"]) is not int
+        or not 1 <= item["experience_count"] <= SQLITE_INTEGER_MAX
+    ):
+        raise ValueError(f"第 {index} 个题包 experience_count 不合法")
+    for field in (
+        "source_snapshot_sha256", "questions_sha256", "experiences_sha256",
+        "manifest_sha256",
+    ):
+        _validate_backup_sha(item[field], f"第 {index} 个题包 {field}")
+    if type(item["include_in_review"]) is not bool:
+        raise ValueError(f"第 {index} 个题包 include_in_review 必须是布尔值")
+    original_manifest = {
+        "format": "bagu-pack",
+        "schema_version": 1,
+        "pack_id": item["pack_id"],
+        "name": item["name"],
+        "revision": item["revision"],
+        "display_version": item["display_version"],
+        "source_snapshot_sha256": item["source_snapshot_sha256"],
+        "question_count": item["question_count"],
+        "experience_count": item["experience_count"],
+        "questions_sha256": item["questions_sha256"],
+        "experiences_sha256": item["experiences_sha256"],
+    }
+    expected_manifest_sha256 = hashlib.sha256(
+        _pack_json_bytes(original_manifest)
+    ).hexdigest()
+    if expected_manifest_sha256 != item["manifest_sha256"]:
+        raise ValueError(f"第 {index} 个题包 manifest 身份校验失败")
+    return dict(item)
+
+
+def _validate_backup_order(value, field):
+    if type(value) is not int or not 1 <= value <= SQLITE_INTEGER_MAX:
+        raise ValueError(f"{field} 必须是正整数")
+    return value
+
+
+def _validate_backup_experiences(experiences, packs_by_id, questions_by_pack):
+    if not isinstance(experiences, list):
+        raise ValueError("experiences.json 必须是数组")
+    validated = []
+    experience_ids = set()
+    positions_by_pack = {}
+    counts_by_pack = {}
+    for index, experience in enumerate(experiences, start=1):
+        if not isinstance(experience, dict) or set(experience) != BACKUP_V3_EXPERIENCE_FIELDS:
+            raise ValueError(f"第 {index} 个专题字段不合法")
+        pack_id = experience["pack_id"]
+        if pack_id not in packs_by_id:
+            raise ValueError(f"第 {index} 个专题引用未知题包")
+        _pack_stable_id(experience["stable_id"], f"backup experience {index} stable_id")
+        identity = (pack_id, experience["stable_id"])
+        if identity in experience_ids:
+            raise ValueError("专题稳定 ID 重复")
+        experience_ids.add(identity)
+        order = _validate_backup_order(experience["order"], f"第 {index} 个专题 order")
+        positions = positions_by_pack.setdefault(pack_id, set())
+        if order in positions:
+            raise ValueError("同一题包内专题 order 重复")
+        positions.add(order)
+        counts_by_pack[pack_id] = counts_by_pack.get(pack_id, 0) + 1
+        _validate_backup_text(experience["direction"], "专题方向", 200)
+        if experience["kind"] == "interview":
+            for field in ("company", "position", "stage"):
+                _validate_backup_text(experience[field], f"专题 {field}", 200)
+        elif experience["kind"] == "topic_set":
+            for field in ("company", "position", "stage"):
+                _validate_backup_text(
+                    experience[field], f"专题 {field}", 200, allow_empty=True
+                )
+        else:
+            raise ValueError("专题 kind 不合法")
+        sections = experience["sections"]
+        if not isinstance(sections, list) or not sections:
+            raise ValueError("专题 sections 必须是非空数组")
+        section_ids = set()
+        section_orders = set()
+        experience_references = set()
+        recommended = 0
+        for section_index, section in enumerate(sections, start=1):
+            if not isinstance(section, dict) or set(section) != {
+                "stable_id", "order", "title", "recommended", "question_ids",
+            }:
+                raise ValueError("章节字段不合法")
+            _pack_stable_id(section["stable_id"], "backup section stable_id")
+            if section["stable_id"] in section_ids:
+                raise ValueError("章节稳定 ID 重复")
+            section_ids.add(section["stable_id"])
+            section_order = _validate_backup_order(section["order"], "章节 order")
+            if section_order in section_orders:
+                raise ValueError("章节 order 重复")
+            section_orders.add(section_order)
+            _validate_backup_text(section["title"], "章节标题", 200)
+            if type(section["recommended"]) is not bool:
+                raise ValueError("章节 recommended 必须是布尔值")
+            recommended += int(section["recommended"])
+            question_ids = section["question_ids"]
+            if not isinstance(question_ids, list):
+                raise ValueError("章节 question_ids 必须是数组")
+            section_references = set()
+            for stable_id in question_ids:
+                _pack_stable_id(stable_id, "backup experience question stable_id")
+                if stable_id not in questions_by_pack.get(pack_id, set()):
+                    raise ValueError("专题引用未知或其他题包的题目")
+                if stable_id in section_references:
+                    raise ValueError("同一章节重复引用题目")
+                if stable_id in experience_references:
+                    raise ValueError("同一专题跨章节重复引用题目")
+                section_references.add(stable_id)
+                experience_references.add(stable_id)
+        if section_orders != set(range(1, len(sections) + 1)):
+            raise ValueError("章节 order 必须连续")
+        if recommended < 1:
+            raise ValueError("每个专题必须至少保留一个推荐章节")
+        validated.append({
+            **experience,
+            "sections": [
+                {**section, "question_ids": list(section["question_ids"])}
+                for section in sections
+            ],
+        })
+    for pack_id, positions in positions_by_pack.items():
+        if positions != set(range(1, len(positions) + 1)):
+            raise ValueError("题包内专题 order 必须连续")
+    for pack_id, pack in packs_by_id.items():
+        if counts_by_pack.get(pack_id, 0) < pack["experience_count"]:
+            raise ValueError("题包专题快照少于已记录数量")
+    return validated
+
+
+def _parse_backup_v3(manifest, members):
+    if set(manifest) != BACKUP_V3_MANIFEST_FIELDS or manifest.get("format") != "bagu-backup":
+        raise ValueError("manifest.json 字段或格式不合法")
+    mode = manifest["mode"]
+    if mode not in ("questions", "progress"):
+        raise ValueError("manifest mode 不合法")
+    _validate_backup_text(manifest["app_version"], "manifest app_version", 100)
+    _validate_backup_created_at(manifest["created_at"])
+    for field in ("question_count", "local_question_count", "pack_question_count"):
+        _validate_backup_count(manifest[field], f"manifest {field}")
+    for field in ("pack_count", "experience_count"):
+        _validate_backup_count(
+            manifest[field], f"manifest {field}", SQLITE_INTEGER_MAX
+        )
+    for name, field in (
+        ("questions.json", "questions_sha256"),
+        ("packs.json", "packs_sha256"),
+        ("experiences.json", "experiences_sha256"),
+    ):
+        digest = _validate_backup_sha(manifest[field], f"manifest {field}")
+        if hashlib.sha256(members[name]).hexdigest() != digest:
+            raise ValueError(f"{name} 哈希不匹配")
+    questions_document = _load_backup_json(members["questions.json"], "questions.json")
+    packs_document = _load_backup_json(members["packs.json"], "packs.json")
+    experiences_document = _load_backup_json(
+        members["experiences.json"], "experiences.json"
+    )
+    if not isinstance(questions_document, dict) or set(questions_document) != {"local", "pack"}:
+        raise ValueError("questions.json 字段不合法")
+    if not isinstance(questions_document["local"], list) or not isinstance(
+        questions_document["pack"], list
+    ):
+        raise ValueError("questions.json 题目列表不合法")
+    local_questions = []
+    local_identities = set()
+    for index, item in enumerate(questions_document["local"], start=1):
+        cleaned = _validate_backup_question(item, index, mode, 3)
+        identity = (cleaned["category"], cleaned["question"])
+        if identity in local_identities:
+            raise ValueError("备份中存在重复的本地分类和题目")
+        local_identities.add(identity)
+        local_questions.append(cleaned)
+    pack_questions = []
+    pack_question_identities = set()
+    questions_by_pack = {}
+    for index, item in enumerate(questions_document["pack"], start=1):
+        cleaned = _validate_backup_pack_question(item, index, mode)
+        identity = (cleaned["pack_id"], cleaned["stable_id"])
+        if identity in pack_question_identities:
+            raise ValueError("备份中存在重复的题包题稳定 ID")
+        pack_question_identities.add(identity)
+        questions_by_pack.setdefault(cleaned["pack_id"], set()).add(cleaned["stable_id"])
+        pack_questions.append(cleaned)
+    if len(local_questions) + len(pack_questions) > BACKUP_MAX_QUESTIONS:
+        raise ValueError("一次最多恢复 10000 道题")
+    if not isinstance(packs_document, list):
+        raise ValueError("packs.json 必须是数组")
+    packs = []
+    packs_by_id = {}
+    for index, item in enumerate(packs_document, start=1):
+        cleaned = _validate_backup_pack(item, index)
+        if cleaned["pack_id"] in packs_by_id:
+            raise ValueError("备份中存在重复题包 ID")
+        packs_by_id[cleaned["pack_id"]] = cleaned
+        packs.append(cleaned)
+    if set(questions_by_pack) - set(packs_by_id):
+        raise ValueError("题包题引用未知题包")
+    for pack_id, pack in packs_by_id.items():
+        if len(questions_by_pack.get(pack_id, set())) < pack["question_count"]:
+            raise ValueError("题包题快照少于已记录数量")
+    experiences = _validate_backup_experiences(
+        experiences_document, packs_by_id, questions_by_pack
+    )
+    expected_counts = {
+        "question_count": len(local_questions) + len(pack_questions),
+        "local_question_count": len(local_questions),
+        "pack_question_count": len(pack_questions),
+        "pack_count": len(packs),
+        "experience_count": len(experiences),
+    }
+    if any(manifest[field] != value for field, value in expected_counts.items()):
+        raise ValueError("manifest 计数与备份内容不匹配")
+    summary = {
+        "schema_version": 3,
+        "mode": mode,
+        **expected_counts,
+        "created_at": manifest["created_at"],
+        "app_version": manifest["app_version"],
+    }
+    return BackupPayload(summary, local_questions, pack_questions, packs, experiences)
+
+
+def _parse_legacy_backup(manifest, questions_raw, version):
     fields = BACKUP_MANIFEST_FIELDS | ({"mode"} if version == 2 else set())
     if set(manifest) != fields or manifest["format"] != "bagu-backup":
         raise ValueError("manifest.json 字段或格式不合法")
     mode = manifest["mode"] if version == 2 else "progress"
     if mode not in ("questions", "progress"):
         raise ValueError("manifest mode 不合法")
-    if not isinstance(manifest["app_version"], str) or not manifest["app_version"].strip() or len(manifest["app_version"]) > 100:
-        raise ValueError("manifest app_version 不合法")
-    if not isinstance(manifest["created_at"], str):
-        raise ValueError("manifest created_at 不合法")
-    try:
-        dt.datetime.strptime(manifest["created_at"], "%Y-%m-%dT%H:%M:%SZ")
-    except ValueError as e:
-        raise ValueError("manifest created_at 必须是 UTC 时间") from e
-    if type(manifest["question_count"]) is not int or not 0 <= manifest["question_count"] <= BACKUP_MAX_QUESTIONS:
-        raise ValueError("manifest question_count 不合法")
-    digest = manifest["questions_sha256"]
-    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-        raise ValueError("manifest questions_sha256 不合法")
+    _validate_backup_text(manifest["app_version"], "manifest app_version", 100)
+    _validate_backup_created_at(manifest["created_at"])
+    _validate_backup_count(manifest["question_count"], "manifest question_count")
+    digest = _validate_backup_sha(
+        manifest["questions_sha256"], "manifest questions_sha256"
+    )
     if hashlib.sha256(questions_raw).hexdigest() != digest:
         raise ValueError("questions.json 哈希不匹配")
+    questions = _load_backup_json(questions_raw, "questions.json")
     if not isinstance(questions, list) or len(questions) != manifest["question_count"]:
         raise ValueError("questions.json 题目数量不匹配")
     if len(questions) > BACKUP_MAX_QUESTIONS:
@@ -1061,46 +2471,257 @@ def _parse_backup(data):
             raise ValueError("备份中存在重复的分类和题目")
         identities.add(identity)
         validated.append(cleaned)
-    summary = {key: manifest[key] for key in ("schema_version", "question_count", "created_at", "app_version")}
-    summary["mode"] = mode
-    return summary, validated
+    summary = {
+        "schema_version": version,
+        "question_count": len(validated),
+        "created_at": manifest["created_at"],
+        "app_version": manifest["app_version"],
+        "mode": mode,
+    }
+    return BackupPayload(summary, validated, [], [], [])
+
+
+def _parse_backup(data):
+    """Fully validate a .bagu-backup archive before it can mutate a database."""
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("备份必须是 ZIP 字节数据")
+    raw = bytes(data)
+    if len(raw) > BACKUP_MAX_COMPRESSED_BYTES:
+        raise ValueError("备份压缩文件不能超过 20 MiB")
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw), "r") as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if len(set(names)) != len(names):
+                raise ValueError("备份 ZIP 成员不能重复")
+            if any("/" in name or "\\" in name or name in {".", ".."} for name in names):
+                raise ValueError("备份 ZIP 路径不合法")
+            member_names = set(names)
+            if member_names not in (BACKUP_MEMBER_NAMES, BACKUP_V3_MEMBER_NAMES):
+                raise ValueError("备份 ZIP 成员不合法")
+            if len(infos) != len(member_names):
+                raise ValueError("备份 ZIP 成员不能重复")
+            if any(info.flag_bits & 0x1 for info in infos):
+                raise ValueError("不支持加密备份")
+            if member_names == BACKUP_V3_MEMBER_NAMES and any(
+                info.compress_type != zipfile.ZIP_DEFLATED for info in infos
+            ):
+                raise ValueError("v3 备份 ZIP 成员必须使用 DEFLATED 压缩")
+            if sum(info.file_size for info in infos) > BACKUP_MAX_UNCOMPRESSED_BYTES:
+                raise ValueError("备份解压后不能超过 50 MiB")
+            members = {name: archive.read(name) for name in member_names}
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, zlib.error) as e:
+        raise ValueError("备份不是有效 ZIP 文件") from e
+    if sum(len(value) for value in members.values()) > BACKUP_MAX_UNCOMPRESSED_BYTES:
+        raise ValueError("备份解压后不能超过 50 MiB")
+    manifest = _load_backup_json(members["manifest.json"], "manifest.json")
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest.json 字段不合法")
+    version = manifest.get("schema_version")
+    if type(version) is not int or version not in (1, 2, 3):
+        raise ValueError("不支持的备份格式或 schema_version")
+    if version == 3:
+        if set(members) != BACKUP_V3_MEMBER_NAMES:
+            raise ValueError("v3 备份必须包含四个固定成员")
+        return _parse_backup_v3(manifest, members)
+    if set(members) != BACKUP_MEMBER_NAMES:
+        raise ValueError("v1/v2 备份只能包含 manifest.json 和 questions.json")
+    return _parse_legacy_backup(manifest, members["questions.json"], version)
 
 
 def parse_backup(data):
     """Keep the historical list-returning API for validated archive content."""
-    return _parse_backup(data)[1]
+    payload = _parse_backup(data)
+    return payload.local_questions + payload.pack_questions
 
 
 def inspect_backup(data):
     """Fully validate every member and field without accessing a database."""
-    return _parse_backup(data)[0]
+    return _parse_backup(data).summary
+
+
+def _backup_http_error_message(error, fallback="备份校验失败"):
+    message = re.sub(r"[\x00-\x1f\x7f]+", " ", str(error)).strip()
+    if not message or len(message) > BACKUP_HTTP_ERROR_MAX_CHARS:
+        return fallback
+    return message
 
 
 def _backup_open_session_error(conn):
     session = get_open_session(conn)
     if not session:
         return None
-    pending = conn.execute(
-        "SELECT question_id FROM session_items WHERE session_id=? AND grade IS NULL ORDER BY question_id",
-        (session["id"],),
+    return SessionOpenError(session["id"], _pending_question_ids(conn, session["id"]))
+
+
+def _restore_backup_experiences(conn, pack_id, experiences, question_ids):
+    """Upsert included stable structures while retaining target-only structures."""
+    existing_experiences = conn.execute(
+        """SELECT id,stable_experience_id,position FROM experiences
+           WHERE pack_id=? ORDER BY position,id""",
+        (pack_id,),
     ).fetchall()
-    return SessionOpenError(session["id"], [row["question_id"] for row in pending])
+    existing_by_stable = {
+        row["stable_experience_id"]: row for row in existing_experiences
+    }
+    included_ids = {experience["stable_id"] for experience in experiences}
+    omitted_experiences = [
+        row for row in existing_experiences
+        if row["stable_experience_id"] not in included_ids
+    ]
+    _move_existing_positions(
+        conn,
+        "experiences",
+        existing_experiences,
+        max((row["position"] for row in existing_experiences), default=0),
+    )
+    for experience in sorted(experiences, key=lambda item: item["order"]):
+        old = existing_by_stable.get(experience["stable_id"])
+        if old:
+            experience_id = old["id"]
+            conn.execute(
+                """UPDATE experiences SET
+                       kind=?,direction=?,company=?,role=?,stage=?,position=? WHERE id=?""",
+                (
+                    experience["kind"], experience["direction"], experience["company"],
+                    experience["position"], experience["stage"], experience["order"],
+                    experience_id,
+                ),
+            )
+        else:
+            experience_id = conn.execute(
+                """INSERT INTO experiences(
+                       pack_id,stable_experience_id,kind,direction,company,role,stage,position
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    pack_id, experience["stable_id"], experience["kind"],
+                    experience["direction"], experience["company"], experience["position"],
+                    experience["stage"], experience["order"],
+                ),
+            ).lastrowid
+
+        existing_sections = conn.execute(
+            """SELECT id,stable_section_id,position FROM experience_sections
+               WHERE experience_id=? ORDER BY position,id""",
+            (experience_id,),
+        ).fetchall()
+        sections_by_stable = {
+            row["stable_section_id"]: row for row in existing_sections
+        }
+        included_section_ids = {
+            section["stable_id"] for section in experience["sections"]
+        }
+        omitted_sections = [
+            row for row in existing_sections
+            if row["stable_section_id"] not in included_section_ids
+        ]
+        incoming_question_ids = {
+            question_ids[stable_question_id]
+            for section in experience["sections"]
+            for stable_question_id in section["question_ids"]
+        }
+        _remove_incoming_relationships_from_omitted_sections(
+            conn, omitted_sections, incoming_question_ids
+        )
+        _move_existing_positions(
+            conn,
+            "experience_sections",
+            existing_sections,
+            max((row["position"] for row in existing_sections), default=0),
+        )
+        for section in sorted(experience["sections"], key=lambda item: item["order"]):
+            old_section = sections_by_stable.get(section["stable_id"])
+            if old_section:
+                section_id = old_section["id"]
+                conn.execute(
+                    """UPDATE experience_sections SET
+                           title=?,recommended=?,position=? WHERE id=?""",
+                    (
+                        section["title"], int(section["recommended"]),
+                        section["order"], section_id,
+                    ),
+                )
+            else:
+                section_id = conn.execute(
+                    """INSERT INTO experience_sections(
+                           experience_id,stable_section_id,title,recommended,position
+                       ) VALUES(?,?,?,?,?)""",
+                    (
+                        experience_id, section["stable_id"], section["title"],
+                        int(section["recommended"]), section["order"],
+                    ),
+                ).lastrowid
+            conn.execute("DELETE FROM experience_items WHERE section_id=?", (section_id,))
+            for position, stable_question_id in enumerate(section["question_ids"], start=1):
+                conn.execute(
+                    """INSERT INTO experience_items(section_id,question_id,position)
+                       VALUES(?,?,?)""",
+                    (section_id, question_ids[stable_question_id], position),
+                )
+        next_section_position = len(experience["sections"]) + 1
+        for offset, row in enumerate(omitted_sections):
+            conn.execute(
+                "UPDATE experience_sections SET position=? WHERE id=?",
+                (next_section_position + offset, row["id"]),
+            )
+    next_experience_position = len(experiences) + 1
+    for offset, row in enumerate(omitted_experiences):
+        conn.execute(
+            "UPDATE experiences SET position=? WHERE id=?",
+            (next_experience_position + offset, row["id"]),
+        )
 
 
 def restore_backup(conn, data):
     """Merge a fully validated backup without changing sessions or analysis history."""
-    summary, questions = _parse_backup(data)
-    has_progress = summary["mode"] == "progress"
+    payload = _parse_backup(data)
+    has_progress = payload.summary["mode"] == "progress"
     try:
         conn.execute("BEGIN IMMEDIATE")
         blocked = _backup_open_session_error(conn)
         if blocked:
             raise blocked
+        current_packs = {}
+        for pack in payload.packs:
+            current = conn.execute(
+                "SELECT * FROM question_packs WHERE pack_id=?", (pack["pack_id"],)
+            ).fetchone()
+            current_packs[pack["pack_id"]] = current
+            if current:
+                if current["revision"] > pack["revision"]:
+                    raise PackConflictError("backup pack revision is lower than installed revision")
+                if (
+                    current["revision"] == pack["revision"]
+                    and current["manifest_sha256"] != pack["manifest_sha256"]
+                ):
+                    raise PackConflictError("same backup pack revision has conflicting content")
+            else:
+                orphan_question = conn.execute(
+                    "SELECT 1 FROM questions WHERE pack_id=? LIMIT 1", (pack["pack_id"],)
+                ).fetchone()
+                orphan_experience = conn.execute(
+                    "SELECT 1 FROM experiences WHERE pack_id=? LIMIT 1", (pack["pack_id"],)
+                ).fetchone()
+                if orphan_question or orphan_experience:
+                    raise PackConflictError("backup pack_id conflicts with orphaned rows")
+        existing_pack_questions = {}
+        for item in payload.pack_questions:
+            existing = conn.execute(
+                """SELECT id,question_type FROM questions
+                   WHERE pack_id=? AND stable_question_id=?""",
+                (item["pack_id"], item["stable_id"]),
+            ).fetchone()
+            existing_pack_questions[(item["pack_id"], item["stable_id"])] = existing
+            if existing and existing["question_type"] != item["kind"]:
+                raise PackConflictError(
+                    f"question type changed for stable_id {item['stable_id']}"
+                )
+
         added = 0
         updated = 0
-        for item in questions:
+        for item in payload.local_questions:
             existing = conn.execute(
-                "SELECT id FROM questions WHERE category=? AND question=?",
+                "SELECT id FROM questions WHERE pack_id IS NULL AND category=? AND question=?",
                 (item["category"], item["question"]),
             ).fetchone()
             if existing:
@@ -1130,11 +2751,112 @@ def restore_backup(conn, data):
                     ),
                 )
                 added += 1
+        now = _backup_utc_timestamp()
+        for pack in payload.packs:
+            current = current_packs[pack["pack_id"]]
+            values = (
+                pack["name"], pack["revision"], pack["display_version"],
+                pack["source_snapshot_sha256"], pack["question_count"],
+                pack["experience_count"], pack["questions_sha256"],
+                pack["experiences_sha256"], pack["manifest_sha256"],
+                int(pack["include_in_review"]),
+            )
+            if current:
+                conn.execute(
+                    """UPDATE question_packs SET
+                           name=?,revision=?,display_version=?,source_snapshot_sha256=?,
+                           question_count=?,experience_count=?,questions_sha256=?,
+                           experiences_sha256=?,manifest_sha256=?,include_in_review=?,updated_at=?
+                       WHERE pack_id=?""",
+                    values + (now, pack["pack_id"]),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO question_packs(
+                           name,revision,display_version,source_snapshot_sha256,question_count,
+                           experience_count,questions_sha256,experiences_sha256,manifest_sha256,
+                           include_in_review,installed_at,updated_at,pack_id
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    values + (now, now, pack["pack_id"]),
+                )
+
+        question_ids_by_pack = {}
+        for item in payload.pack_questions:
+            identity = (item["pack_id"], item["stable_id"])
+            existing = existing_pack_questions[identity]
+            answer = item["answer"] if item["kind"] == "review" else ""
+            prompt = item["preparation_prompt"] if item["kind"] == "prepare" else ""
+            url = item["sources"][0]["url"]
+            if existing:
+                question_id = existing["id"]
+                if has_progress:
+                    conn.execute(
+                        """UPDATE questions SET
+                               category=?,question=?,answer=?,url=?,question_type=?,
+                               preparation_prompt=?,answer_review_status=?,retired=?,level=?,
+                               times_seen=?,times_right=?,next_due=?,last_reviewed=? WHERE id=?""",
+                        (
+                            item["category"], item["question"], answer, url, item["kind"],
+                            prompt, item["review_status"], int(item["retired"]), item["level"],
+                            item["times_seen"], item["times_right"], item["next_due"],
+                            item["last_reviewed"], question_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE questions SET
+                               category=?,question=?,answer=?,url=?,question_type=?,
+                               preparation_prompt=?,answer_review_status=?,retired=? WHERE id=?""",
+                        (
+                            item["category"], item["question"], answer, url, item["kind"],
+                            prompt, item["review_status"], int(item["retired"]), question_id,
+                        ),
+                    )
+                updated += 1
+            else:
+                progress = (
+                    item["level"], item["times_seen"], item["times_right"],
+                    item["next_due"], item["last_reviewed"],
+                ) if has_progress else (0, 0, 0, None, None)
+                question_id = conn.execute(
+                    """INSERT INTO questions(
+                           category,question,answer,url,pack_id,stable_question_id,question_type,
+                           preparation_prompt,answer_review_status,retired,level,times_seen,
+                           times_right,next_due,last_reviewed
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        item["category"], item["question"], answer, url, item["pack_id"],
+                        item["stable_id"], item["kind"], prompt, item["review_status"],
+                        int(item["retired"]), *progress,
+                    ),
+                ).lastrowid
+                added += 1
+            question_ids_by_pack.setdefault(item["pack_id"], {})[item["stable_id"]] = question_id
+            conn.execute("DELETE FROM question_sources WHERE question_id=?", (question_id,))
+            for position, source in enumerate(item["sources"], start=1):
+                conn.execute(
+                    """INSERT INTO question_sources(
+                           question_id,position,source_path,source_url
+                       ) VALUES(?,?,?,?)""",
+                    (question_id, position, source["path"], source["url"]),
+                )
+
+        experiences_by_pack = {}
+        for experience in payload.experiences:
+            experiences_by_pack.setdefault(experience["pack_id"], []).append(experience)
+        for pack_id, experiences in experiences_by_pack.items():
+            _restore_backup_experiences(
+                conn, pack_id, experiences, question_ids_by_pack[pack_id]
+            )
         conn.commit()
     except Exception:
         conn.rollback()
         raise
-    return {"added": added, "updated": updated, "total": len(questions)}
+    return {
+        "added": added,
+        "updated": updated,
+        "total": len(payload.local_questions) + len(payload.pack_questions),
+    }
 
 
 def create_seed_database(source_path, destination_path):
@@ -1151,8 +2873,10 @@ def create_seed_database(source_path, destination_path):
         if not {"category", "question", "url"} <= columns:
             raise ValueError("源数据库缺少 questions 内容字段")
         answer = "answer" if "answer" in columns else "'' AS answer"
+        local_only = " WHERE pack_id IS NULL" if "pack_id" in columns else ""
         source_rows = source_conn.execute(
-            f"SELECT category, question, {answer}, url FROM questions ORDER BY category, question"
+            f"SELECT category, question, {answer}, url FROM questions"
+            f"{local_only} ORDER BY category, question"
         ).fetchall()
         questions = [_clean_question(dict(row)) for row in source_rows]
     finally:
@@ -1657,8 +3381,24 @@ def render_answer_html(answer):
     return _render_markdown_blocks(str(answer or ""))
 
 
-def _question_public(row):
+def _question_public(row, conn=None):
     answer = row["answer"] or ""
+    pack_id = row["pack_id"]
+    pack_name = None
+    sources = []
+    if pack_id and conn is not None:
+        pack = conn.execute(
+            "SELECT name FROM question_packs WHERE pack_id=?", (pack_id,)
+        ).fetchone()
+        pack_name = pack["name"] if pack else None
+        sources = [
+            {"path": source["source_path"], "url": source["source_url"]}
+            for source in conn.execute(
+                """SELECT source_path,source_url FROM question_sources
+                   WHERE question_id=? ORDER BY position""",
+                (row["id"],),
+            )
+        ]
     return {
         "id": row["id"],
         "category": row["category"],
@@ -1671,6 +3411,14 @@ def _question_public(row):
         "times_right": row["times_right"],
         "next_due": row["next_due"],
         "last_reviewed": row["last_reviewed"],
+        "pack_id": pack_id,
+        "pack_name": pack_name,
+        "stable_question_id": row["stable_question_id"],
+        "question_type": row["question_type"],
+        "preparation_prompt": row["preparation_prompt"],
+        "answer_review_status": row["answer_review_status"],
+        "retired": bool(row["retired"]),
+        "sources": sources,
     }
 
 
@@ -1715,7 +3463,7 @@ def list_questions(conn, query="", category="", page=1, page_size=20):
     ]
     pages = (total + page_size - 1) // page_size if total else 0
     return {
-        "items": [_question_public(r) for r in items],
+        "items": [_question_public(r, conn) for r in items],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -1736,12 +3484,16 @@ def create_question(conn, data):
         conn.rollback()
         raise QuestionValidationError("同一分类下已存在相同题目") from e
     row = conn.execute("SELECT * FROM questions WHERE id=?", (cur.lastrowid,)).fetchone()
-    return _question_public(row)
+    return _question_public(row, conn)
 
 
 def update_question(conn, qid, data):
-    if not conn.execute("SELECT 1 FROM questions WHERE id=?", (qid,)).fetchone():
+    qid = _require_db_id(qid, "question_id")
+    existing = conn.execute("SELECT pack_id FROM questions WHERE id=?", (qid,)).fetchone()
+    if not existing:
         raise LookupError(f"题目不存在: id={qid}")
+    if existing["pack_id"] is not None:
+        raise PackQuestionReadOnlyError("题包题目为只读，不能通过通用题库接口修改")
     item = _clean_question(data)
     try:
         conn.execute(
@@ -1752,12 +3504,18 @@ def update_question(conn, qid, data):
     except sqlite3.IntegrityError as e:
         conn.rollback()
         raise QuestionValidationError("同一分类下已存在相同题目") from e
-    return _question_public(conn.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone())
+    return _question_public(
+        conn.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone(), conn
+    )
 
 
 def delete_question(conn, qid):
-    if not conn.execute("SELECT 1 FROM questions WHERE id=?", (qid,)).fetchone():
+    qid = _require_db_id(qid, "question_id")
+    existing = conn.execute("SELECT pack_id FROM questions WHERE id=?", (qid,)).fetchone()
+    if not existing:
         raise LookupError(f"题目不存在: id={qid}")
+    if existing["pack_id"] is not None:
+        raise PackQuestionReadOnlyError("题包题目为只读，不能通过通用题库接口删除")
     used = conn.execute(
         "SELECT 1 FROM session_items WHERE question_id=? LIMIT 1", (qid,)
     ).fetchone()
@@ -1775,30 +3533,202 @@ class SessionOpenError(Exception):
         super().__init__(f"已有未关闭会话 {session_id}，未判题: {pending_ids}")
 
 
+def _pending_question_ids(conn, session_id):
+    return [
+        row["question_id"]
+        for row in conn.execute(
+            """SELECT question_id FROM session_items
+               WHERE session_id=? AND completion_type IS NULL ORDER BY position""",
+            (session_id,),
+        )
+    ]
+
+
+def _experience_summary(row):
+    return {
+        "id": row["id"],
+        "stable_experience_id": row["stable_experience_id"],
+        "pack_id": row["pack_id"],
+        "pack_name": row["pack_name"],
+        "kind": row["kind"],
+        "direction": row["direction"],
+        "company": row["company"],
+        "position": row["role"],
+        "stage": row["stage"],
+        "section_count": row["section_count"],
+        "question_count": row["question_count"],
+        "recommended_section_id": row["recommended_section_id"],
+    }
+
+
+def _experience_summary_rows(conn, experience_id=None):
+    where = "WHERE e.id=?" if experience_id is not None else ""
+    params = (experience_id,) if experience_id is not None else ()
+    return conn.execute(
+        f"""SELECT e.*, p.name AS pack_name,
+                   COUNT(DISTINCT es.id) AS section_count,
+                   COALESCE(SUM(CASE WHEN q.retired=0 THEN 1 ELSE 0 END),0) AS question_count,
+                   MIN(CASE WHEN es.recommended=1 THEN es.id END) AS recommended_section_id
+            FROM experiences e
+            JOIN question_packs p ON p.pack_id=e.pack_id
+            LEFT JOIN experience_sections es ON es.experience_id=e.id
+            LEFT JOIN experience_items ei ON ei.section_id=es.id
+            LEFT JOIN questions q ON q.id=ei.question_id
+            {where}
+            GROUP BY e.id
+            ORDER BY p.installed_at,p.pack_id,e.position,e.id""",
+        params,
+    ).fetchall()
+
+
+def list_experiences(conn):
+    return {"experiences": [_experience_summary(row) for row in _experience_summary_rows(conn)]}
+
+
+def _section_public(row):
+    return {
+        "id": row["id"],
+        "stable_section_id": row["stable_section_id"],
+        "position": row["position"],
+        "title": row["title"],
+        "recommended": bool(row["recommended"]),
+        "question_count": row["question_count"],
+    }
+
+
+def get_experience_detail(conn, experience_id):
+    experience_id = _require_db_id(experience_id, "experience_id")
+    rows = _experience_summary_rows(conn, experience_id)
+    if not rows:
+        raise LookupError(f"专题不存在: id={experience_id}")
+    sections = conn.execute(
+        """SELECT es.*,
+                  COALESCE(SUM(CASE WHEN q.retired=0 THEN 1 ELSE 0 END),0) AS question_count
+           FROM experience_sections es
+           LEFT JOIN experience_items ei ON ei.section_id=es.id
+           LEFT JOIN questions q ON q.id=ei.question_id
+           WHERE es.experience_id=?
+           GROUP BY es.id ORDER BY es.position,es.id""",
+        (experience_id,),
+    ).fetchall()
+    return {
+        "experience": _experience_summary(rows[0]),
+        "sections": [_section_public(row) for row in sections],
+    }
+
+
+def _session_item_rows(conn, session_id):
+    return conn.execute(
+        """SELECT q.*, p.name AS pack_name, i.position AS item_position,
+                  i.completion_type AS item_completion_type, i.grade AS item_grade
+           FROM session_items i
+           JOIN questions q ON q.id=i.question_id
+           LEFT JOIN question_packs p ON p.pack_id=q.pack_id
+           WHERE i.session_id=? ORDER BY i.position""",
+        (session_id,),
+    ).fetchall()
+
+
+def _session_item_public(row):
+    item = _q_public(row, row["item_grade"])
+    item.update({
+        "position": row["item_position"],
+        "completion_type": row["item_completion_type"],
+        "question_type": row["question_type"],
+        "pack_id": row["pack_id"],
+        "pack_name": row["pack_name"],
+        "stable_question_id": row["stable_question_id"],
+    })
+    if row["question_type"] == "prepare":
+        item["preparation_prompt"] = row["preparation_prompt"] or ""
+    return item
+
+
+def start_experience(conn, experience_id, section_id=None):
+    experience_id = _require_db_id(experience_id, "experience_id")
+    if section_id is not None:
+        section_id = _require_db_id(section_id, "section_id")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        experience = conn.execute(
+            "SELECT id FROM experiences WHERE id=?", (experience_id,)
+        ).fetchone()
+        if not experience:
+            raise LookupError(f"专题不存在: id={experience_id}")
+        if section_id is not None:
+            section = conn.execute(
+                "SELECT id FROM experience_sections WHERE id=? AND experience_id=?",
+                (section_id, experience_id),
+            ).fetchone()
+            if not section:
+                raise LookupError(f"章节不存在或不属于该专题: id={section_id}")
+        open_session = get_open_session(conn)
+        if open_session:
+            raise SessionOpenError(
+                open_session["id"], _pending_question_ids(conn, open_session["id"])
+            )
+        section_filter = "AND es.id=?" if section_id is not None else ""
+        params = (experience_id, section_id) if section_id is not None else (experience_id,)
+        questions = conn.execute(
+            f"""SELECT q.* FROM experience_sections es
+                JOIN experience_items ei ON ei.section_id=es.id
+                JOIN questions q ON q.id=ei.question_id
+                WHERE es.experience_id=? {section_filter} AND q.retired=0
+                ORDER BY es.position,ei.position,q.id""",
+            params,
+        ).fetchall()
+        if not questions:
+            raise ValueError("专题或章节没有可用题目")
+        question_ids = [question["id"] for question in questions]
+        if len(question_ids) != len(set(question_ids)):
+            raise ValueError("专题中存在重复题目，无法开始整套模拟")
+        session_id = new_session_id()
+        conn.execute(
+            """INSERT INTO sessions(
+                   id,status,created_at,n,cat,session_type,experience_id,section_id
+               ) VALUES(?,?,?,?,?,'experience',?,?)""",
+            (
+                session_id, "open", dt.datetime.now().isoformat(timespec="seconds"),
+                len(questions), None, experience_id, section_id,
+            ),
+        )
+        for position, question in enumerate(questions, start=1):
+            conn.execute(
+                "INSERT INTO session_items(session_id,question_id,position) VALUES(?,?,?)",
+                (session_id, question["id"], position),
+            )
+        conn.commit()
+        return session_id, _session_item_rows(conn, session_id)
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        open_session = get_open_session(conn)
+        if open_session:
+            raise SessionOpenError(
+                open_session["id"], _pending_question_ids(conn, open_session["id"])
+            ) from None
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def draw(conn, n=5, cat=None):
     """优先到期复习题，不足则补新题。成功返回 (session_id, rows)。"""
     try:
         conn.execute("BEGIN IMMEDIATE")
         open_s = get_open_session(conn)
         if open_s:
-            pending = [
-                r[0]
-                for r in conn.execute(
-                    "SELECT question_id FROM session_items WHERE session_id=? AND grade IS NULL",
-                    (open_s["id"],),
-                )
-            ]
-            raise SessionOpenError(open_s["id"], pending)
+            raise SessionOpenError(open_s["id"], _pending_question_ids(conn, open_s["id"]))
         today = dt.date.today().isoformat()
-        where = "WHERE (next_due IS NULL OR next_due <= ?)"
+        where = f"WHERE {DAILY_QUESTION_ELIGIBILITY_SQL} AND (q.next_due IS NULL OR q.next_due <= ?)"
         params = [today]
         if cat:
-            where += " AND category = ?"
+            where += " AND q.category = ?"
             params.append(cat)
         rows = conn.execute(
-            f"""SELECT * FROM questions {where}
-                ORDER BY (next_due IS NOT NULL) DESC,
-                         CASE WHEN next_due IS NULL THEN RANDOM() ELSE 0 END
+            f"""SELECT q.* FROM questions q {where}
+                ORDER BY (q.next_due IS NOT NULL) DESC,
+                         CASE WHEN q.next_due IS NULL THEN RANDOM() ELSE 0 END
                 LIMIT ?""",
             params + [n],
         ).fetchall()
@@ -1810,10 +3740,10 @@ def draw(conn, n=5, cat=None):
             "INSERT INTO sessions(id, status, created_at, n, cat) VALUES (?,?,?,?,?)",
             (sid, "open", dt.datetime.now().isoformat(timespec="seconds"), n, cat),
         )
-        for r in rows:
+        for position, r in enumerate(rows, start=1):
             conn.execute(
-                "INSERT INTO session_items(session_id, question_id) VALUES (?,?)",
-                (sid, r["id"]),
+                "INSERT INTO session_items(session_id, question_id, position) VALUES (?,?,?)",
+                (sid, r["id"], position),
             )
         conn.commit()
         return sid, rows
@@ -1824,14 +3754,9 @@ def draw(conn, n=5, cat=None):
         conn.rollback()
         open_s = get_open_session(conn)
         if open_s:
-            pending = [
-                r[0]
-                for r in conn.execute(
-                    "SELECT question_id FROM session_items WHERE session_id=? AND grade IS NULL",
-                    (open_s["id"],),
-                )
-            ]
-            raise SessionOpenError(open_s["id"], pending) from None
+            raise SessionOpenError(
+                open_s["id"], _pending_question_ids(conn, open_s["id"])
+            ) from None
         raise
     except Exception:
         conn.rollback()
@@ -1875,24 +3800,31 @@ def _find_submission_item(conn, submission_id):
 
 def _preflight_grade(conn, session_id, qid, submission_id=None):
     """模型调用前快速拒绝无效目标；最终写入仍由事务内校验决定。"""
+    qid = _require_db_id(qid, "question_id")
     submission_id = _normalize_submission_id(submission_id)
+    sess = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+    if not sess:
+        raise GradeRejected(f"会话不可用: {session_id}")
+    item = conn.execute(
+        """SELECT i.*,q.question_type FROM session_items i
+           JOIN questions q ON q.id=i.question_id
+           WHERE i.session_id=? AND i.question_id=?""",
+        (session_id, qid),
+    ).fetchone()
+    if not item:
+        raise GradeRejected(f"题目不属于本轮: id={qid}")
+    if item["question_type"] == "prepare":
+        raise GradeRejected(f"准备题不能评分，请使用完成接口: id={qid}")
     existing = _find_submission_item(conn, submission_id)
     if existing:
         if existing["session_id"] != session_id or existing["question_id"] != qid:
             raise ValueError("submission_id 已用于其他题目")
         if existing["grade"] is not None:
             return _submission_result_from_item(existing)
-    sess = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
-    if not sess:
-        raise GradeRejected(f"会话不可用: {session_id}")
-    item = conn.execute(
-        "SELECT * FROM session_items WHERE session_id=? AND question_id=?",
-        (session_id, qid),
-    ).fetchone()
-    if not item:
-        raise GradeRejected(f"题目不属于本轮: id={qid}")
     if item["grade"] is not None:
         raise GradeRejected(f"本题已评判: id={qid}")
+    if item["completion_type"] is not None:
+        raise GradeRejected(f"本题已完成: id={qid}")
     if sess["status"] != "open":
         raise GradeRejected(f"会话不可用: {session_id}")
     return None
@@ -1912,9 +3844,23 @@ def _record_grade(
 ):
     if result not in GRADE_INTERVALS:
         raise ValueError(f"未知评级: {result}")
+    qid = _require_db_id(qid, "question_id")
     submission_id = _normalize_submission_id(submission_id)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        sess = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        if not sess:
+            raise GradeRejected(f"会话不可用: {session_id}")
+        item = conn.execute(
+            """SELECT i.*,q.question_type FROM session_items i
+               JOIN questions q ON q.id=i.question_id
+               WHERE i.session_id=? AND i.question_id=?""",
+            (session_id, qid),
+        ).fetchone()
+        if not item:
+            raise GradeRejected(f"题目不属于本轮: id={qid}")
+        if item["question_type"] == "prepare":
+            raise GradeRejected(f"准备题不能评分，请使用完成接口: id={qid}")
         existing = _find_submission_item(conn, submission_id)
         if existing:
             if existing["session_id"] != session_id or existing["question_id"] != qid:
@@ -1929,15 +3875,6 @@ def _record_grade(
                     "replayed": True,
                     "result": _submission_result_from_item(existing),
                 }
-        sess = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
-        if not sess:
-            raise GradeRejected(f"会话不可用: {session_id}")
-        item = conn.execute(
-            "SELECT * FROM session_items WHERE session_id=? AND question_id=?",
-            (session_id, qid),
-        ).fetchone()
-        if not item:
-            raise GradeRejected(f"题目不属于本轮: id={qid}")
         if item["grade"] is not None:
             if (
                 allow_replay
@@ -1959,6 +3896,8 @@ def _record_grade(
         row = conn.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
         if not row:
             raise LookupError(f"题目不存在: id={qid}")
+        if row["question_type"] == "prepare":
+            raise GradeRejected(f"准备题不能评分，请使用完成接口: id={qid}")
         today = dt.date.today()
         if result == "again":
             new_level = 0
@@ -1971,8 +3910,10 @@ def _record_grade(
         updated = conn.execute(
             """UPDATE session_items
                SET grade=?, graded_at=?, submission_id=?,
-                   result_comment=?, result_full_answer=?, result_answer_source=?
-               WHERE session_id=? AND question_id=? AND grade IS NULL""",
+                   result_comment=?, result_full_answer=?, result_answer_source=?,
+                   completion_type='graded'
+               WHERE session_id=? AND question_id=?
+                 AND grade IS NULL AND completion_type IS NULL""",
             (
                 result,
                 today.isoformat(),
@@ -1993,7 +3934,8 @@ def _record_grade(
             (new_level, right, next_due, today.isoformat(), qid),
         )
         left = conn.execute(
-            "SELECT COUNT(*) c FROM session_items WHERE session_id=? AND grade IS NULL",
+            """SELECT COUNT(*) c FROM session_items
+               WHERE session_id=? AND completion_type IS NULL""",
             (session_id,),
         ).fetchone()[0]
         if left == 0:
@@ -2025,15 +3967,20 @@ def grade(conn, session_id, qid, result):
 
 def reveal_answer(conn, session_id, qid):
     """返回当前会话未判题的题库答案，不改变复习进度。"""
+    qid = _require_db_id(qid, "question_id")
     sess = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
     item = conn.execute(
-        "SELECT * FROM session_items WHERE session_id=? AND question_id=?",
+        """SELECT i.*,q.question_type FROM session_items i
+           JOIN questions q ON q.id=i.question_id
+           WHERE i.session_id=? AND i.question_id=?""",
         (session_id, qid),
     ).fetchone()
     if not sess:
         raise GradeRejected(f"会话不可用: {session_id}")
     if not item:
         raise GradeRejected(f"题目不属于本轮: id={qid}")
+    if item["question_type"] == "prepare":
+        raise GradeRejected(f"准备题不能揭示答案: id={qid}")
     if item["grade"] is not None:
         raise GradeRejected(f"本题已评判: id={qid}")
     if sess["status"] != "open":
@@ -2041,6 +3988,8 @@ def reveal_answer(conn, session_id, qid):
     row = conn.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
     if not row:
         raise LookupError(f"题目不存在: id={qid}")
+    if row["question_type"] == "prepare":
+        raise GradeRejected(f"准备题不能揭示答案: id={qid}")
     answer = row["answer"] or ""
     return {
         "question_id": qid,
@@ -2088,6 +4037,73 @@ class SkipRejected(Exception):
 
 class JudgeError(Exception):
     pass
+
+
+def complete_prepare_question(conn, session_id, qid, completion_type):
+    if not isinstance(completion_type, str) or completion_type not in {"prepared", "skipped"}:
+        raise ValueError("completion_type 只允许 prepared 或 skipped")
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session_id 格式无效")
+    qid = _require_db_id(qid, "question_id")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        session = conn.execute(
+            "SELECT * FROM sessions WHERE id=?", (session_id,)
+        ).fetchone()
+        if not session or session["session_type"] != "experience":
+            raise GradeRejected(f"会话不是专题会话: {session_id}")
+        item = conn.execute(
+            """SELECT i.*,q.question_type FROM session_items i
+               JOIN questions q ON q.id=i.question_id
+               WHERE i.session_id=? AND i.question_id=?""",
+            (session_id, qid),
+        ).fetchone()
+        if not item:
+            raise GradeRejected(f"题目不属于本轮: id={qid}")
+        if item["question_type"] != "prepare":
+            raise GradeRejected(f"仅准备题可使用完成接口: id={qid}")
+        if item["completion_type"] is not None:
+            if item["completion_type"] != completion_type:
+                raise GradeRejected(f"准备题已以其他结果完成: id={qid}")
+            status = session["status"]
+            conn.commit()
+            return {
+                "session_id": session_id,
+                "question_id": qid,
+                "completion_type": completion_type,
+                "replayed": True,
+                "status": status,
+            }
+        if session["status"] != "open":
+            raise GradeRejected(f"会话不可用: {session_id}")
+        updated = conn.execute(
+            """UPDATE session_items SET completion_type=?
+               WHERE session_id=? AND question_id=? AND completion_type IS NULL""",
+            (completion_type, session_id, qid),
+        )
+        if updated.rowcount != 1:
+            raise GradeRejected(f"本题已完成: id={qid}")
+        remaining = conn.execute(
+            """SELECT COUNT(*) FROM session_items
+               WHERE session_id=? AND completion_type IS NULL""",
+            (session_id,),
+        ).fetchone()[0]
+        status = "open"
+        if remaining == 0:
+            conn.execute("UPDATE sessions SET status='closed' WHERE id=?", (session_id,))
+            status = "closed"
+        response = {
+            "session_id": session_id,
+            "question_id": qid,
+            "completion_type": completion_type,
+            "replayed": False,
+            "status": status,
+        }
+        conn.commit()
+        return response
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def skip_session(conn, session_id=None):
@@ -2207,9 +4223,9 @@ def _diagnostic_route(value):
     if not isinstance(value, str) or len(value) > 4096:
         return "other"
     path = urllib.parse.urlsplit(value).path
-    if path in {"/", "/index.html", "/api/stats", "/api/session", "/api/draw", "/api/skip", "/api/answer", "/api/answer/stream", "/api/reveal", "/api/review", "/api/settings", "/api/models", "/api/models/test", "/api/questions", "/api/questions/import", "/api/backup/export", "/api/backup/inspect", "/api/backup/restore", "/api/diagnostics/export", "/api/diagnostics/events"}:
+    if path in {"/", "/index.html", "/api/stats", "/api/session", "/api/draw", "/api/skip", "/api/answer", "/api/answer/stream", "/api/reveal", "/api/review", "/api/settings", "/api/models", "/api/models/test", "/api/questions", "/api/questions/import", "/api/packs", "/api/packs/inspect", "/api/packs/install", "/api/backup/export", "/api/backup/inspect", "/api/backup/restore", "/api/diagnostics/export", "/api/diagnostics/events"}:
         return path
-    for prefix in ("models", "questions", "submissions"):
+    for prefix in ("models", "questions", "submissions", "packs"):
         match = re.fullmatch(r"/api/" + prefix + r"/[^/]+(?:/(activate|copy))?", path)
         if match:
             return "/api/" + prefix + "/:id" + ("/" + match[1] if match[1] else "")
@@ -3272,9 +5288,12 @@ def _judge_system_prompt():
 
 def _judge_context(conn, session_id, qid, user_text, root=None, require_model=True):
     started_at = time.perf_counter()
+    qid = _require_db_id(qid, "question_id")
     row = conn.execute("SELECT * FROM questions WHERE id=?", (qid,)).fetchone()
     if not row:
         raise GradeRejected(f"题目不存在: id={qid}")
+    if row["question_type"] == "prepare":
+        raise GradeRejected(f"准备题不能调用模型评分: id={qid}")
     settings = load_settings(root)
     if require_model and not settings.get("api_key"):
         raise JudgeError("未配置模型")
@@ -3369,10 +5388,7 @@ def stream_answer_events(conn, body, root=None, stream_fn=None):
     user_text = (body.get("text") or "").strip()
     if not session_id or qid is None or not user_text:
         raise ValueError("缺少 session_id / question_id / text")
-    try:
-        qid = int(qid)
-    except (TypeError, ValueError) as e:
-        raise ValueError("question_id 必须是整数") from e
+    qid = _require_db_id(qid, "question_id")
     submission_id = _normalize_submission_id(body.get("submission_id"))
     cached = _preflight_grade(conn, session_id, qid, submission_id)
     if cached:
@@ -3417,6 +5433,7 @@ def _q_public(row, grade_v=None):
         "url": row["url"] or "",
         "times_seen": row["times_seen"],
         "grade": grade_v if grade_v is not None else (row["grade"] if "grade" in keys else None),
+        "pack_id": row["pack_id"],
     }
 
 
@@ -3441,22 +5458,28 @@ def get_submission_payload(conn, submission_id):
 def _session_payload(conn):
     open_s = get_open_session(conn)
     if not open_s:
-        return {"session_id": None, "items": [], "pending": []}
-    items = conn.execute(
-        """SELECT q.*, i.grade AS item_grade
-           FROM session_items i JOIN questions q ON q.id = i.question_id
-           WHERE i.session_id=? ORDER BY i.question_id""",
-        (open_s["id"],),
-    ).fetchall()
-    pub = [_q_public(r, r["item_grade"]) for r in items]
-    pending = [x for x in pub if x["grade"] is None]
-    return {
+        return {
+            "session_id": None, "session_type": None, "items": [], "pending": []
+        }
+    pub = [_session_item_public(row) for row in _session_item_rows(conn, open_s["id"])]
+    pending = [item for item in pub if item["completion_type"] is None]
+    payload = {
         "session_id": open_s["id"],
         "n": open_s["n"],
         "cat": open_s["cat"],
+        "session_type": open_s["session_type"],
         "items": pub,
         "pending": pending,
     }
+    if open_s["session_type"] == "experience":
+        detail = get_experience_detail(conn, open_s["experience_id"])
+        payload["experience"] = detail["experience"]
+        if open_s["section_id"] is not None:
+            payload["section"] = next(
+                section for section in detail["sections"]
+                if section["id"] == open_s["section_id"]
+            )
+    return payload
 
 
 def _public_static_type(path):
@@ -3492,9 +5515,36 @@ def _require_android_https(settings):
         raise ValueError("Android 模型地址必须使用 HTTPS，且不得包含用户名或密码")
 
 
+def _decode_pack_archive_body(body):
+    if not isinstance(body, dict) or set(body) != {"archive_base64"}:
+        raise PackValidationError("request must contain only archive_base64")
+    encoded = body.get("archive_base64")
+    maximum = ((PACK_MAX_COMPRESSED_BYTES + 2) // 3) * 4
+    if not isinstance(encoded, str) or not encoded or len(encoded) > maximum:
+        raise PackValidationError("archive_base64 is missing or too large")
+    try:
+        archive = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise PackValidationError("archive_base64 is invalid") from exc
+    if base64.b64encode(archive).decode("ascii") != encoded:
+        raise PackValidationError("archive_base64 is not canonical")
+    return archive
+
+
+def _pack_http_error_message(error, fallback="题包校验失败"):
+    """Return a bounded message without reflecting private package content."""
+    if not isinstance(error, (PackValidationError, PackConflictError)):
+        fallback = "题包操作失败"
+    message = re.sub(r"[\x00-\x1f\x7f]+", " ", fallback).strip()
+    if not message:
+        message = "题包操作失败"
+    return message[:PACK_HTTP_ERROR_MAX_CHARS]
+
+
 def handle_http(method, path, body, conn, root=None, *, static_root=None, android=False, app_version=None):
     root = _settings_root(root)
     static_root = Path(static_root) if static_root is not None else Path(__file__).parent
+    request_body = body
     body = body or {}
     json_ct = "application/json"
     parsed_url = urllib.parse.urlsplit(path)
@@ -3538,6 +5588,83 @@ def handle_http(method, path, body, conn, root=None, *, static_root=None, androi
         return 200, s, json_ct
     if method == "GET" and path == "/api/session":
         return 200, _session_payload(conn), json_ct
+    if method == "GET" and path == "/api/experiences":
+        return 200, list_experiences(conn), json_ct
+    experience_match = re.fullmatch(r"/api/experiences/(\d+)(?:/(start))?", path)
+    if experience_match:
+        raw_experience_id = experience_match.group(1)
+        action = experience_match.group(2)
+        if method == "GET" and action is None:
+            try:
+                experience_id = _parse_url_db_id(raw_experience_id, "experience_id")
+                return 200, get_experience_detail(conn, experience_id), json_ct
+            except LookupError as error:
+                return 404, {"error": str(error)}, json_ct
+            except ValueError as error:
+                return 400, {"error": str(error)}, json_ct
+        if method == "POST" and action == "start":
+            if not isinstance(request_body, dict) or not set(body) <= {"section_id"}:
+                return 400, {"error": "请求只能包含可选的 section_id"}, json_ct
+            section_id = body.get("section_id")
+            if "section_id" in body and type(section_id) is not int:
+                return 400, {"error": "section_id 必须是整数"}, json_ct
+            try:
+                experience_id = _parse_url_db_id(raw_experience_id, "experience_id")
+                session_id, _ = start_experience(conn, experience_id, section_id)
+                session = _session_payload(conn)
+            except SessionOpenError as error:
+                return 409, {
+                    "error": str(error),
+                    "session_id": error.session_id,
+                    "pending_ids": error.pending_ids,
+                }, json_ct
+            except LookupError as error:
+                return 404, {"error": str(error)}, json_ct
+            except ValueError as error:
+                return 400, {"error": str(error)}, json_ct
+            response = {
+                "session_id": session_id,
+                "questions": session["items"],
+                "session_type": session["session_type"],
+                "experience": session["experience"],
+            }
+            if "section" in session:
+                response["section"] = session["section"]
+            return 200, response, json_ct
+    if method == "GET" and path == "/api/packs":
+        return 200, list_interview_packs(conn), json_ct
+    if method == "POST" and path in ("/api/packs/inspect", "/api/packs/install"):
+        try:
+            archive = _decode_pack_archive_body(body)
+            if path.endswith("/inspect"):
+                return 200, inspect_interview_pack(conn, archive), json_ct
+            result = install_interview_pack(conn, archive)
+            return (201 if result["status"] == "installed" else 200), result, json_ct
+        except PackValidationError as error:
+            return 400, {"error": _pack_http_error_message(error)}, json_ct
+        except PackConflictError as error:
+            return 409, {
+                "error": _pack_http_error_message(error, "题包版本或内容冲突")
+            }, json_ct
+        except SessionOpenError as error:
+            return 409, {
+                "error": str(error),
+                "session_id": error.session_id,
+                "pending_ids": error.pending_ids,
+            }, json_ct
+    pack_match = re.fullmatch(r"/api/packs/([A-Za-z0-9][A-Za-z0-9._:-]*)", path)
+    if method == "PUT" and pack_match:
+        if not isinstance(body, dict) or set(body) != {"include_in_review"}:
+            return 400, {"error": "request must contain only include_in_review"}, json_ct
+        try:
+            result = set_pack_review_enabled(
+                conn, pack_match.group(1), body["include_in_review"]
+            )
+        except PackValidationError as error:
+            return 400, {"error": str(error)}, json_ct
+        except LookupError as error:
+            return 404, {"error": str(error)}, json_ct
+        return 200, result, json_ct
     if method == "GET" and path == "/api/backup/export":
         try:
             modes = urllib.parse.parse_qs(parsed_url.query, keep_blank_values=True).get("mode", ["progress"])
@@ -3559,10 +5686,15 @@ def handle_http(method, path, body, conn, root=None, *, static_root=None, androi
             payload = inspect_backup(archive) if path.endswith("/inspect") else restore_backup(conn, archive)
             return 200, payload, json_ct
         except (UnicodeEncodeError, ValueError) as e:
-            return 400, {"error": str(e) or "备份编码无效"}, json_ct
+            return 400, {
+                "error": _backup_http_error_message(e, "备份编码或内容不合法")
+            }, json_ct
+        except PackConflictError as e:
+            return 409, {"error": _backup_http_error_message(e, "题包版本冲突")}, json_ct
         except SessionOpenError as e:
             return 409, {
-                "error": str(e), "session_id": e.session_id, "pending_ids": e.pending_ids,
+                "error": _backup_http_error_message(e, "已有未关闭会话"),
+                "session_id": e.session_id, "pending_ids": e.pending_ids,
             }, json_ct
     submission_match = re.fullmatch(r"/api/submissions/([^/]+)", path)
     if method == "GET" and submission_match:
@@ -3600,16 +5732,16 @@ def handle_http(method, path, body, conn, root=None, *, static_root=None, androi
 
     question_match = re.fullmatch(r"/api/questions/(\d+)", path)
     if question_match:
-        qid = int(question_match.group(1))
         try:
+            qid = _require_db_id(int(question_match.group(1)), "question_id")
             if method == "PUT":
                 return 200, update_question(conn, qid, body), json_ct
             if method == "DELETE":
                 delete_question(conn, qid)
                 return 200, {"deleted": True, "id": qid}, json_ct
-        except QuestionInUseError as e:
+        except (QuestionInUseError, PackQuestionReadOnlyError) as e:
             return 409, {"error": str(e)}, json_ct
-        except (QuestionValidationError, LookupError) as e:
+        except (QuestionValidationError, LookupError, ValueError) as e:
             return 400, {"error": str(e)}, json_ct
     if method == "POST" and path == "/api/draw":
         try:
@@ -3634,10 +5766,11 @@ def handle_http(method, path, body, conn, root=None, *, static_root=None, androi
         if not sid or qid is None or not text:
             return 400, {"error": "缺少 session_id / question_id / text"}, json_ct
         try:
+            qid = _require_db_id(qid, "question_id")
             out = judge_answer(
                 conn,
                 sid,
-                int(qid),
+                qid,
                 text,
                 root=root,
                 submission_id=body.get("submission_id"),
@@ -3655,7 +5788,7 @@ def handle_http(method, path, body, conn, root=None, *, static_root=None, androi
         if not sid or qid is None:
             return 400, {"error": "缺少 session_id / question_id"}, json_ct
         try:
-            qid = int(qid)
+            qid = _require_db_id(qid, "question_id")
             if path == "/api/reveal":
                 out = reveal_answer(conn, sid, qid)
             else:
@@ -3668,6 +5801,17 @@ def handle_http(method, path, body, conn, root=None, *, static_root=None, androi
                 )
         except (GradeRejected, ValueError, LookupError) as e:
             return 400, {"error": str(e)}, json_ct
+        return 200, out, json_ct
+    if method == "POST" and path == "/api/session/complete":
+        required = {"session_id", "question_id", "completion_type"}
+        if not isinstance(body, dict) or set(body) != required:
+            return 400, {"error": "请求必须包含 session_id、question_id、completion_type"}, json_ct
+        try:
+            out = complete_prepare_question(
+                conn, body["session_id"], body["question_id"], body["completion_type"]
+            )
+        except (GradeRejected, ValueError, LookupError) as error:
+            return 400, {"error": str(error)}, json_ct
         return 200, out, json_ct
     if method == "POST" and path == "/api/skip":
         try:
@@ -4011,27 +6155,33 @@ def serve(host="127.0.0.1", port=8765, root=None):
 
 def stats(conn):
     today = dt.date.today().isoformat()
-    total = conn.execute("SELECT COUNT(*) c FROM questions").fetchone()["c"]
+    eligible = DAILY_QUESTION_ELIGIBILITY_SQL
+    total = conn.execute(
+        f"SELECT COUNT(*) c FROM questions q WHERE {eligible}"
+    ).fetchone()["c"]
     due = conn.execute(
-        "SELECT COUNT(*) c FROM questions WHERE next_due IS NULL OR next_due <= ?",
+        f"""SELECT COUNT(*) c FROM questions q
+            WHERE {eligible} AND (q.next_due IS NULL OR q.next_due <= ?)""",
         (today,),
     ).fetchone()["c"]
     review_due = conn.execute(
-        "SELECT COUNT(*) c FROM questions WHERE next_due IS NOT NULL AND next_due <= ?",
+        f"""SELECT COUNT(*) c FROM questions q
+            WHERE {eligible} AND q.next_due IS NOT NULL AND q.next_due <= ?""",
         (today,),
     ).fetchone()["c"]
     new_count = conn.execute(
-        "SELECT COUNT(*) c FROM questions WHERE next_due IS NULL"
+        f"SELECT COUNT(*) c FROM questions q WHERE {eligible} AND q.next_due IS NULL"
     ).fetchone()["c"]
     mastered = conn.execute(
-        "SELECT COUNT(*) c FROM questions WHERE level >= 3"
+        f"SELECT COUNT(*) c FROM questions q WHERE {eligible} AND q.level >= 3"
     ).fetchone()["c"]
     by_cat = conn.execute(
-        """SELECT category, COUNT(*) total,
-                   SUM(CASE WHEN times_seen > 0 THEN 1 ELSE 0 END) seen,
-                   SUM(CASE WHEN level >= 3 THEN 1 ELSE 0 END) mastered,
-                   SUM(CASE WHEN next_due IS NULL OR next_due <= ? THEN 1 ELSE 0 END) due_n
-            FROM questions GROUP BY category ORDER BY total DESC""",
+        f"""SELECT q.category, COUNT(*) total,
+                   SUM(CASE WHEN q.times_seen > 0 THEN 1 ELSE 0 END) seen,
+                   SUM(CASE WHEN q.level >= 3 THEN 1 ELSE 0 END) mastered,
+                   SUM(CASE WHEN q.next_due IS NULL OR q.next_due <= ? THEN 1 ELSE 0 END) due_n
+            FROM questions q WHERE {eligible}
+            GROUP BY q.category ORDER BY total DESC""",
         (today,),
     ).fetchall()
     return {
