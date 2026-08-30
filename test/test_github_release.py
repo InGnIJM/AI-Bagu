@@ -137,6 +137,36 @@ def test_dry_run_has_no_remote_calls(prepared):
     assert result["release"] == "dry-run" and remote.events == []
 
 
+def test_v2_descriptor_keeps_seven_external_assets_in_release_dry_run(
+        tmp_path, monkeypatch, capsys):
+    module = publisher()
+    version = {"versionName": "0.1.0-beta.6", "versionCode": 6, "channel": "beta"}
+    descriptor = {
+        "schema_version": 2,
+        "versionName": version["versionName"],
+        "file_name": "synthetic-v2.bagu-pack",
+        "sha256": "a" * 64,
+        "pack_id": "synthetic-v2-pack",
+        "revision": 1,
+        "display_version": "2026.08.30-r1",
+        "question_count": 1,
+        "experience_count": 1,
+        "android_delivery": "bundled_confirm",
+    }
+    path = tmp_path / "docs/releases/0.1.0-beta.6-question-pack.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(module.meta.json_bytes(descriptor))
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setattr(module, "local_preflight", lambda: (version, "a" * 40))
+    monkeypatch.setattr(sys, "argv", ["release_github.py", "preflight"])
+
+    assert module.main() == 0
+
+    announcement = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert len(announcement["assets"]) == 7
+    assert descriptor["file_name"] in announcement["assets"]
+
+
 def test_release_is_verified_before_publication_and_feed(prepared):
     module = publisher()
     directory, version, feed = prepared

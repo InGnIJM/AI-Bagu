@@ -19,6 +19,7 @@ SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 VERSION = {"versionName": "0.1.0-beta.5", "versionCode": 5, "channel": "beta"}
+VERSION_V2 = {"versionName": "0.1.0-beta.6", "versionCode": 6, "channel": "beta"}
 PACK_NAME = "ai-bagu-synthetic-interviews-r1.bagu-pack"
 PACK_ID = "synthetic-interview-pack"
 PACK_NOTES = (
@@ -29,6 +30,7 @@ DESCRIPTOR_FIELDS = (
     "schema_version", "versionName", "file_name", "sha256", "pack_id",
     "revision", "display_version", "question_count", "experience_count",
 )
+DESCRIPTOR_V2_FIELDS = (*DESCRIPTOR_FIELDS, "android_delivery")
 
 
 def release_metadata():
@@ -121,11 +123,13 @@ def descriptor_value(pack, **changes):
     return value
 
 
-def descriptor_bytes(value):
+def descriptor_bytes(value, fields=None):
     # Independent literal layout: a field reordering or compact encoding is invalid.
+    fields = fields or (DESCRIPTOR_V2_FIELDS if value.get("schema_version") == 2
+                        else DESCRIPTOR_FIELDS)
     lines = ["{"]
-    for index, name in enumerate(DESCRIPTOR_FIELDS):
-        comma = "," if index + 1 < len(DESCRIPTOR_FIELDS) else ""
+    for index, name in enumerate(fields):
+        comma = "," if index + 1 < len(fields) else ""
         lines.append(f"  {json.dumps(name)}: {json.dumps(value[name], ensure_ascii=False)}{comma}")
     lines.append("}")
     return ("\n".join(lines) + "\n").encode("utf-8")
@@ -165,7 +169,11 @@ def test_descriptor_accepts_only_exact_canonical_nine_field_bytes():
     raw = descriptor_bytes(value)
 
     assert raw == module.json_bytes(value)
-    assert tuple(module.parse_question_pack_descriptor(raw, VERSION)) == DESCRIPTOR_FIELDS
+    descriptor = module.parse_question_pack_descriptor(raw, VERSION)
+    assert tuple(descriptor) == DESCRIPTOR_FIELDS
+    assert descriptor.external_only and not descriptor.bundled_confirm
+    assert descriptor.android_delivery == "external_only"
+    assert "内置同一题包" not in module._pack_install_text(VERSION, descriptor)
 
     invalid = [
         raw.replace(b'  "schema_version": 1,\n', b'  "schema_version": 1,\n  "schema_version": 1,\n'),
@@ -184,6 +192,51 @@ def test_descriptor_accepts_only_exact_canonical_nine_field_bytes():
     for candidate in invalid:
         with pytest.raises(ValueError):
             module.parse_question_pack_descriptor(candidate, VERSION)
+
+
+def test_descriptor_accepts_exact_canonical_v2_bundled_delivery_bytes():
+    module = release_metadata()
+    value = descriptor_value(
+        make_pack(), schema_version=2, versionName=VERSION_V2["versionName"],
+        android_delivery="bundled_confirm",
+    )
+    raw = descriptor_bytes(value)
+
+    descriptor = module.parse_question_pack_descriptor(raw, VERSION_V2)
+
+    assert raw == module.json_bytes(value)
+    assert tuple(descriptor) == DESCRIPTOR_V2_FIELDS
+    assert not descriptor.external_only and descriptor.bundled_confirm
+    assert descriptor.android_delivery == "bundled_confirm"
+    assert "内置同一题包" in module._pack_install_text(VERSION_V2, descriptor)
+
+
+def test_descriptor_rejects_v2_delivery_or_canonical_shape_violations():
+    module = release_metadata()
+    value = descriptor_value(
+        make_pack(), schema_version=2, versionName=VERSION_V2["versionName"],
+        android_delivery="bundled_confirm",
+    )
+    raw = descriptor_bytes(value)
+    reordered = dict(value)
+    first = reordered.pop("schema_version")
+    reordered["schema_version"] = first
+    v1_with_delivery = dict(value, schema_version=1)
+
+    invalid = [
+        raw.replace(b'  "android_delivery": "bundled_confirm"\n',
+                    b'  "android_delivery": "bundled_confirm",\n'
+                    b'  "android_delivery": "bundled_confirm"\n'),
+        descriptor_bytes(dict(value, unknown=1), fields=(*DESCRIPTOR_V2_FIELDS, "unknown")),
+        descriptor_bytes(reordered, fields=tuple(reordered)),
+        descriptor_bytes(value, fields=DESCRIPTOR_FIELDS),
+        descriptor_bytes(dict(value, android_delivery="external_only")),
+        descriptor_bytes(dict(value, versionName="0.1.0-beta.5")),
+        descriptor_bytes(v1_with_delivery, fields=DESCRIPTOR_V2_FIELDS),
+    ]
+    for candidate in invalid:
+        with pytest.raises(ValueError):
+            module.parse_question_pack_descriptor(candidate, VERSION_V2)
 
 
 @pytest.mark.parametrize("field,value", [

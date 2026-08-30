@@ -31,6 +31,21 @@ DESCRIPTOR_FIELDS = (
     "schema_version", "versionName", "file_name", "sha256", "pack_id",
     "revision", "display_version", "question_count", "experience_count",
 )
+DESCRIPTOR_V2_FIELDS = (*DESCRIPTOR_FIELDS, "android_delivery")
+
+
+class QuestionPackDescriptor(dict):
+    @property
+    def android_delivery(self):
+        return "bundled_confirm" if self["schema_version"] == 2 else "external_only"
+
+    @property
+    def external_only(self):
+        return self.android_delivery == "external_only"
+
+    @property
+    def bundled_confirm(self):
+        return self.android_delivery == "bundled_confirm"
 
 
 @dataclass(frozen=True)
@@ -87,7 +102,7 @@ def _unique_object(pairs, label):
 
 
 def parse_question_pack_descriptor(data, version):
-    """Parse the exact public nine-field binding, including its canonical bytes."""
+    """Parse the exact versioned public question-pack binding and canonical bytes."""
     validate_version(version)
     if not isinstance(data, bytes) or not 0 < len(data) <= MAX_DESCRIPTOR:
         raise ValueError("question-pack descriptor exceeds 64 KiB or is empty")
@@ -99,11 +114,16 @@ def parse_question_pack_descriptor(data, version):
         )
     except (UnicodeError, ValueError, OverflowError, RecursionError) as exc:
         raise ValueError("invalid question-pack descriptor JSON") from exc
-    if (not isinstance(value, dict) or tuple(value) != DESCRIPTOR_FIELDS
-            or json_bytes(value) != data):
-        raise ValueError("question-pack descriptor is not canonical or has invalid fields")
-    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+    if not isinstance(value, dict) or type(value.get("schema_version")) is not int:
         raise ValueError("invalid question-pack descriptor schema")
+    schema = value["schema_version"]
+    fields = {1: DESCRIPTOR_FIELDS, 2: DESCRIPTOR_V2_FIELDS}.get(schema)
+    if fields is None:
+        raise ValueError("invalid question-pack descriptor schema")
+    if list(value) != list(fields) or json_bytes(value) != data:
+        raise ValueError("question-pack descriptor is not canonical or has invalid fields")
+    if schema == 2 and value["android_delivery"] != "bundled_confirm":
+        raise ValueError("invalid question-pack Android delivery")
     if value["versionName"] != version["versionName"]:
         raise ValueError("question-pack descriptor version differs")
     name = value["file_name"]
@@ -126,7 +146,7 @@ def parse_question_pack_descriptor(data, version):
                         ("experience_count", MAX_PACK_ITEMS)):
         if type(value[field]) is not int or not 1 <= value[field] <= high:
             raise ValueError(f"invalid question-pack {field}")
-    return value
+    return QuestionPackDescriptor(value)
 
 
 def question_pack_descriptor_path(root, version):
@@ -209,6 +229,8 @@ def _pack_install_text(version, descriptor):
             f"从同一 Release 单独下载 `{descriptor['file_name']}`，打开八股助手的题库管理，选择“导入题包”，"
             "先检查预览，再明确确认安装。题包不会自动下载或自动更新。\n\n"
             "题包仅供个人学习及在八股助手中使用；题包内容权利保留，应用源码的 MIT 许可证不适用于题包内容。\n")
+        if descriptor.bundled_confirm:
+            text += "Android public 版也会内置同一题包，但必须在原生预览中明确确认后才安装。\n"
     else:
         text += "\n应用源码使用 MIT；字体、运行时和第三方材料保留各自许可证，题库不在 MIT 授权范围内。\n"
     return text
