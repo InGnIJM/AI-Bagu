@@ -585,6 +585,7 @@ def verify_receipt(directory, commit, pack_context=None):
     }
     if pack_context is not None:
         expected["question_pack"] = pack_context["provenance"]
+        expected.update(meta.android_verification_fields(pack_context["descriptor"]))
     if receipt != expected:
         raise ValueError("verification receipt does not cover exact committed source and assets; run prepare")
 
@@ -690,6 +691,7 @@ def prepare(directory, version, commit, question_pack=None, *, pack_context=None
                "checks": ["pytest", "node", "public-build-unit-lint"]}
     if pack_context is not None:
         receipt["question_pack"] = pack_context["provenance"]
+        receipt.update(meta.android_verification_fields(pack_context["descriptor"]))
     write_atomic_json(receipt_path, receipt)
 
 

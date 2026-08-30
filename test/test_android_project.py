@@ -52,6 +52,14 @@ def load_release_verifier():
     return module
 
 
+def load_release_metadata():
+    path = ROOT / "scripts/release_metadata.py"
+    spec = importlib.util.spec_from_file_location("release_metadata_for_apk_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def make_packaged_seed(path, *, public=False, private_entry=None, pack_state=False):
     bagu.prepare_mobile_database(path)
     if not public or pack_state:
@@ -138,6 +146,32 @@ def make_interview_pack_fixture():
         archive.writestr("questions.json", question_bytes)
         archive.writestr("experiences.json", experience_bytes)
     return output.getvalue()
+
+
+def make_bundled_descriptor(pack, *, schema_version=2):
+    metadata = load_release_metadata()
+    version = {
+        "versionName": "0.1.0-beta.6", "versionCode": 6, "channel": "beta",
+    }
+    value = {
+        "schema_version": schema_version,
+        "versionName": version["versionName"],
+        "file_name": "synthetic-interviews-r1.bagu-pack",
+        "sha256": hashlib.sha256(pack).hexdigest(),
+        "pack_id": "android-private-pack",
+        "revision": 1,
+        "display_version": "1.0",
+        "question_count": 1,
+        "experience_count": 1,
+    }
+    if schema_version == 2:
+        value["android_delivery"] = "bundled_confirm"
+    return metadata.parse_question_pack_descriptor(metadata.json_bytes(value), version)
+
+
+def add_apk_member(apk, name, payload):
+    with zipfile.ZipFile(apk, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(name, payload)
 
 
 def add_pinned_native_payloads(apk):
@@ -350,6 +384,67 @@ def test_public_build_rejects_bad_question_pack_before_environment_or_gradle(tmp
     assert "JDK17" not in combined and "Gradle" not in combined
 
 
+def test_public_build_snapshots_valid_v2_pack_before_environment_or_gradle(tmp_path):
+    root = make_isolated_release_script_root(tmp_path)
+    shutil.copy2(ROOT / "scripts/release_metadata.py", root / "scripts/release_metadata.py")
+    shutil.copy2(ROOT / "bagu.py", root / "bagu.py")
+    version = {"versionName": "0.1.0-beta.6", "versionCode": 6, "channel": "beta"}
+    (root / "version.json").write_text(json.dumps(version), encoding="utf-8")
+    pack = make_interview_pack_fixture()
+    source = tmp_path / "private-source" / "synthetic-interviews-r1.bagu-pack"
+    source.parent.mkdir()
+    source.write_bytes(pack)
+    descriptor = {
+        "schema_version": 2, "versionName": version["versionName"],
+        "file_name": source.name, "sha256": hashlib.sha256(pack).hexdigest(),
+        "pack_id": "android-private-pack", "revision": 1, "display_version": "1.0",
+        "question_count": 1, "experience_count": 1, "android_delivery": "bundled_confirm",
+    }
+    descriptor_path = root / "docs/releases/0.1.0-beta.6-question-pack.json"
+    descriptor_path.parent.mkdir(parents=True)
+    metadata = load_release_metadata()
+    descriptor_path.write_bytes(metadata.json_bytes(descriptor))
+
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+         str(root / "scripts/android.ps1"), "-Mode", "Build", "-BuildPython", sys.executable,
+         "-JavaHome", str(root / "missing-jdk"), "-QuestionPack", str(source)],
+        cwd=root, capture_output=True, text=True, encoding="utf-8",
+    )
+
+    snapshot = root / "android/app/build/generated/bagu/input/question-pack/bundled.bagu-pack"
+    assert result.returncode != 0
+    assert snapshot.read_bytes() == pack
+    assert hashlib.sha256(snapshot.read_bytes()).hexdigest() == descriptor["sha256"]
+
+
+def test_gradle_generates_only_fixed_public_release_pack_asset(tmp_path):
+    pack_path = tmp_path / "validated-copy.bagu-pack"
+    pack_path.write_bytes(make_interview_pack_fixture())
+    gradle = ROOT / ".toolchains/gradle-9.1.0/bin/gradle.bat"
+    env = os.environ.copy()
+    env.update({
+        "JAVA_HOME": "C:/Program Files/Java/jdk-17.0.10",
+        "ANDROID_HOME": str(ROOT / ".android-sdk"),
+        "ANDROID_SDK_ROOT": str(ROOT / ".android-sdk"),
+        "ANDROID_USER_HOME": str(ROOT / ".android-user-home"),
+        "GRADLE_USER_HOME": str(ROOT / ".gradle-user-home"),
+    })
+
+    completed = subprocess.run(
+        [str(gradle), "--offline", "--no-daemon", "--console=plain",
+         ":app:syncPublicReleaseBundledPack", "-PbaguAndroidDelivery=bundled_confirm",
+         f"-PbaguBundledQuestionPack={pack_path}", f"-PbaguBuildPython={sys.executable}"],
+        cwd=ANDROID, env=env, capture_output=True, text=True, encoding="utf-8",
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    generated = ANDROID / "app/build/generated/bagu/publicRelease/bundled-pack-assets"
+    files = [path.relative_to(generated).as_posix() for path in generated.rglob("*") if path.is_file()]
+    assert files == ["question-pack/bundled.bagu-pack"]
+    assert (generated / files[0]).read_bytes() == pack_path.read_bytes()
+
+
 def test_gitignore_keeps_android_private_material_and_generated_state_untracked(tmp_path):
     """Pins ignore behavior without opening real secrets or changing this repository."""
     isolated = tmp_path / "ignore-contract"
@@ -419,6 +514,51 @@ def test_release_archive_verifier_accepts_explicit_assets_and_clean_flavor_seeds
     assert internal_report["abis"] == ["arm64-v8a"]
     assert public_report["questions"] == 0
     assert public_report["sessions"] == 0 and public_report["session_items"] == 0
+
+
+def test_release_archive_verifier_accepts_only_descriptor_bound_fixed_pack(tmp_path):
+    verifier = load_release_verifier()
+    pack = make_interview_pack_fixture()
+    descriptor = make_bundled_descriptor(pack)
+    apk = make_packaged_seed(tmp_path / "public-v2.db", public=True)
+    add_apk_member(apk, "assets/question-pack/bundled.bagu-pack", pack)
+
+    report = verifier.verify_apk_contents(apk, "public", descriptor=descriptor)
+
+    assert report["android_delivery"] == "bundled_confirm"
+    assert report["bundled_pack_member"] == "assets/question-pack/bundled.bagu-pack"
+    assert report["bundled_pack_sha256"] == hashlib.sha256(pack).hexdigest()
+    assert report["questions"] == report["packs"] == report["experiences"] == 0
+
+
+@pytest.mark.parametrize("mutation", [
+    "missing", "wrong-path", "nested", "extra", "wrong-hash", "malformed", "schema-v1", "internal",
+])
+def test_release_archive_verifier_rejects_invalid_bundled_pack_delivery(tmp_path, mutation):
+    verifier = load_release_verifier()
+    pack = make_interview_pack_fixture()
+    descriptor = make_bundled_descriptor(pack, schema_version=1 if mutation == "schema-v1" else 2)
+    flavor = "internal" if mutation == "internal" else "public"
+    apk = make_packaged_seed(tmp_path / f"{mutation}.db", public=flavor == "public")
+    fixed = "assets/question-pack/bundled.bagu-pack"
+    if mutation == "wrong-path":
+        add_apk_member(apk, "assets/question-pack/source-name.bagu-pack", pack)
+    elif mutation == "nested":
+        add_apk_member(apk, "META-INF/nested/bundled.bagu-pack", pack)
+    elif mutation == "extra":
+        add_apk_member(apk, fixed, pack)
+        add_apk_member(apk, "assets/question-pack/extra.bagu-pack", pack)
+    elif mutation == "wrong-hash":
+        add_apk_member(apk, fixed, pack + b"tampered")
+    elif mutation == "malformed":
+        malformed = b"not-a-bagu-pack"
+        descriptor = make_bundled_descriptor(malformed)
+        add_apk_member(apk, fixed, malformed)
+    elif mutation != "missing":
+        add_apk_member(apk, fixed, pack)
+
+    with pytest.raises(ValueError, match="pack|bundle|delivery|member|hash|ZIP"):
+        verifier.verify_apk_contents(apk, flavor, descriptor=descriptor)
 
 
 def test_release_archive_verifier_rejects_private_state(tmp_path):

@@ -213,6 +213,29 @@ def test_descriptor_accepts_exact_canonical_v2_bundled_delivery_bytes():
     assert "公开 APK 使用空题库，并且不内置题包。" not in install
 
 
+def test_bundled_descriptor_exposes_only_non_sensitive_apk_receipt_fields(tmp_path):
+    module = release_metadata()
+    pack = make_pack()
+    source = tmp_path / "private-source" / PACK_NAME
+    source.parent.mkdir()
+    source.write_bytes(pack)
+    value = descriptor_value(
+        pack, schema_version=2, versionName=VERSION_V2["versionName"],
+        android_delivery="bundled_confirm",
+    )
+    descriptor = module.parse_question_pack_descriptor(descriptor_bytes(value), VERSION_V2)
+    bound = module.read_bound_question_pack(source, descriptor)
+
+    fields = module.android_verification_fields(bound.descriptor)
+
+    assert fields == {
+        "android_delivery": "bundled_confirm",
+        "bundled_pack_member": "assets/question-pack/bundled.bagu-pack",
+        "bundled_pack_sha256": hashlib.sha256(pack).hexdigest(),
+    }
+    assert str(source.resolve()) not in json.dumps(fields, ensure_ascii=False)
+
+
 def test_descriptor_rejects_v2_delivery_or_canonical_shape_violations():
     module = release_metadata()
     value = descriptor_value(

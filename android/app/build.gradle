@@ -41,6 +41,20 @@ signingPropertiesFile.withInputStream { signingProperties.load(it) }
 def generatedPython = layout.buildDirectory.dir('generated/bagu/python')
 def generatedStatic = layout.buildDirectory.dir('generated/bagu/assets')
 def generatedBranding = layout.buildDirectory.dir('generated/bagu/res')
+def androidDelivery = providers.gradleProperty('baguAndroidDelivery').getOrElse('external_only')
+def bundledQuestionPack = providers.gradleProperty('baguBundledQuestionPack')
+if (!(androidDelivery in ['external_only', 'bundled_confirm'])) {
+    throw new GradleException('baguAndroidDelivery must be external_only or bundled_confirm')
+}
+if (androidDelivery == 'bundled_confirm' && !bundledQuestionPack.isPresent()) {
+    throw new GradleException('bundled_confirm requires baguBundledQuestionPack')
+}
+def requestedInternalBuild = gradle.startParameter.taskNames.any {
+    it.toLowerCase(java.util.Locale.ROOT).contains('internal')
+}
+if (requestedInternalBuild && bundledQuestionPack.isPresent()) {
+    throw new GradleException('internal builds must never receive baguBundledQuestionPack')
+}
 
 android {
     namespace 'io.github.ingnijm.baguhelper'
@@ -147,6 +161,21 @@ androidComponents {
         variant.sources.assets.addGeneratedSourceDirectory(syncStatic) { it.outputDirectory }
         variant.sources.res.addGeneratedSourceDirectory(syncBranding) { it.outputDirectory }
         variant.sources.assets.addGeneratedSourceDirectory(seedTasks[variant.flavorName]) { it.outputDirectory }
+        if (variant.flavorName == 'public' && androidDelivery == 'bundled_confirm') {
+            def variantName = variant.name
+            def generatedPack = layout.buildDirectory.dir(
+                "generated/bagu/${variantName}/bundled-pack-assets")
+            def packTask = tasks.register(
+                "sync${variantName.capitalize()}BundledPack", BaguSync) {
+                outputDirectory.set(generatedPack)
+                from(bundledQuestionPack) {
+                    rename { 'bundled.bagu-pack' }
+                    into 'question-pack'
+                }
+                into outputDirectory
+            }
+            variant.sources.assets.addGeneratedSourceDirectory(packTask) { it.outputDirectory }
+        }
     }
 }
 // Chaquopy has its own source model; wire its documented merge task explicitly.

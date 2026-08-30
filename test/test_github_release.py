@@ -167,6 +167,52 @@ def test_v2_descriptor_keeps_seven_external_assets_in_release_dry_run(
     assert descriptor["file_name"] in announcement["assets"]
 
 
+def test_prepare_receipt_records_bundled_delivery_without_source_path(tmp_path, monkeypatch):
+    module = publisher()
+    version = {"versionName": "0.1.0-beta.6", "versionCode": 6, "channel": "beta"}
+    directory = tmp_path / "dist/android/0.1.0-beta.6/public"
+    source = tmp_path / "private-source" / "synthetic-v2.bagu-pack"
+    source.parent.mkdir()
+    source.write_bytes(b"synthetic pack bytes")
+    descriptor = module.meta.QuestionPackDescriptor({
+        "schema_version": 2, "versionName": version["versionName"],
+        "file_name": source.name, "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "pack_id": "synthetic-v2-pack", "revision": 1,
+        "display_version": "2026.08.30-r1", "question_count": 1,
+        "experience_count": 1, "android_delivery": "bundled_confirm",
+    })
+    pack_context = {
+        "descriptor": descriptor,
+        "bound": SimpleNamespace(path=source),
+        "provenance": {
+            "file_name": source.name,
+            "sha256": descriptor["sha256"],
+            "descriptor_sha256": "d" * 64,
+        },
+    }
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setattr(module, "local_preflight", lambda: (version, "a" * 40))
+    monkeypatch.setattr(module.meta, "validate_directory", lambda *args, **kwargs: [])
+    monkeypatch.setattr(module, "_release_pack_context", lambda *args, **kwargs: pack_context)
+
+    def run(args, cwd):
+        if "-Mode" in args and args[args.index("-Mode") + 1] == "Build":
+            directory.mkdir(parents=True)
+            (directory / module.meta.apk_name(version)).write_bytes(b"synthetic apk")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    module.prepare(directory, version, "a" * 40, question_pack=source, pack_context=pack_context)
+
+    receipt_bytes = (directory.parent / "verification.json").read_bytes()
+    receipt = json.loads(receipt_bytes)
+    assert receipt["android_delivery"] == "bundled_confirm"
+    assert receipt["bundled_pack_member"] == "assets/question-pack/bundled.bagu-pack"
+    assert receipt["bundled_pack_sha256"] == descriptor["sha256"]
+    assert str(source.resolve()).encode("utf-8") not in receipt_bytes
+
+
 def test_release_is_verified_before_publication_and_feed(prepared):
     module = publisher()
     directory, version, feed = prepared

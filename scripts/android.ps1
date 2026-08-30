@@ -85,6 +85,53 @@ function Get-Sha256([string]$Path) {
     }
 }
 
+function Get-QuestionPackBinding([string]$PackPath) {
+    $arguments = @((Join-Path $PSScriptRoot 'release_metadata.py'), 'bind', $PackPath,
+        '--version', (Join-Path $RepoRoot 'version.json'), '--json')
+    $json = (& $BuildPython @arguments)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Question-pack binding failed (exit $LASTEXITCODE)."
+    }
+    try {
+        $binding = $json | ConvertFrom-Json
+    }
+    catch {
+        throw 'Question-pack binding returned invalid JSON.'
+    }
+    if ($binding.schema_version -notin @(1, 2) -or
+        $binding.android_delivery -notin @('external_only', 'bundled_confirm') -or
+        $binding.sha256 -notmatch '^[0-9a-f]{64}$' -or
+        ($binding.size -isnot [int] -and $binding.size -isnot [long]) -or
+        $binding.size -lt 1 -or $binding.size -gt (20 * 1024 * 1024)) {
+        throw 'Question-pack binding returned invalid fields.'
+    }
+    if (($binding.schema_version -eq 2) -ne ($binding.android_delivery -eq 'bundled_confirm')) {
+        throw 'Question-pack descriptor schema and Android delivery differ.'
+    }
+    return $binding
+}
+
+function New-BundledPackSnapshot([string]$SourcePath, [object]$Binding) {
+    $sourceBefore = Get-Item -LiteralPath $SourcePath
+    $sizeBefore = $sourceBefore.Length
+    $hashBefore = Get-Sha256 $SourcePath
+    if ($sizeBefore -ne $Binding.size -or $hashBefore -ne $Binding.sha256) {
+        throw 'Question-pack source changed after descriptor validation.'
+    }
+    $destination = Join-Path $AndroidRoot 'app\build\generated\bagu\input\question-pack\bundled.bagu-pack'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+    Copy-Item -LiteralPath $SourcePath -Destination $destination -Force
+    $sourceAfter = Get-Item -LiteralPath $SourcePath
+    $destinationAfter = Get-Item -LiteralPath $destination
+    $hashAfter = Get-Sha256 $SourcePath
+    $destinationHash = Get-Sha256 $destination
+    if ($sourceAfter.Length -ne $sizeBefore -or $hashAfter -ne $hashBefore -or
+        $destinationAfter.Length -ne $Binding.size -or $destinationHash -ne $Binding.sha256) {
+        throw 'Question-pack source or generated snapshot changed during copy.'
+    }
+    return $destination
+}
+
 function Set-ProjectEnvironment {
     Require-File (Join-Path $JavaHome 'bin\java.exe') 'JDK17'
     Require-File $GradleHome '项目 Gradle'
@@ -273,6 +320,10 @@ function Assert-Badging([string]$ApkPath) {
 function Invoke-ContentVerification([string]$ApkPath, [string]$Flavor) {
     $arguments = @($Verifier, $ApkPath, '--flavor', $Flavor, '--readelf', $ReadElf)
     if ($Flavor -eq 'public') { $arguments += @('--expected-questions', '0') }
+    if (Test-Path -LiteralPath $QuestionPackDescriptor -PathType Leaf) {
+        $arguments += @('--question-pack-descriptor', $QuestionPackDescriptor,
+            '--version', (Join-Path $RepoRoot 'version.json'))
+    }
     Invoke-Tool $BuildPython $arguments
 }
 
@@ -383,6 +434,8 @@ switch ($Mode) {
         }
     }
     { $_ -in @('Build', 'BuildInternal') } {
+        $packBinding = $null
+        $packForBuild = $QuestionPack
         if ($Mode -eq 'Build') {
             $hasDescriptor = Test-Path -LiteralPath $QuestionPackDescriptor -PathType Leaf
             if ($hasDescriptor -and [string]::IsNullOrWhiteSpace($QuestionPack)) {
@@ -390,8 +443,10 @@ switch ($Mode) {
             }
             if (-not [string]::IsNullOrWhiteSpace($QuestionPack)) {
                 Require-File $BuildPython '题包验证 Python'
-                Invoke-Tool $BuildPython @((Join-Path $PSScriptRoot 'release_metadata.py'), 'bind', $QuestionPack,
-                    '--version', (Join-Path $RepoRoot 'version.json'))
+                $packBinding = Get-QuestionPackBinding $QuestionPack
+                if ($packBinding.android_delivery -eq 'bundled_confirm') {
+                    $packForBuild = New-BundledPackSnapshot $QuestionPack $packBinding
+                }
             }
         }
         Set-ProjectEnvironment
@@ -404,6 +459,12 @@ switch ($Mode) {
             ":app:assemble${variant}Release", ":app:test${variant}DebugUnitTest", ":app:lint${variant}Release",
             "-PbaguBuildPython=$BuildPython", '-PbaguAbi=arm64-v8a'
         )
+        if ($null -ne $packBinding) {
+            $gradleArgs += "-PbaguAndroidDelivery=$($packBinding.android_delivery)"
+            if ($packBinding.android_delivery -eq 'bundled_confirm') {
+                $gradleArgs += "-PbaguBundledQuestionPack=$packForBuild"
+            }
+        }
         Push-Location $AndroidRoot
         try {
             Invoke-Tool $GradleHome $gradleArgs
@@ -420,6 +481,8 @@ switch ($Mode) {
         New-Item -ItemType Directory -Path $DeliveryDir -Force | Out-Null
         Copy-Item -LiteralPath $builtApk -Destination $DeliveryApk
         if ($Flavor -eq 'public') {
+            # Release metadata revalidates the descriptor-named external asset;
+            # only Gradle receives the generated fixed-name snapshot.
             Write-DeliveryMetadata $DeliveryApk $fingerprint $QuestionPack
             Invoke-DeliveryVerification
         } else {

@@ -9,11 +9,13 @@ import argparse
 import hashlib
 import io
 import json
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import sqlite3
 import subprocess
 import tempfile
 import zipfile
+
+import release_metadata
 
 
 STATIC_ASSETS = {
@@ -30,6 +32,7 @@ REQUIRED_ASSETS = STATIC_ASSETS | {
     "assets/seed/bagu-seed.db",
     "assets/chaquopy/app.imy",
 }
+BUNDLED_PACK_MEMBER = release_metadata.BUNDLED_PACK_MEMBER
 ALLOWED_CHAQUOPY_ASSETS = {
     "assets/chaquopy/app.imy",
     "assets/chaquopy/bootstrap.imy",
@@ -124,12 +127,13 @@ def _fail(message):
     raise ValueError(message)
 
 
-def _is_allowed_asset(name):
+def _is_allowed_asset(name, bundled=False):
     return (
         name in STATIC_ASSETS
         or name == "assets/seed/bagu-seed.db"
         or name in ALLOWED_CHAQUOPY_ASSETS
         or name in EXPECTED_NATIVE_LIBRARIES
+        or (bundled and name == BUNDLED_PACK_MEMBER)
     )
 
 
@@ -146,8 +150,10 @@ def _is_private_catalog(name):
     )
 
 
-def _check_private_names(names, container):
-    packs = [name for name in names if PurePosixPath(name).name.lower().endswith(".bagu-pack")]
+def _check_private_names(names, container, allowed_packs=frozenset()):
+    packs = [name for name in names
+             if PurePosixPath(name).name.lower().endswith(".bagu-pack")
+             and name not in allowed_packs]
     if packs:
         _fail(f"{container} contains private interview pack: {sorted(packs)}")
     private_catalogs = [name for name in names if _is_private_catalog(name)]
@@ -158,14 +164,30 @@ def _check_private_names(names, container):
         _fail(f"{container} contains private state: {sorted(private)}")
 
 
-def _check_names(apk):
-    names = set(apk.namelist())
-    _check_private_names(names, "APK")
+def _check_names(apk, flavor, descriptor):
+    listed_names = apk.namelist()
+    names = set(listed_names)
+    fields = release_metadata.android_verification_fields(descriptor)
+    bundled = fields["android_delivery"] == "bundled_confirm"
+    pack_members = [name for name in listed_names
+                    if PurePosixPath(name).name.lower().endswith(".bagu-pack")]
+    if flavor == "internal" or not bundled:
+        if pack_members:
+            _fail(f"APK contains private interview pack: {sorted(pack_members)}")
+    else:
+        if pack_members != [BUNDLED_PACK_MEMBER]:
+            _fail(
+                "bundled question-pack member mismatch: "
+                f"expected={[BUNDLED_PACK_MEMBER]} actual={sorted(pack_members)}"
+            )
+        payload = apk.read(BUNDLED_PACK_MEMBER)
+        release_metadata.validate_bound_question_pack_bytes(payload, descriptor)
+    _check_private_names(names, "APK", {BUNDLED_PACK_MEMBER} if bundled else frozenset())
     missing = REQUIRED_ASSETS - names
     if missing:
         _fail(f"APK missing required assets: {sorted(missing)}")
     assets = {name for name in names if name.startswith("assets/") and not name.endswith("/")}
-    unknown_assets = {name for name in assets if not _is_allowed_asset(name)}
+    unknown_assets = {name for name in assets if not _is_allowed_asset(name, bundled)}
     if unknown_assets:
         native_payloads = {
             name for name in unknown_assets
@@ -201,7 +223,7 @@ def _check_names(apk):
             f"missing={sorted(EXPECTED_NATIVE_LIBRARIES - discovered)} "
             f"unexpected={sorted(discovered - EXPECTED_NATIVE_LIBRARIES)}"
         )
-    return sorted(native)
+    return sorted(native), fields
 
 
 def _seed_report(seed_bytes, flavor, expected_questions):
@@ -316,7 +338,7 @@ def verify_native_elfs(apk_path, readelf):
     return reports
 
 
-def verify_apk_contents(apk_path, flavor, expected_questions=None):
+def verify_apk_contents(apk_path, flavor, expected_questions=None, descriptor=None):
     """Check a built APK without accessing source data or signing material."""
     apk_path = str(apk_path)
     if flavor not in {"internal", "public"}:
@@ -324,12 +346,13 @@ def verify_apk_contents(apk_path, flavor, expected_questions=None):
     try:
         with zipfile.ZipFile(apk_path) as apk:
             names = apk.namelist()
-            native = _check_names(apk)
+            native, fields = _check_names(apk, flavor, descriptor)
             report = _seed_report(apk.read("assets/seed/bagu-seed.db"), flavor, expected_questions)
             report["python_modules"] = _application_modules(apk)
     except zipfile.BadZipFile as exc:
         _fail(f"APK is not a ZIP: {exc}")
     report["abis"] = sorted({name.split("/")[1] for name in native})
+    report.update(fields)
     report["sha256"] = hashlib.sha256(open(apk_path, "rb").read()).hexdigest()
     return report
 
@@ -340,8 +363,21 @@ def main(argv=None):
     parser.add_argument("--flavor", required=True, choices=("internal", "public"))
     parser.add_argument("--expected-questions", type=int)
     parser.add_argument("--readelf", help="GNU readelf path; verifies every outer/nested ELF")
+    parser.add_argument("--question-pack-descriptor", type=Path)
+    parser.add_argument(
+        "--version", type=Path,
+        default=Path(__file__).resolve().parents[1] / "version.json",
+    )
     args = parser.parse_args(argv)
-    report = verify_apk_contents(args.apk, args.flavor, args.expected_questions)
+    descriptor = None
+    if args.question_pack_descriptor is not None:
+        version = release_metadata.load_version(args.version)
+        descriptor, _ = release_metadata.read_question_pack_descriptor(
+            args.question_pack_descriptor, version
+        )
+    report = verify_apk_contents(
+        args.apk, args.flavor, args.expected_questions, descriptor=descriptor
+    )
     if args.readelf:
         report["native_elfs"] = verify_native_elfs(args.apk, args.readelf)
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))

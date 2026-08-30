@@ -25,6 +25,7 @@ CERTIFICATE = "ac92a24f30a5e6c10c4ced0d0db89124f39f36e00778fef6ca3ba4973bdf0ee3"
 MAX_APK = 128 * 1024 * 1024
 MAX_FEED = 64 * 1024
 MAX_PACK = 20 * 1024 * 1024
+BUNDLED_PACK_MEMBER = "assets/question-pack/bundled.bagu-pack"
 MAX_DESCRIPTOR = 64 * 1024
 MAX_PACK_ITEMS = 10000
 DESCRIPTOR_FIELDS = (
@@ -198,6 +199,14 @@ def read_bound_question_pack(path, descriptor):
     if path.name != descriptor["file_name"]:
         raise ValueError("question-pack filename does not match descriptor")
     data = _read_bounded_regular_file(path, MAX_PACK, "question pack (20 MiB maximum)")
+    validate_bound_question_pack_bytes(data, descriptor)
+    return BoundQuestionPack(path=path, descriptor=descriptor, data=data)
+
+
+def validate_bound_question_pack_bytes(data, descriptor):
+    """Validate already-snapshotted archive bytes against one parsed descriptor."""
+    if not isinstance(data, bytes) or not 0 < len(data) <= MAX_PACK:
+        raise ValueError("question pack size exceeds 20 MiB maximum")
     if hashlib.sha256(data).hexdigest() != descriptor["sha256"]:
         raise ValueError("question-pack hash differs from descriptor")
     try:
@@ -213,7 +222,17 @@ def read_bound_question_pack(path, descriptor):
     for field, label in comparisons:
         if manifest[field] != descriptor[field]:
             raise ValueError(f"question-pack {label} differs from descriptor")
-    return BoundQuestionPack(path=path, descriptor=descriptor, data=data)
+    return payload
+
+
+def android_verification_fields(descriptor):
+    """Return the path-free fields safe to persist in Android verification receipts."""
+    delivery = "external_only" if descriptor is None else descriptor.android_delivery
+    return {
+        "android_delivery": delivery,
+        "bundled_pack_member": BUNDLED_PACK_MEMBER if delivery == "bundled_confirm" else None,
+        "bundled_pack_sha256": descriptor["sha256"] if delivery == "bundled_confirm" else None,
+    }
 
 
 def _pack_install_text(version, descriptor):
@@ -449,6 +468,7 @@ def main():
     parser.add_argument("--version", type=Path, default=Path(__file__).resolve().parents[1] / "version.json")
     parser.add_argument("--notes", type=Path)
     parser.add_argument("--question-pack", type=Path)
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     version = load_version(args.version)
     descriptor_root = args.version.resolve().parent
@@ -459,8 +479,16 @@ def main():
             parser.error("bind accepts only its archive path and --version")
         if descriptor is None:
             parser.error("bind requires a version-derived question-pack descriptor")
-        read_bound_question_pack(args.directory, descriptor)
-        print("Question pack binding verified.")
+        bound = read_bound_question_pack(args.directory, descriptor)
+        if args.json:
+            print(json.dumps({
+                "schema_version": descriptor["schema_version"],
+                "android_delivery": descriptor.android_delivery,
+                "sha256": descriptor["sha256"],
+                "size": len(bound.data),
+            }, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        else:
+            print("Question pack binding verified.")
         return
     if args.mode == "prepare":
         if not args.notes:
@@ -471,7 +499,7 @@ def main():
             parser.error("this version has no question-pack descriptor")
         write_metadata(args.directory, version, args.notes.read_text(encoding="utf-8").rstrip("\n"),
                        question_pack=args.question_pack, descriptor=descriptor)
-    elif args.question_pack or args.notes:
+    elif args.question_pack or args.notes or args.json:
         parser.error("verify accepts no external question-pack or notes path")
     validate_directory(args.directory, version, descriptor=descriptor)
     print("Public asset metadata verified (APK cryptographic verification is separate).")
