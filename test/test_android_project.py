@@ -2136,6 +2136,21 @@ def test_bundled_pack_acceptance_instrumentation_is_content_free_and_real_bridge
         "acceptance must exercise the real bridge instead of inspecting asset bytes itself"
 
 
+def test_bundled_auto_prompt_retries_after_update_foreground_reserves_first():
+    source = (ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/MainActivity.java").read_text(
+        encoding="utf-8"
+    )
+    page_finished = re.search(
+        r"(?s)onPageFinished\(WebView view, String url\).*?^\s{12}}", source, re.MULTILINE
+    )
+    on_resume = re.search(r"(?s)protected void onResume\(\).*?^\s{4}}", source, re.MULTILINE)
+    assert page_finished and on_resume
+    for body in (page_finished.group(0), on_resume.group(0)):
+        assert body.index("updater.foreground") < body.index("maybePromptBundledInterviewPack")
+    assert "BundledAutoPromptPolicy.Action.SCHEDULE" in source
+    assert "MAIN.postDelayed" in source
+
+
 def test_android_cleartext_exception_is_only_loopback():
     path = ANDROID / "app/src/main/res/xml/network_security_config.xml"
     assert path.is_file(), "Android transport security not implemented"

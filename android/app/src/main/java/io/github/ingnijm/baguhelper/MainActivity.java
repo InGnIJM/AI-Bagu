@@ -61,6 +61,7 @@ public final class MainActivity extends Activity {
     private static final int PACK_DOCUMENT_REQUEST = 4300;
     private static final int PACK_DOCUMENT_REQUEST_LIMIT = 4399;
     private static final int MICROPHONE_REQUEST = 42;
+    private static final long BUNDLED_AUTO_IDLE_RETRY_MS = 250L;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private WebView web;
     private FrameLayout root;
@@ -85,6 +86,7 @@ public final class MainActivity extends Activity {
     private Runnable updatePrepareTimeout;
     private String speechOperationId;
     private BundledPackController bundledPackController;
+    private final BundledAutoPromptPolicy bundledAutoPromptPolicy = new BundledAutoPromptPolicy();
 
     /** Retained across configuration recreation; never retains an Activity strongly. */
     private static final class HostState {
@@ -280,8 +282,8 @@ public final class MainActivity extends Activity {
                     flushResults();
                     publishDocumentState();
                     showImportConfirmation();
-                    maybePromptBundledInterviewPack();
                     updater.foreground(MainActivity.this);
+                    maybePromptBundledInterviewPack();
                 }
             }
 
@@ -465,8 +467,20 @@ public final class MainActivity extends Activity {
     }
 
     private void maybePromptBundledInterviewPack() {
-        if (bundledOperationIdle()) {
+        boolean idle = bundledOperationIdle();
+        boolean eligibleToRetry = resumed && pageReady && !isFinishing() && !isDestroyed()
+            && state.pendingImport == null;
+        BundledAutoPromptPolicy.Action action = bundledAutoPromptPolicy.evaluate(idle, eligibleToRetry);
+        if (action == BundledAutoPromptPolicy.Action.START) {
             prepareBundledInterviewPack(PendingImport.Source.BUNDLED_AUTO_PROMPT);
+        } else if (action == BundledAutoPromptPolicy.Action.SCHEDULE) {
+            HostState expectedState = state;
+            MAIN.postDelayed(() -> {
+                bundledAutoPromptPolicy.retryFired();
+                if (state == expectedState && expectedState.owner.get() == this) {
+                    maybePromptBundledInterviewPack();
+                }
+            }, BUNDLED_AUTO_IDLE_RETRY_MS);
         }
     }
 
@@ -1042,8 +1056,8 @@ public final class MainActivity extends Activity {
         super.onResume();
         resumed = true;
         showImportConfirmation();
-        maybePromptBundledInterviewPack();
         if (updater != null) updater.foreground(this);
+        maybePromptBundledInterviewPack();
     }
 
     @Override protected void onPause() {
