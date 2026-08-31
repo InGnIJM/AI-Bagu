@@ -123,6 +123,16 @@ public final class BundledPackAcceptanceTest {
         }
     }
 
+    private boolean bundledOperationIdle() {
+        try {
+            java.lang.reflect.Method result = MainActivity.class.getDeclaredMethod("bundledOperationIdle");
+            result.setAccessible(true);
+            return (Boolean)result.invoke(activity);
+        } catch (ReflectiveOperationException error) {
+            throw new AssertionError("Acceptance bundled idle state unavailable", error);
+        }
+    }
+
     private PendingImport pending() {
         return (PendingImport)field(field(activity, "state"), "pendingImport");
     }
@@ -179,17 +189,22 @@ public final class BundledPackAcceptanceTest {
     }
 
     private void requestBundledAfterSettlingAutomaticPreview() throws Exception {
-        settleNativeWorker();
-        PendingImport automatic = pending();
-        if (automatic != null) {
-            assertEquals(PendingImport.Source.BUNDLED_AUTO_PROMPT, automatic.source());
-            cancelPreview();
+        long deadline = SystemClock.uptimeMillis() + 60000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            settleNativeWorker();
+            PendingImport automatic = pending();
+            if (automatic != null) {
+                assertEquals(PendingImport.Source.BUNDLED_AUTO_PROMPT, automatic.source());
+                cancelPreview();
+                continue;
+            }
+            if (bundledOperationIdle()) {
+                requestBundledFromRealBridge();
+                return;
+            }
+            SystemClock.sleep(100);
         }
-        // cancelImport clears pendingImport before it releases the shared file
-        // lease. Drain main/worker again so an immediate settings request cannot
-        // observe that transient half-cancelled state as native_busy.
-        settleNativeWorker();
-        requestBundledFromRealBridge();
+        fail("Bundled host did not become idle (details withheld)");
     }
 
     private JSONObject state() throws Exception {
