@@ -248,7 +248,7 @@ public final class BundledPackAcceptanceTest {
         requestBundledFromRealBridge();
         confirmPreview();
         await("redacted native result", "window.__qaPackResult&&window.__qaPackResult.status==='ok'", 30000);
-        assertEquals("true", js("Object.keys(window.__qaPackResult).every(function(k){return ['operation','status','message','operation_id','pack_id','revision','display_version','question_count','experience_count','installed_revision'].includes(k);})"));
+        assertEquals("true", js("Object.keys(window.__qaPackResult).every(function(k){return ['operation','status','message','operation_id','pack_id','name','revision','display_version','question_count','experience_count','installed_revision'].includes(k);})"));
         js("window.__qaToggleDone=false;api('PUT','/api/packs/'+encodeURIComponent('" + PACK_ID + "'),{include_in_review:false}).then(function(){return api('GET','/api/experiences');}).then(function(v){window.__qaExperienceCount=v.experiences.length;return api('POST','/api/experiences/'+v.experiences[0].id+'/start',{});}).then(function(v){window.__qaSimulationSession=v.session_id;return api('POST','/api/skip',{session_id:v.session_id});}).then(function(){window.__qaToggleDone=true;});");
         await("daily toggle and simulation", "window.__qaToggleDone===true", 30000);
         assertEquals(String.valueOf(EXPERIENCE_COUNT), js("String(window.__qaExperienceCount)"));

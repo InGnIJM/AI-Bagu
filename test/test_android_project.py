@@ -1819,6 +1819,28 @@ def test_bundled_pack_avd_native_boundary_normalizes_ps5_stderr_and_keeps_exit_c
     assert "RemoteException" not in result.stderr
 
 
+def test_bundled_pack_result_allowlist_covers_main_activity_fixed_fields():
+    activity = (ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/MainActivity.java").read_text(encoding="utf-8")
+    acceptance = (ANDROID / "app/src/androidTest/java/io/github/ingnijm/baguhelper/BundledPackAcceptanceTest.java").read_text(encoding="utf-8")
+
+    result_method = activity[activity.index("void result(String operation"):activity.index("@Override public void onCreate")]
+    fixed_match = re.search(
+        r'if \("pack-import"\.equals\(operation\)\).*?new String\[]\{([^}]+)\}',
+        result_method,
+        re.S,
+    )
+    allowed_match = re.search(
+        r'Object\.keys\(window\.__qaPackResult\).*?return \[([^]]+)\]\.includes\(k\)',
+        acceptance,
+        re.S,
+    )
+    assert fixed_match and allowed_match, "pack-import result contract or acceptance allowlist missing"
+    fixed = set(re.findall(r'"([a-z_]+)"', fixed_match.group(1)))
+    allowed = set(re.findall(r"'([a-z_]+)'", allowed_match.group(1)))
+    required = {"operation", "status", "message", "operation_id"} | fixed
+    assert required <= allowed, f"acceptance result allowlist misses fixed native fields: {sorted(required - allowed)}"
+
+
 def test_bundled_pack_acceptance_instrumentation_is_content_free_and_real_bridge_bound():
     path = ANDROID / "app/src/androidTest/java/io/github/ingnijm/baguhelper/BundledPackAcceptanceTest.java"
     assert path.is_file(), "bundled-pack acceptance instrumentation not implemented"
