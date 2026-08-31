@@ -1298,7 +1298,8 @@ def test_bundled_pack_avd_runner_requires_isolated_emulator_safety_gates():
         assert required in source, f"runner missing safety/contract marker: {required}"
     for required in (
         "Assert-DisposableEmulator", "Invoke-ScopedAdbMutation", "ro.boot.qemu.avd_name",
-        "emulatorProcess.Id", "Start-Process", "-WindowStyle", "Hidden",
+        "ownedQemuProcess.Id", "emulatorLauncherProcess", "hardware-qemu.ini.lock", "Start-Process",
+        "-WindowStyle", "Hidden",
         "ConvertTo-Json", "scenario_results", "overall_status", "x86_64",
         "assemblePublicReleaseAndroidTest", "am", "instrument", "force-stop",
     ):
@@ -1334,7 +1335,7 @@ def test_bundled_pack_avd_runner_reverifies_identity_before_every_mutation():
     for marker in (
         "emulator-$port", "ro.kernel.qemu", "ro.build.version.sdk",
         "ro.product.manufacturer", "ro.product.model", "ro.product.device",
-        "ro.boot.qemu.avd_name", "vivo|v2309a", "emulatorProcess.HasExited",
+        "ro.boot.qemu.avd_name", "vivo|v2309a", "Resolve-OwnedQemuProcess",
     ):
         assert marker in identity.group(0), f"identity proof missing: {marker}"
 
@@ -1393,17 +1394,225 @@ def test_bundled_pack_avd_runner_requires_java17_and_has_an_executable_default()
 
 def test_bundled_pack_avd_runner_waits_for_owned_process_shutdown_before_cleanup():
     source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
-    cleanup = re.search(r"(?s)finally \{\s*if \(\$null -ne \$emulatorProcess.*?\n\s*}\n}\n\nfunction Write-SafeStatus", source)
-    assert cleanup, "per-AVD cleanup block missing"
+    cleanup = re.search(r"(?s)function Stop-OwnedQemuProcess.*?^}", source, re.MULTILINE)
+    assert cleanup, "owned-qemu cleanup function missing"
     body = cleanup.group(0)
     assert "Invoke-ScopedAdbMutation @('emu', 'kill')" in body
-    assert "if (-not $emulatorProcess.WaitForExit(15000))" in body
-    assert "$emulatorProcess.Kill()" in body
+    assert "Resolve-OwnedQemuProcess" in body
+    assert "if (-not $ownedQemuProcess.WaitForExit(15000))" in body
+    assert "$ownedQemuProcess.Kill()" in body
     assert body.count("WaitForExit(15000)") >= 2
     assert "emulator-process-stop-timeout" in body
-    assert body.index("WaitForExit(15000)") < body.index("$emulatorProcess.Kill()")
-    assert re.search(r"(?s)if \(\$null -eq \$emulatorProcess -or \$emulatorProcess.HasExited\).*?Remove-Item -LiteralPath \$runRoot", source), \
-        "temporary AVD files must be retained if the owned emulator cannot be stopped"
+    assert body.index("WaitForExit(15000)") < body.index("$ownedQemuProcess.Kill()")
+    assert "$emulatorLauncherProcess.Kill()" not in source
+    assert re.search(r"(?s)if \(+(?:Test-RunRootSafeToRemove\)).*?Remove-Item -LiteralPath \$runRoot", source), \
+        "temporary AVD files must be retained until the actual owned qemu exits"
+
+
+def test_bundled_pack_avd_runner_resolves_only_exact_lock_owned_qemu():
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    resolver = re.search(r"(?s)function Resolve-OwnedQemuProcess.*?^}", source, re.MULTILINE)
+    assert resolver, "exact AVD lock resolver missing"
+    body = resolver.group(0)
+    for marker in (
+        "Get-ExactAvdLockPidPath", "^[1-9][0-9]*$", "Get-Process -Id", ".Path",
+        ".ProcessName", ".StartTime", "emulatorLaunchUtc", "qemuExecutablePaths",
+        "ownedQemuPid", "emulator-lock-pid-changed",
+    ):
+        assert marker in body, f"owned qemu resolver missing: {marker}"
+    assert not re.search(r"Get-Process\s*(?:\||$)", body, re.MULTILINE), \
+        "process enumeration must never select an emulator owner"
+
+
+def test_bundled_pack_avd_runner_accepts_empty_boot_name_but_rejects_mismatch(tmp_path):
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+
+    def extract_function(name, required=True):
+        match = re.search(rf"(?ms)^function {name}\b.*?^}}\s*$", source)
+        if required:
+            assert match, f"runner function missing: {name}"
+        return match.group(0) if match else ""
+
+    definitions = [extract_function("Stop-Gate")]
+    for name in ("Get-ExactAvdLockPidPath", "Resolve-OwnedQemuProcess"):
+        function = extract_function(name, required=False)
+        if function:
+            definitions.append(function)
+    definitions.append(extract_function("Assert-DisposableEmulator"))
+    harness = tmp_path / "ownership.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + "\n\n".join(definitions)
+        + "\n$avdName = 'bagu-owned-test'\n"
+        "$port = 5556\n$serial = 'emulator-5556'\n$api = 29\n"
+        "$emulatorLauncherProcess = [pscustomobject]@{ HasExited = $true; Id = 1 }\n"
+        "$ownedQemuProcess = $null\n$ownedQemuPid = 0\n"
+        "$current = Get-Process -Id $PID -ErrorAction Stop\n"
+        "$qemuExecutablePaths = @($current.Path)\n"
+        "$emulatorLaunchUtc = [DateTime]::UtcNow\n"
+        "$env:ANDROID_AVD_HOME = $args[0]\n"
+        "$lock = Join-Path (Join-Path $env:ANDROID_AVD_HOME ($avdName + '.avd')) 'hardware-qemu.ini.lock\\pid'\n"
+        "[IO.Directory]::CreateDirectory((Split-Path -Parent $lock)) | Out-Null\n"
+        "[IO.File]::WriteAllText($lock, 'not-a-pid', [Text.Encoding]::ASCII)\n"
+        "$script:bootName = ''\n"
+        "function Get-ScopedAdb([string[]]$Arguments) {\n"
+        "    if (($Arguments -join ' ') -eq 'get-state') { return 'device' }\n"
+        "    if (($Arguments -join ' ') -eq 'emu avd name') { return ($avdName + \"`nOK\") }\n"
+        "    throw 'unexpected-adb-read'\n"
+        "}\n"
+        "function Get-DeviceProperty([string]$Name) {\n"
+        "    switch ($Name) {\n"
+        "        'ro.kernel.qemu' { return '1' }\n"
+        "        'ro.build.version.sdk' { return '29' }\n"
+        "        'ro.product.manufacturer' { return 'Google' }\n"
+        "        'ro.product.model' { return 'sdk_gphone' }\n"
+        "        'ro.product.device' { return 'generic_x86_64' }\n"
+        "        'ro.boot.qemu.avd_name' { return $script:bootName }\n"
+        "        default { throw 'unexpected-device-property' }\n"
+        "    }\n"
+        "}\n"
+        "try {\n"
+        "    try { Assert-DisposableEmulator; throw 'invalid-lock-pid-accepted' }\n"
+        "    catch { if ($_.Exception.Message -ne 'emulator-lock-pid-invalid') { throw } }\n"
+        "    [IO.File]::WriteAllText($lock, [string]$PID, [Text.Encoding]::ASCII)\n"
+        "    Assert-DisposableEmulator\n"
+        "    if ($ownedQemuProcess.Id -ne $PID -or $ownedQemuPid -ne $PID) { throw 'lock-owner-not-captured' }\n"
+        "    $script:bootName = $avdName\n"
+        "    Assert-DisposableEmulator\n"
+        "    $savedPaths = $qemuExecutablePaths\n"
+        "    $qemuExecutablePaths = @(Join-Path $args[0] 'wrong-qemu.exe')\n"
+        "    try { Assert-DisposableEmulator; throw 'wrong-qemu-path-accepted' }\n"
+        "    catch { if ($_.Exception.Message -ne 'emulator-process-path-invalid') { throw } }\n"
+        "    $qemuExecutablePaths = $savedPaths\n"
+        "    $emulatorLaunchUtc = $current.StartTime.ToUniversalTime().AddMinutes(1)\n"
+        "    try { Assert-DisposableEmulator; throw 'old-qemu-process-accepted' }\n"
+        "    catch { if ($_.Exception.Message -ne 'emulator-process-start-invalid') { throw } }\n"
+        "    $emulatorLaunchUtc = [DateTime]::UtcNow\n"
+        "    $script:bootName = 'wrong-avd'\n"
+        "    try { Assert-DisposableEmulator; throw 'boot-mismatch-accepted' }\n"
+        "    catch { if ($_.Exception.Message -ne 'emulator-avd-mismatch') { throw } }\n"
+        "    [IO.File]::WriteAllText($lock, [string]($PID + 100000), [Text.Encoding]::ASCII)\n"
+        "    try { Assert-DisposableEmulator; throw 'lock-pid-change-accepted' }\n"
+        "    catch { if ($_.Exception.Message -ne 'emulator-lock-pid-changed') { throw } }\n"
+        "    [Console]::Out.WriteLine('OWNERSHIP_OK')\n"
+        "} catch {\n"
+        "    [Console]::Error.WriteLine($_.Exception.Message)\n"
+        "    exit 1\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), str(tmp_path / "avd-home")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OWNERSHIP_OK"
+
+
+def test_bundled_pack_avd_run_root_requires_actual_owned_qemu_exit(tmp_path):
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    function = re.search(r"(?ms)^function Test-RunRootSafeToRemove\b.*?^}\s*$", source)
+    assert function, "run-root ownership guard missing"
+    harness = tmp_path / "run-root-guard.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + function.group(0)
+        + "\n$avdLaunchAttempted = $true\n"
+        "$emulatorLauncherProcess = [pscustomobject]@{ HasExited = $true }\n"
+        "$ownedQemuConfirmedExited = $false\n"
+        "$ownedQemuProcess = [pscustomobject]@{ HasExited = $false }\n"
+        "if (Test-RunRootSafeToRemove) { throw 'launcher-exit-was-trusted' }\n"
+        "$ownedQemuConfirmedExited = $true\n"
+        "if (Test-RunRootSafeToRemove) { throw 'live-qemu-was-ignored' }\n"
+        "$ownedQemuProcess = [pscustomobject]@{ HasExited = $true }\n"
+        "if (-not (Test-RunRootSafeToRemove)) { throw 'confirmed-qemu-exit-rejected' }\n"
+        "[Console]::Out.WriteLine('RUN_ROOT_GUARD_OK')\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "RUN_ROOT_GUARD_OK"
+
+
+def test_bundled_pack_avd_qemu_paths_expand_sdk_junction_target(tmp_path):
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    function = re.search(r"(?ms)^function Get-QemuExecutablePaths\b.*?^}\s*$", source)
+    assert function, "SDK junction-aware qemu path resolver missing"
+    harness = tmp_path / "qemu-paths.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + function.group(0)
+        + "\n$physical = Join-Path $args[0] 'physical-sdk'\n"
+        "$junction = Join-Path $args[0] 'sdk-link'\n"
+        "[IO.Directory]::CreateDirectory($physical) | Out-Null\n"
+        "New-Item -ItemType Junction -Path $junction -Target $physical | Out-Null\n"
+        "$paths = @(Get-QemuExecutablePaths $junction)\n"
+        "$expected = [IO.Path]::GetFullPath((Join-Path $physical 'emulator\\qemu\\windows-x86_64\\qemu-system-x86_64.exe'))\n"
+        "if (-not ($paths -contains $expected)) { throw 'junction-target-path-missing' }\n"
+        "[Console]::Out.WriteLine('QEMU_PATHS_OK')\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), str(tmp_path)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "QEMU_PATHS_OK"
+
+
+def test_bundled_pack_avd_successful_console_kill_tolerates_lock_disappearance(tmp_path):
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    function = re.search(r"(?ms)^function Stop-OwnedQemuProcess\b.*?^}\s*$", source)
+    assert function
+    harness = tmp_path / "cleanup-race.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + function.group(0)
+        + "\n$avdLaunchAttempted = $true\n$ownedQemuConfirmedExited = $false\n"
+        "$script:lockPresent = $true\n"
+        "$ownedQemuProcess = [pscustomobject]@{ HasExited = $false }\n"
+        "$ownedQemuProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($Milliseconds); $this.HasExited = $true; return $true }\n"
+        "function Assert-DisposableEmulator { if (-not $script:lockPresent) { throw 'lock-was-rechecked-after-successful-kill' } }\n"
+        "function Invoke-ScopedAdbMutation([string[]]$Arguments, [string]$FailureCode) { $script:lockPresent = $false; return '' }\n"
+        "function Resolve-OwnedQemuProcess { throw 'lock-was-resolved-after-successful-kill' }\n"
+        "Stop-OwnedQemuProcess\n"
+        "if (-not $ownedQemuConfirmedExited -or -not $ownedQemuProcess.HasExited) { throw 'qemu-exit-not-confirmed' }\n"
+        "[Console]::Out.WriteLine('CLEANUP_RACE_OK')\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "CLEANUP_RACE_OK"
 
 
 def test_bundled_pack_avd_runtime_validation_is_independent_of_caller_cwd():

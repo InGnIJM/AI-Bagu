@@ -42,7 +42,12 @@ $serial = $null
 $port = 0
 $api = 0
 $avdName = $null
-$emulatorProcess = $null
+$emulatorLauncherProcess = $null
+$ownedQemuProcess = $null
+$ownedQemuPid = 0
+$emulatorLaunchUtc = [DateTime]::MinValue
+$avdLaunchAttempted = $false
+$ownedQemuConfirmedExited = $false
 $scenarioResults = New-Object Collections.Generic.List[object]
 $apiResults = New-Object Collections.Generic.List[object]
 
@@ -53,6 +58,35 @@ function Stop-Gate([string]$Code) {
 function Require-File([string]$Path, [string]$Code) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { Stop-Gate $Code }
 }
+
+function Get-QemuExecutablePaths([string]$SdkPath) {
+    $roots = New-Object Collections.Generic.List[string]
+    $sdkFullPath = [IO.Path]::GetFullPath($SdkPath)
+    $roots.Add($sdkFullPath)
+    try {
+        $sdkItem = Get-Item -LiteralPath $sdkFullPath -ErrorAction Stop
+        foreach ($targetValue in @($sdkItem.Target)) {
+            if ([string]::IsNullOrWhiteSpace($targetValue)) { continue }
+            $target = [string]$targetValue
+            if ($target.StartsWith('\??\', [StringComparison]::Ordinal)) { $target = $target.Substring(4) }
+            if (-not [IO.Path]::IsPathRooted($target)) {
+                $target = Join-Path (Split-Path -Parent $sdkFullPath) $target
+            }
+            $target = [IO.Path]::GetFullPath($target)
+            if ($roots -notcontains $target) { $roots.Add($target) }
+        }
+    } catch { }
+    $paths = New-Object Collections.Generic.List[string]
+    foreach ($root in $roots) {
+        foreach ($name in @('qemu-system-x86_64.exe', 'qemu-system-x86_64-headless.exe')) {
+            $path = [IO.Path]::GetFullPath((Join-Path $root ("emulator\qemu\windows-x86_64\$name")))
+            if ($paths -notcontains $path) { $paths.Add($path) }
+        }
+    }
+    return $paths.ToArray()
+}
+
+$qemuExecutablePaths = @(Get-QemuExecutablePaths $sdkRoot)
 
 function Invoke-NativeQuietResult([string]$Tool, [string[]]$Arguments) {
     if ([string]::IsNullOrWhiteSpace($Tool) -or -not (Test-Path -LiteralPath $Tool -PathType Leaf)) {
@@ -97,10 +131,54 @@ function Get-DeviceProperty([string]$Name) {
     return Get-ScopedAdb @('shell', 'getprop', $Name)
 }
 
+function Get-ExactAvdLockPidPath {
+    if ([string]::IsNullOrWhiteSpace($env:ANDROID_AVD_HOME) -or [string]::IsNullOrWhiteSpace($avdName)) {
+        Stop-Gate 'emulator-lock-path-invalid'
+    }
+    $avdDirectory = Join-Path $env:ANDROID_AVD_HOME ($avdName + '.avd')
+    return Join-Path $avdDirectory 'hardware-qemu.ini.lock\pid'
+}
+
+function Resolve-OwnedQemuProcess {
+    $lockPath = Get-ExactAvdLockPidPath
+    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { Stop-Gate 'emulator-lock-pid-missing' }
+    $lockPidText = [IO.File]::ReadAllText($lockPath).Trim()
+    if ($lockPidText -notmatch '^[1-9][0-9]*$') { Stop-Gate 'emulator-lock-pid-invalid' }
+    $lockPidValue = [int64]$lockPidText
+    if ($lockPidValue -gt [int]::MaxValue) { Stop-Gate 'emulator-lock-pid-invalid' }
+    $lockPid = [int]$lockPidValue
+    if ($ownedQemuPid -gt 0 -and $lockPid -ne $ownedQemuPid) { Stop-Gate 'emulator-lock-pid-changed' }
+    try { $process = Get-Process -Id $lockPid -ErrorAction Stop }
+    catch { Stop-Gate 'emulator-process-not-found' }
+    try {
+        $process.Refresh()
+        if ($process.HasExited -or $process.Id -ne $lockPid) { Stop-Gate 'emulator-process-not-owned' }
+        $actualPath = [IO.Path]::GetFullPath($process.Path)
+        $actualName = $process.ProcessName
+        $startUtc = $process.StartTime.ToUniversalTime()
+    } catch {
+        if ($_.Exception.Message -match '^emulator-[a-z0-9-]+$') { throw }
+        Stop-Gate 'emulator-process-inspection-failed'
+    }
+    $matchingPaths = @($qemuExecutablePaths | Where-Object {
+        [IO.Path]::GetFullPath($_).Equals($actualPath, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($matchingPaths.Count -ne 1) { Stop-Gate 'emulator-process-path-invalid' }
+    $expectedName = [IO.Path]::GetFileNameWithoutExtension($matchingPaths[0])
+    if (-not $actualName.Equals($expectedName, [StringComparison]::OrdinalIgnoreCase)) {
+        Stop-Gate 'emulator-process-name-invalid'
+    }
+    if ($startUtc -lt $emulatorLaunchUtc.AddSeconds(-10)) { Stop-Gate 'emulator-process-start-invalid' }
+    $confirmedPidText = [IO.File]::ReadAllText($lockPath).Trim()
+    if ($confirmedPidText -ne $lockPidText) { Stop-Gate 'emulator-lock-pid-changed' }
+    if ($ownedQemuPid -eq 0) { $script:ownedQemuPid = $lockPid }
+    return $process
+}
+
 function Assert-DisposableEmulator {
     # Explicit forbidden hardware markers: vivo and V2309A.
-    if ($null -eq $emulatorProcess -or $emulatorProcess.HasExited) { Stop-Gate 'emulator-process-not-owned' }
-    if ($emulatorProcess.Id -le 0) { Stop-Gate 'emulator-process-invalid' }
+    $script:ownedQemuProcess = Resolve-OwnedQemuProcess
+    if ($ownedQemuProcess.Id -le 0) { Stop-Gate 'emulator-process-invalid' }
     if ($serial -ne "emulator-$port") { Stop-Gate 'emulator-serial-mismatch' }
     if ((Get-ScopedAdb @('get-state')) -ne 'device') { Stop-Gate 'emulator-not-ready' }
     if ((Get-DeviceProperty 'ro.kernel.qemu') -ne '1') { Stop-Gate 'device-not-qemu' }
@@ -110,8 +188,10 @@ function Assert-DisposableEmulator {
     $device = Get-DeviceProperty 'ro.product.device'
     if (("$manufacturer $model $device") -match '(?i)vivo|v2309a') { Stop-Gate 'forbidden-device-identity' }
     $bootAvdName = Get-DeviceProperty 'ro.boot.qemu.avd_name'
-    $consoleAvdName = (Get-ScopedAdb @('emu', 'avd', 'name')).Split("`n")[0].Trim()
-    if ($bootAvdName -ne $avdName -or $consoleAvdName -ne $avdName) {
+    $consoleAvdNames = @((Get-ScopedAdb @('emu', 'avd', 'name')).Split("`n") |
+        ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -ne 'OK' })
+    if ($consoleAvdNames.Count -ne 1 -or $consoleAvdNames[0] -ne $avdName -or
+            (-not [string]::IsNullOrWhiteSpace($bootAvdName) -and $bootAvdName -ne $avdName)) {
         Stop-Gate 'emulator-avd-mismatch'
     }
 }
@@ -240,12 +320,48 @@ function Clear-TargetData {
     if ($output -notmatch '(?i)success') { Stop-Gate 'target-clear-not-confirmed' }
 }
 
+function Stop-OwnedQemuProcess {
+    if (-not $avdLaunchAttempted) { return }
+    Assert-DisposableEmulator
+    $needsDirectKill = $false
+    try { [void](Invoke-ScopedAdbMutation @('emu', 'kill') 'emulator-stop-failed') }
+    catch { $needsDirectKill = $true }
+    if (-not $needsDirectKill -and -not $ownedQemuProcess.WaitForExit(15000)) {
+        $needsDirectKill = $true
+    }
+    if ($needsDirectKill) {
+        # Re-prove the exact lock PID and device identity before touching the actual qemu process.
+        Assert-DisposableEmulator
+        $script:ownedQemuProcess = Resolve-OwnedQemuProcess
+        try { $ownedQemuProcess.Kill() }
+        catch { Stop-Gate 'emulator-process-kill-failed' }
+        if (-not $ownedQemuProcess.WaitForExit(15000)) { Stop-Gate 'emulator-process-stop-timeout' }
+    }
+    if (-not $ownedQemuProcess.HasExited) { Stop-Gate 'emulator-process-stop-timeout' }
+    $script:ownedQemuConfirmedExited = $true
+}
+
+function Test-RunRootSafeToRemove {
+    if (-not $avdLaunchAttempted) { return $true }
+    if (-not $ownedQemuConfirmedExited) { return $false }
+    if ($null -ne $ownedQemuProcess) {
+        try { if (-not $ownedQemuProcess.HasExited) { return $false } }
+        catch { return $false }
+    }
+    return $true
+}
+
 function Run-ApiGate([int]$TargetApi, [string]$TargetApk, [string]$TestApk) {
     $script:api = $TargetApi
     $script:avdName = "bagu-beta6-$TargetApi-$runId"
     $script:port = Get-FreeEmulatorPort
     $script:serial = "emulator-$port"
-    $script:emulatorProcess = $null
+    $script:emulatorLauncherProcess = $null
+    $script:ownedQemuProcess = $null
+    $script:ownedQemuPid = 0
+    $script:emulatorLaunchUtc = [DateTime]::MinValue
+    $script:avdLaunchAttempted = $false
+    $script:ownedQemuConfirmedExited = $false
     $apiAvdHome = Join-Path $runRoot ("avd-$TargetApi")
     $apiUserHome = Join-Path $runRoot ("user-$TargetApi")
     New-Item -ItemType Directory -Path $apiAvdHome, $apiUserHome -Force | Out-Null
@@ -255,14 +371,25 @@ function Run-ApiGate([int]$TargetApi, [string]$TargetApk, [string]$TestApk) {
     if (-not (Test-Path -LiteralPath $imageFolder -PathType Container)) { Stop-Gate "system-image-$TargetApi-missing" }
     [void](Invoke-Quiet $avdManager @('create', 'avd', '--name', $avdName, '--package', $imageIds[$TargetApi], '--device', 'pixel_2', '--force') "avd-$TargetApi-create-failed")
     try {
-        $script:emulatorProcess = Start-Process -FilePath $emulator -ArgumentList @(
+        $script:emulatorLaunchUtc = [DateTime]::UtcNow
+        $script:avdLaunchAttempted = $true
+        $script:emulatorLauncherProcess = Start-Process -FilePath $emulator -ArgumentList @(
             '-avd', $avdName, '-port', $port, '-no-window', '-no-audio', '-no-snapshot',
             '-no-boot-anim', '-wipe-data'
         ) -PassThru -WindowStyle Hidden
         $deadline = [DateTime]::UtcNow.AddMinutes(4)
         $ready = $false
-        while ([DateTime]::UtcNow -lt $deadline -and -not $emulatorProcess.HasExited) {
+        while ([DateTime]::UtcNow -lt $deadline) {
             Start-Sleep -Milliseconds 1000
+            if ($null -eq $ownedQemuProcess) {
+                try { $script:ownedQemuProcess = Resolve-OwnedQemuProcess }
+                catch {
+                    if ($_.Exception.Message -notin @(
+                            'emulator-lock-pid-missing', 'emulator-process-not-found',
+                            'emulator-process-inspection-failed')) { throw }
+                    continue
+                }
+            }
             try {
                 $ready = (Get-ScopedAdb @('get-state')) -eq 'device' -and
                     (Get-DeviceProperty 'sys.boot_completed') -eq '1'
@@ -302,25 +429,12 @@ function Run-ApiGate([int]$TargetApi, [string]$TargetApk, [string]$TestApk) {
         }
         $apiResults.Add([ordered]@{ api = $TargetApi; serial = $serial; status = 'passed' })
     } finally {
-        if ($null -ne $emulatorProcess -and -not $emulatorProcess.HasExited) {
-            $needsOwnedKill = $false
-            try { [void](Invoke-ScopedAdbMutation @('emu', 'kill') 'emulator-stop-failed') }
-            catch { $needsOwnedKill = $true }
-            if (-not $needsOwnedKill -and -not $emulatorProcess.WaitForExit(15000)) {
-                $needsOwnedKill = $true
-            }
-            if ($needsOwnedKill) {
-                # This exact Start-Process object is the only fallback target.
-                try { $emulatorProcess.Kill() }
-                catch { Stop-Gate 'emulator-process-kill-failed' }
-                if (-not $emulatorProcess.WaitForExit(15000)) {
-                    Stop-Gate 'emulator-process-stop-timeout'
-                }
-            }
-            if (-not $emulatorProcess.HasExited) { Stop-Gate 'emulator-process-stop-timeout' }
+        try {
+            if ($avdLaunchAttempted) { Stop-OwnedQemuProcess }
+        } finally {
+            $script:serial = $null
+            $script:emulatorLauncherProcess = $null
         }
-        $script:serial = $null
-        $script:emulatorProcess = $null
     }
 }
 
@@ -384,8 +498,7 @@ try {
     Write-SafeStatus 'failed' $failureCode
     throw [InvalidOperationException]::new($failureCode)
 } finally {
-    if (($null -eq $emulatorProcess -or $emulatorProcess.HasExited) -and
-            (Test-Path -LiteralPath $runRoot -PathType Container)) {
+    if ((Test-RunRootSafeToRemove) -and (Test-Path -LiteralPath $runRoot -PathType Container)) {
         $resolvedRunRoot = (Resolve-Path -LiteralPath $runRoot).Path
         $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
         if ($resolvedRunRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -and
