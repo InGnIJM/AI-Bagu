@@ -1842,24 +1842,49 @@ _VALID_PACK_RESULT_ACCEPTANCE_SOURCE = (
 )
 
 
+def _parse_approved_field_array(payload, quote, approved, label):
+    token_pattern = re.compile(re.escape(quote) + r"([a-z]+(?:_[a-z]+)*)" + re.escape(quote))
+    fields = []
+    position = 0
+    expect_field = True
+    while position < len(payload):
+        while position < len(payload) and payload[position] in " \t\r\n":
+            position += 1
+        if position == len(payload):
+            break
+        if expect_field:
+            token = token_pattern.match(payload, position)
+            assert token is not None, f"{label} contains a malformed field token"
+            field = token.group(1)
+            assert field in approved, f"{label} contains unapproved field: {field}"
+            assert field not in fields, f"{label} contains duplicate field: {field}"
+            fields.append(field)
+            position = token.end()
+            expect_field = False
+        else:
+            assert payload[position] == ",", f"{label} contains unconsumed characters"
+            position += 1
+            expect_field = True
+
+    assert fields, f"{label} is empty"
+    assert not expect_field, f"{label} contains a trailing comma or empty token"
+    parsed = set(fields)
+    assert parsed == approved, (
+        f"{label} fields differ: missing={sorted(approved - parsed)}, "
+        f"extra={sorted(parsed - approved)}"
+    )
+
+
 def _assert_bundled_pack_result_contract(activity, acceptance):
     fixed_matches = _PACK_RESULT_FIXED_PATTERN.findall(activity)
     allowed_matches = _PACK_RESULT_ACCEPTANCE_PATTERN.findall(acceptance)
     assert len(fixed_matches) == 1, f"expected one pack-import fixed result array, found {len(fixed_matches)}"
     assert len(allowed_matches) == 1, f"expected one pack-result acceptance allowlist, found {len(allowed_matches)}"
-    fixed_values = re.findall(r'"([a-z_]+)"', fixed_matches[0])
-    allowed_values = re.findall(r"'([a-z_]+)'", allowed_matches[0])
-    assert len(fixed_values) == len(set(fixed_values)), "pack-import fixed result array has duplicate fields"
-    assert len(allowed_values) == len(set(allowed_values)), "pack-result acceptance allowlist has duplicate fields"
-    fixed = set(fixed_values)
-    allowed = set(allowed_values)
-    assert fixed == _PACK_RESULT_FIXED_FIELDS, (
-        f"pack-import fixed result fields differ: missing={sorted(_PACK_RESULT_FIXED_FIELDS - fixed)}, "
-        f"extra={sorted(fixed - _PACK_RESULT_FIXED_FIELDS)}"
+    _parse_approved_field_array(
+        fixed_matches[0], '"', _PACK_RESULT_FIXED_FIELDS, "pack-import fixed result array",
     )
-    assert allowed == _PACK_RESULT_ALLOWED_FIELDS, (
-        f"pack-result acceptance fields differ: missing={sorted(_PACK_RESULT_ALLOWED_FIELDS - allowed)}, "
-        f"extra={sorted(allowed - _PACK_RESULT_ALLOWED_FIELDS)}"
+    _parse_approved_field_array(
+        allowed_matches[0], "'", _PACK_RESULT_ALLOWED_FIELDS, "pack-result acceptance allowlist",
     )
 
 
@@ -1887,9 +1912,36 @@ def test_bundled_pack_result_allowlist_is_exact_and_unique():
         _VALID_PACK_RESULT_FIXED_SOURCE,
         _VALID_PACK_RESULT_ACCEPTANCE_SOURCE.replace("'installed_revision'", "'installed_revision','content'"),
     ),
+    (
+        _VALID_PACK_RESULT_FIXED_SOURCE.replace('"experience_count"', '"experience_count", "answer2"'),
+        _VALID_PACK_RESULT_ACCEPTANCE_SOURCE,
+    ),
+    (
+        _VALID_PACK_RESULT_FIXED_SOURCE,
+        _VALID_PACK_RESULT_ACCEPTANCE_SOURCE.replace("'installed_revision'", "'installed_revision','path-url'"),
+    ),
+    (
+        _VALID_PACK_RESULT_FIXED_SOURCE.replace('"experience_count"', '"experience_count", "sha256"'),
+        _VALID_PACK_RESULT_ACCEPTANCE_SOURCE,
+    ),
+    (
+        _VALID_PACK_RESULT_FIXED_SOURCE,
+        _VALID_PACK_RESULT_ACCEPTANCE_SOURCE.replace("'installed_revision'", "'installed_revision',answer"),
+    ),
+    (
+        _VALID_PACK_RESULT_FIXED_SOURCE.replace('"experience_count"', '"experience_count",'),
+        _VALID_PACK_RESULT_ACCEPTANCE_SOURCE,
+    ),
+    (
+        _VALID_PACK_RESULT_FIXED_SOURCE,
+        _VALID_PACK_RESULT_ACCEPTANCE_SOURCE.replace("'installed_revision'", "'installed_revision',,"),
+    ),
     (_VALID_PACK_RESULT_FIXED_SOURCE * 2, _VALID_PACK_RESULT_ACCEPTANCE_SOURCE),
     (_VALID_PACK_RESULT_FIXED_SOURCE, _VALID_PACK_RESULT_ACCEPTANCE_SOURCE * 2),
-], ids=("answer", "path", "body", "content", "duplicate-fixed", "duplicate-acceptance"))
+], ids=(
+    "answer", "path", "body", "content", "answer2", "path-url", "sha256",
+    "unquoted", "trailing-comma", "empty-token", "duplicate-fixed", "duplicate-acceptance",
+))
 def test_bundled_pack_result_contract_rejects_unapproved_or_ambiguous_source(activity, acceptance):
     with pytest.raises(AssertionError):
         _assert_bundled_pack_result_contract(activity, acceptance)
