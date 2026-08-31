@@ -1895,6 +1895,10 @@
               <h2>面经题包</h2>
               <p class="help">题包提供独立的面经模拟，也可选择是否把其中的复习题加入日常复习。安装或升级前会先校验并展示预览。</p>
               <div class="backup-actions">
+                <button type="button" class="secondary hidden" id="btn-bundled-pack-import">
+                  <span class="material-symbols-rounded">inventory_2</span>
+                  安装内置题包
+                </button>
                 <button type="button" class="secondary" id="btn-pack-import">
                   <span class="material-symbols-rounded">inventory_2</span>
                   导入 .bagu-pack
@@ -2814,9 +2818,10 @@
       $("native-message").classList.toggle("error", Boolean(error));
       if (error) showContextError("file", message);
     }
+    var bundledInterviewPackAvailable = false;
     function setNativeBusy(operation) {
       nativeBusy = operation;
-      ["btn-question-export", "btn-backup-export", "btn-backup-import", "btn-empty-transfer", "btn-download-template", "btn-diagnostics-export", "btn-pack-import", "btn-pack-confirm"].forEach((id) => {
+      ["btn-question-export", "btn-backup-export", "btn-backup-import", "btn-empty-transfer", "btn-download-template", "btn-diagnostics-export", "btn-pack-import", "btn-bundled-pack-import", "btn-pack-confirm"].forEach((id) => {
         $(id).disabled = Boolean(operation);
       });
       if (!operation && typeof pendingPackPreview !== "undefined" && pendingPackPreview && ["downgrade", "conflict"].includes(pendingPackPreview.status)) {
@@ -3079,6 +3084,35 @@
       clearInterviewPackPreview();
       $("pack-file").value = "";
       $("pack-file").click();
+    }
+
+    function syncBundledInterviewPackAction() {
+      const button = $("btn-bundled-pack-import");
+      let available = false;
+      if (isAndroidApp && nativeStore && typeof nativeStore.hasBundledInterviewPack === "function" &&
+          typeof nativeStore.importBundledInterviewPack === "function") {
+        try { available = nativeStore.hasBundledInterviewPack() === true; }
+        catch (_) { available = false; }
+      }
+      bundledInterviewPackAvailable = available;
+      button.classList.toggle("hidden", !available);
+      button.disabled = Boolean(nativeBusy);
+    }
+
+    function installBundledInterviewPack() {
+      if (nativeBusy || !bundledInterviewPackAvailable) return;
+      if (session.session_id) { setPackMessage("请先结束本轮练习，再安装题包。", true); return; }
+      if (typeof updateReservation !== "undefined" && updateReservation) {
+        setPackMessage("正在准备安装更新，请稍后再操作文件。", true);
+        return;
+      }
+      setNativeBusy("pack-import");
+      setPackMessage("正在安装内置题包…", false);
+      try { nativeStore.importBundledInterviewPack(); }
+      catch (_) {
+        setNativeBusy("");
+        setPackMessage("无法安装内置题包，请重试。", true);
+      }
     }
 
     function archivePreviewMessage(summary) {
@@ -4766,7 +4800,9 @@
     $("btn-backup-import").addEventListener("click", chooseImportArchive);
     $("backup-file").addEventListener("change", (event) => importDesktopArchive(event.target.files[0]));
     $("backup-file").addEventListener("cancel", () => setNativeMessage("已取消选择文件，原数据未改变。", false));
+    syncBundledInterviewPackAction();
     $("btn-pack-import").addEventListener("click", chooseInterviewPack);
+    $("btn-bundled-pack-import").addEventListener("click", installBundledInterviewPack);
     $("btn-pack-confirm").addEventListener("click", confirmInterviewPackInstall);
     $("btn-pack-cancel").addEventListener("click", cancelInterviewPackInstall);
     $("pack-file").addEventListener("change", (event) => inspectDesktopInterviewPack(event.target.files[0]));

@@ -43,6 +43,14 @@ def test_shared_html_declares_cover_viewport():
         "width=device-width", "initial-scale=1", "viewport-fit=cover"}
 
 
+def test_shared_html_hides_the_bundled_pack_action_until_android_capability_probe():
+    html = (ROOT / "web/index.html").read_text(encoding="utf-8")
+    match = re.search(r'<button\b[^>]*\bid="btn-bundled-pack-import"[^>]*>(.*?)</button>', html, re.S)
+    assert match is not None
+    assert "hidden" in match.group(0)
+    assert "安装内置题包" in match.group(1)
+
+
 def load_release_verifier():
     path = ROOT / "scripts/verify_android_apk.py"
     assert path.is_file(), "release APK verifier not implemented"
@@ -1292,6 +1300,7 @@ def test_native_bridge_exposes_only_the_agreed_storage_file_and_speech_contract(
         ("void", "removeItem", "String key"), ("String", "keys", ""),
         ("void", "exportBackup", ""), ("void", "exportQuestionBank", ""), ("void", "importBackup", ""),
         ("void", "importInterviewPack", ""),
+        ("boolean", "hasBundledInterviewPack", ""), ("void", "importBundledInterviewPack", ""),
         ("void", "saveCsvTemplate", "String csv"),
         ("void", "exportDiagnostics", ""), ("void", "reportDiagnostic", "String json"),
         ("String", "getAppInfo", ""),

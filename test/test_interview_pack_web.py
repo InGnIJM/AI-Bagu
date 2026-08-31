@@ -27,6 +27,47 @@ def transfer_source():
     return web_section("function setNativeMessage", "function readTextFile")
 
 
+def test_bundled_interview_pack_action_is_capability_gated_and_refreshes_after_native_result():
+    """A missing/false/throwing capability must not expose or dispatch the bundled import."""
+    result = run_web_js(WEB_DOM + """
+let nativeBusy='',session={session_id:null},currentView='settings',isAndroidApp=false;
+let capability=true,imports=0,packs=0,experiences=0,stats=0;
+const nativeStore={
+ hasBundledInterviewPack:()=>capability,
+ importBundledInterviewPack:()=>{imports++;}
+};
+async function loadPacks(){packs++;} async function loadExperiences(){experiences++;}
+async function refreshQuestionStats(){stats++;}
+""" + transfer_source() + """
+(async()=>{
+ const supported=typeof syncBundledInterviewPackAction==='function' && typeof installBundledInterviewPack==='function';
+ if(!supported){process.stdout.write(JSON.stringify({supported:false}));return;}
+ const button=$('btn-bundled-pack-import');button.classList.add('hidden');
+ syncBundledInterviewPackAction();const desktop=button.classList.contains('hidden');
+ isAndroidApp=true;delete nativeStore.hasBundledInterviewPack;syncBundledInterviewPackAction();
+ const oldHost=button.classList.contains('hidden');
+ nativeStore.hasBundledInterviewPack=()=>false;syncBundledInterviewPackAction();
+ const unavailable=button.classList.contains('hidden');
+ nativeStore.hasBundledInterviewPack=()=>{throw Error('asset unavailable');};syncBundledInterviewPackAction();
+ const throwsUnavailable=button.classList.contains('hidden');
+ nativeStore.hasBundledInterviewPack=()=>true;syncBundledInterviewPackAction();
+ const available=!button.classList.contains('hidden');
+ session.session_id='s_open';installBundledInterviewPack();const blocked=imports===0 && $('pack-message').textContent.includes('结束本轮');
+ session.session_id=null;installBundledInterviewPack();installBundledInterviewPack();
+ const busy=button.disabled && nativeBusy==='pack-import';
+ await handleNativeResult({detail:{operation:'pack-import',status:'ok'}});
+ process.stdout.write(JSON.stringify({supported,desktop,oldHost,unavailable,throwsUnavailable,available,blocked,busy,
+  imports,packs,experiences,stats,enabled:!button.disabled}));
+})().catch(error=>{console.error(error);process.exit(1)});
+""")
+    assert result["supported"] is True
+    assert result == {
+        "supported": True, "desktop": True, "oldHost": True, "unavailable": True,
+        "throwsUnavailable": True, "available": True, "blocked": True, "busy": True,
+        "imports": 1, "packs": 1, "experiences": 1, "stats": 1, "enabled": True,
+    }
+
+
 def test_practice_switch_filters_experiences_and_uses_recommended_section():
     result = run_web_js(WEB_DOM + """
 let selectedMode='answer',practiceMode='daily';
