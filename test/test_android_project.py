@@ -1352,6 +1352,48 @@ def test_bundled_pack_avd_runner_reports_only_safe_bounded_fields():
     assert "$_.ScriptStackTrace" not in source
 
 
+def test_bundled_pack_avd_runner_uses_public_certificate_pin_without_local_signing_state():
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    assert "scripts\\release_metadata.py" in source
+    assert "release_metadata.CERTIFICATE" in source
+    assert ".signing\\certificate-sha256.txt" not in source
+    assert re.search(r"\$trusted\s+-notmatch\s+'\^\[0-9a-f\]\{64\}\$'", source)
+    assert "apk-certificate-mismatch" in source
+
+
+def test_bundled_pack_avd_runner_requires_java17_and_has_an_executable_default():
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    assert "[string]$JavaHome = 'C:\\Program Files\\Java\\jdk-17.0.10'" in source
+    assert "bin\\java.exe" in source
+    assert "-version" in source
+    assert "jdk17-version-invalid" in source
+    assert re.search(r"(?s)javaVersion.*?17", source)
+
+
+def test_bundled_pack_avd_runner_waits_for_owned_process_shutdown_before_cleanup():
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    cleanup = re.search(r"(?s)finally \{\s*if \(\$null -ne \$emulatorProcess.*?\n\s*}\n}\n\nfunction Write-SafeStatus", source)
+    assert cleanup, "per-AVD cleanup block missing"
+    body = cleanup.group(0)
+    assert "Invoke-ScopedAdbMutation @('emu', 'kill')" in body
+    assert "if (-not $emulatorProcess.WaitForExit(15000))" in body
+    assert "$emulatorProcess.Kill()" in body
+    assert body.count("WaitForExit(15000)") >= 2
+    assert "emulator-process-stop-timeout" in body
+    assert body.index("WaitForExit(15000)") < body.index("$emulatorProcess.Kill()")
+    assert re.search(r"(?s)if \(\$null -eq \$emulatorProcess -or \$emulatorProcess.HasExited\).*?Remove-Item -LiteralPath \$runRoot", source), \
+        "temporary AVD files must be retained if the owned emulator cannot be stopped"
+
+
+def test_bundled_pack_avd_runtime_validation_is_independent_of_caller_cwd():
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    validator = re.search(r'\$validation\s*=\s*"([^"]+)"', source)
+    assert validator
+    assert "sys.path.insert" in validator.group(1)
+    assert "sys.argv[2]" in validator.group(1)
+    assert re.search(r"& \$BuildPython -c \$validation \$Destination \$repoRoot", source)
+
+
 def test_bundled_pack_acceptance_instrumentation_is_content_free_and_real_bridge_bound():
     path = ANDROID / "app/src/androidTest/java/io/github/ingnijm/baguhelper/BundledPackAcceptanceTest.java"
     assert path.is_file(), "bundled-pack acceptance instrumentation not implemented"

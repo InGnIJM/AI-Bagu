@@ -6,7 +6,7 @@ param(
     [string]$OutputPath,
     [string]$Beta5ApkPath,
     [string]$BuildPython = '',
-    [string]$JavaHome = ''
+    [string]$JavaHome = 'C:\Program Files\Java\jdk-17.0.10'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,7 +24,7 @@ $emulator = Join-Path $sdkRoot 'emulator\emulator.exe'
 $avdManager = Join-Path $sdkRoot 'cmdline-tools\latest\bin\avdmanager.bat'
 $aapt = Join-Path $sdkRoot 'build-tools\36.0.0\aapt.exe'
 $apkSigner = Join-Path $sdkRoot 'build-tools\36.0.0\apksigner.bat'
-$fingerprintPath = Join-Path $repoRoot '.signing\certificate-sha256.txt'
+$releaseMetadata = Join-Path $repoRoot 'scripts\release_metadata.py'
 $apis = @(29, 36)
 $imageIds = @{
     29 = 'system-images;android-29;google_apis;x86_64'
@@ -112,6 +112,13 @@ function Get-FreeEmulatorPort {
     Stop-Gate 'no-free-emulator-port'
 }
 
+function Get-TrustedCertificateFingerprint {
+    $loader = "import pathlib,sys; path=pathlib.Path(sys.argv[1]).resolve(); sys.path.insert(0,str(path.parent)); import release_metadata; print(release_metadata.CERTIFICATE)"
+    $trusted = Invoke-Quiet $BuildPython @('-c', $loader, $releaseMetadata) 'certificate-pin-load-failed'
+    if ($trusted -notmatch '^[0-9a-f]{64}$') { Stop-Gate 'certificate-pin-invalid' }
+    return $trusted
+}
+
 function Assert-ApkContract([string]$Path, [string]$VersionName, [int]$VersionCode, [bool]$RequiresPack) {
     Require-File $Path 'apk-missing'
     if ([IO.Path]::GetExtension($Path) -ne '.apk') { Stop-Gate 'apk-extension-invalid' }
@@ -123,7 +130,7 @@ function Assert-ApkContract([string]$Path, [string]$VersionName, [int]$VersionCo
         if (-not $badging.Contains($expected)) { Stop-Gate 'apk-identity-invalid' }
     }
     $certificate = Invoke-Quiet $apkSigner @('verify', '--verbose', '--print-certs', $Path) 'apk-signature-invalid'
-    $trusted = (Get-Content -LiteralPath $fingerprintPath -Raw -Encoding UTF8).Trim().ToLowerInvariant()
+    $trusted = Get-TrustedCertificateFingerprint
     $match = [regex]::Match($certificate, 'certificate SHA-256 digest:\s*([0-9a-fA-F:]+)')
     if (-not $match.Success -or (($match.Groups[1].Value -replace ':', '').ToLowerInvariant()) -ne $trusted) {
         Stop-Gate 'apk-certificate-mismatch'
@@ -158,8 +165,8 @@ function Copy-ValidatedBundledPack([string]$SourceApk, [string]$Destination) {
     } finally { $zip.Dispose() }
     $actual = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $descriptor.sha256) { Stop-Gate 'apk-bundled-pack-hash-invalid' }
-    $validation = "import pathlib,sqlite3,sys,bagu; data=pathlib.Path(sys.argv[1]).read_bytes(); c=sqlite3.connect(':memory:'); bagu.init_db(c); p=bagu.inspect_interview_pack(c,data); assert p['pack_id']=='autumn-recruit-interviews-2026' and p['revision']==1 and p['question_count']==748 and p['experience_count']==27; c.close()"
-    & $BuildPython -c $validation $Destination 1>$null 2>$null
+    $validation = "import pathlib,sqlite3,sys; sys.path.insert(0,str(pathlib.Path(sys.argv[2]).resolve())); import bagu; data=pathlib.Path(sys.argv[1]).read_bytes(); c=sqlite3.connect(':memory:'); bagu.init_db(c); p=bagu.inspect_interview_pack(c,data); assert p['pack_id']=='autumn-recruit-interviews-2026' and p['revision']==1 and p['question_count']==748 and p['experience_count']==27; c.close()"
+    & $BuildPython -c $validation $Destination $repoRoot 1>$null 2>$null
     if ($LASTEXITCODE -ne 0) { Stop-Gate 'apk-bundled-pack-runtime-invalid' }
 }
 
@@ -266,11 +273,21 @@ function Run-ApiGate([int]$TargetApi, [string]$TargetApk, [string]$TestApk) {
         $apiResults.Add([ordered]@{ api = $TargetApi; serial = $serial; status = 'passed' })
     } finally {
         if ($null -ne $emulatorProcess -and -not $emulatorProcess.HasExited) {
-            try { [void](Invoke-ScopedAdbMutation @('emu', 'kill') 'emulator-stop-failed') } catch {
-                # The exact Start-Process object is the only fallback target.
-                try { $emulatorProcess.Kill() } catch { }
+            $needsOwnedKill = $false
+            try { [void](Invoke-ScopedAdbMutation @('emu', 'kill') 'emulator-stop-failed') }
+            catch { $needsOwnedKill = $true }
+            if (-not $needsOwnedKill -and -not $emulatorProcess.WaitForExit(15000)) {
+                $needsOwnedKill = $true
             }
-            try { $emulatorProcess.WaitForExit(15000) | Out-Null } catch { }
+            if ($needsOwnedKill) {
+                # This exact Start-Process object is the only fallback target.
+                try { $emulatorProcess.Kill() }
+                catch { Stop-Gate 'emulator-process-kill-failed' }
+                if (-not $emulatorProcess.WaitForExit(15000)) {
+                    Stop-Gate 'emulator-process-stop-timeout'
+                }
+            }
+            if (-not $emulatorProcess.HasExited) { Stop-Gate 'emulator-process-stop-timeout' }
         }
         $script:serial = $null
         $script:emulatorProcess = $null
@@ -292,7 +309,7 @@ function Write-SafeStatus([string]$OverallStatus, [string]$FailureCode) {
 }
 
 try {
-    foreach ($tool in @($adb, $emulator, $avdManager, $aapt, $apkSigner, $gradle, $fingerprintPath, $descriptorPath, $versionPath)) {
+    foreach ($tool in @($adb, $emulator, $avdManager, $aapt, $apkSigner, $gradle, $releaseMetadata, $descriptorPath, $versionPath)) {
         Require-File $tool 'toolchain-missing'
     }
     if ([string]::IsNullOrWhiteSpace($BuildPython)) {
@@ -303,7 +320,14 @@ try {
     Require-File $BuildPython 'python-missing'
     if ([string]::IsNullOrWhiteSpace($JavaHome)) { $JavaHome = $env:JAVA_HOME }
     if ([string]::IsNullOrWhiteSpace($JavaHome)) { Stop-Gate 'jdk17-missing' }
-    Require-File (Join-Path $JavaHome 'bin\java.exe') 'jdk17-missing'
+    $java = Join-Path $JavaHome 'bin\java.exe'
+    Require-File $java 'jdk17-missing'
+    $javaVersionLines = & $java -version 2>&1
+    if ($LASTEXITCODE -ne 0) { Stop-Gate 'jdk17-version-invalid' }
+    $javaVersion = (@($javaVersionLines) -join "`n")
+    if ($javaVersion -notmatch '(?m)^(?:java|openjdk) version "17(?:\.|"|\s)') {
+        Stop-Gate 'jdk17-version-invalid'
+    }
     $env:JAVA_HOME = $JavaHome
     $version = Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($version.versionName -ne '0.1.0-beta.6' -or $version.versionCode -ne 6 -or $version.channel -ne 'beta') {
@@ -330,7 +354,8 @@ try {
     Write-SafeStatus 'failed' $failureCode
     throw [InvalidOperationException]::new($failureCode)
 } finally {
-    if (Test-Path -LiteralPath $runRoot -PathType Container) {
+    if (($null -eq $emulatorProcess -or $emulatorProcess.HasExited) -and
+            (Test-Path -LiteralPath $runRoot -PathType Container)) {
         $resolvedRunRoot = (Resolve-Path -LiteralPath $runRoot).Path
         $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
         if ($resolvedRunRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -and

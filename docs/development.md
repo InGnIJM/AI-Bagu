@@ -60,7 +60,7 @@ Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面�
 
 ### beta.6 内置题包隔离 AVD 门禁
 
-`scripts/test_bundled_pack_avd.ps1` 是公开发布前的设备门禁，不是日常单元测试。它接受显式的、使用稳定证书签名的 public x86_64 QA APK 和状态输出路径，在本机已有的 `google_apis/x86_64` API 29、API 36 镜像上依次创建一次性 AVD；可选的 `-Beta5ApkPath` 用于覆盖 beta.5 已安装／未安装题包两种升级场景。ARM64 Release 附件用于真实 ARM64 设备，不能冒充 x86_64 模拟器 QA APK，脚本会拒绝 ABI、包名、版本、签名或内置题包身份不匹配的输入。
+`scripts/test_bundled_pack_avd.ps1` 是公开发布前的设备门禁，不是日常单元测试。它接受显式的、使用稳定证书签名的 public x86_64 QA APK 和状态输出路径，在本机已有的 `google_apis/x86_64` API 29、API 36 镜像上依次创建一次性 AVD；可选的 `-Beta5ApkPath` 用于覆盖 beta.5 已安装／未安装题包两种升级场景。ARM64 Release 附件用于真实 ARM64 设备，不能冒充 x86_64 模拟器 QA APK，脚本会拒绝 ABI、包名、版本、签名或内置题包身份不匹配的输入。证书校验直接复用 `scripts/release_metadata.py` 中公开固定的证书 SHA-256，不依赖本机 `.signing/certificate-sha256.txt`，也不会读取或输出 keystore、密码。
 
 ```powershell
 .\scripts\test_bundled_pack_avd.ps1 `
@@ -69,7 +69,9 @@ Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面�
   -OutputPath <隔离临时目录\bundled-pack-avd-status.json>
 ```
 
-脚本只使用已安装镜像，不下载系统镜像，也不发布或修改更新源。每次执行创建唯一 `ANDROID_AVD_HOME`／`ANDROID_USER_HOME` 和 AVD 名，启动时选择空闲 emulator 端口；每次安装、清数据、进程终止、instrumentation 和关闭模拟器前都重新核对精确 `emulator-NNNN`、脚本创建的进程、`ro.kernel.qemu=1`、目标 API、AVD 名及 manufacturer/model/device，并明确拒绝 `vivo`／`V2309A`。所有改变状态的 ADB 调用都带经过复核的 `-s`，不使用设备枚举结果、`adb kill-server` 或全局清理。最终清理仅停止本次启动的模拟器并删除本次解析后的临时 AVD 目录。
+脚本默认使用与 `scripts/android.ps1` 相同的 `C:\Program Files\Java\jdk-17.0.10`；其他工作站必须显式传入 `-JavaHome <JDK17目录>`。无论使用默认值、环境变量回退还是显式目录，脚本都会执行 `java -version` 并严格拒绝非 Java 17。`-BuildPython` 可用于显式选择能够加载当前仓库源码的 Python；运行时题包校验会把解析后的仓库根加入模块搜索路径，不依赖调用者当前目录。
+
+脚本只使用已安装镜像，不下载系统镜像，也不发布或修改更新源。每次执行创建唯一 `ANDROID_AVD_HOME`／`ANDROID_USER_HOME` 和 AVD 名，启动时选择空闲 emulator 端口；每次安装、清数据、进程终止、instrumentation 和关闭模拟器前都重新核对精确 `emulator-NNNN`、脚本创建的进程、`ro.kernel.qemu=1`、目标 API、AVD 名及 manufacturer/model/device，并明确拒绝 `vivo`／`V2309A`。所有改变状态的 ADB 调用都带经过复核的 `-s`，不使用设备枚举结果、`adb kill-server` 或全局清理。关闭时先等待精确 serial 的 `emu kill`；超时才终止本次 `Start-Process` 返回的精确进程对象并再次等待。进程仍未退出会使门禁失败并保留临时目录，不会枚举或终止其他进程，也不会在模拟器仍运行时删除它的 AVD 文件。
 
 状态 JSON 只记录 schema、API、模拟器 serial、固定场景名及 passed/failed/skipped 状态；不会记录题目、答案、题包字节、私有偏好哈希、凭据或源文件路径。未提供 beta.5 QA APK 时，两项升级场景会明确标为 `skipped_beta5_apk_not_supplied`，正式发布门禁必须提供它并要求零跳过。仅运行 pytest 或编译 `BundledPackAcceptanceTest` 仍不能声明 API 29/API 36 已通过；必须在发布任务中实际运行该脚本并检查机器可读结果。
 
