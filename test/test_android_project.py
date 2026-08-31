@@ -1360,6 +1360,175 @@ def test_bundled_pack_avd_runner_routes_native_stderr_through_one_ps5_boundary()
     assert source.count("& $Tool @Arguments") == 1
 
 
+def test_bundled_pack_avd_runner_isolates_exact_app_processes_between_scenarios():
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    pidof = re.search(r"(?s)function Test-ExactPackageProcessRunning.*?^}", source, re.MULTILINE)
+    assert pidof, "exact-package pidof helper missing"
+    pidof_body = pidof.group(0)
+    for marker in (
+        "Invoke-NativeQuietResult", "@('-s', $serial, 'shell', 'pidof', $TargetPackage)",
+        '"$packageName.test"', "package-process-name-invalid", "package-process-state-invalid",
+        "package-process-query-failed",
+    ):
+        assert marker in pidof_body, f"pidof helper missing: {marker}"
+    assert not re.search(r"(?i)(?:shell['\", ]+ps|kill-all|pkill)", source)
+
+    wait = re.search(r"(?s)function Wait-TestProcessesStopped.*?^}", source, re.MULTILINE)
+    stop = re.search(r"(?s)function Stop-TestProcesses.*?^}", source, re.MULTILINE)
+    clear = re.search(r"(?s)function Clear-TargetData.*?^}", source, re.MULTILINE)
+    scenario = re.search(r"(?s)function Invoke-InstrumentationScenario.*?^}", source, re.MULTILINE)
+    assert wait and stop and clear and scenario
+    assert "AddSeconds(15)" in wait.group(0) and "Test-ExactPackageProcessRunning" in wait.group(0)
+    assert "@($packageName, \"$packageName.test\")" in stop.group(0)
+    assert "@('shell', 'am', 'force-stop', $targetPackage)" in stop.group(0)
+    assert "Wait-TestProcessesStopped" in stop.group(0)
+    clear_body = clear.group(0)
+    assert clear_body.index("Stop-TestProcesses") < clear_body.index("@('shell', 'pm', 'clear', $packageName)")
+    assert clear_body.index("@('shell', 'pm', 'clear', $packageName)") < clear_body.index("Wait-TestProcessesStopped")
+    scenario_body = scenario.group(0)
+    assert scenario_body.index("Stop-TestProcesses") < scenario_body.index("Add-ScenarioResult")
+    run_gate = re.search(r"(?s)function Run-ApiGate.*?^}", source, re.MULTILINE)
+    assert run_gate and "process-death-force-stop-failed" not in run_gate.group(0)
+
+
+def test_bundled_pack_avd_pidof_contract_handles_stopped_without_generic_adb_failure(tmp_path):
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+
+    def extract_function(name, required=True):
+        match = re.search(rf"(?ms)^function {name}\b.*?^}}\s*$", source)
+        if required:
+            assert match, f"runner function missing: {name}"
+        return match.group(0) if match else ""
+
+    definitions = [extract_function("Stop-Gate"), extract_function("Invoke-NativeQuietResult")]
+    pidof = extract_function("Test-ExactPackageProcessRunning", required=False)
+    if pidof:
+        definitions.append(pidof)
+    else:
+        definitions.append(extract_function("Get-ScopedAdb"))
+        definitions.append(
+            "function Test-ExactPackageProcessRunning([string]$TargetPackage) {\n"
+            "    $output = Get-ScopedAdb @('shell', 'pidof', $TargetPackage)\n"
+            "    return -not [string]::IsNullOrWhiteSpace($output)\n"
+            "}"
+        )
+    fake_adb = tmp_path / "fake-adb.cmd"
+    fake_adb.write_text(
+        "@echo off\r\n"
+        "if not \"%~1\"==\"-s\" exit /b 90\r\n"
+        "if not \"%~2\"==\"emulator-5556\" exit /b 91\r\n"
+        "if not \"%~3\"==\"shell\" exit /b 92\r\n"
+        "if not \"%~4\"==\"pidof\" exit /b 93\r\n"
+        "if \"%~5\"==\"io.github.ingnijm.baguhelper\" goto package_ok\r\n"
+        "if \"%~5\"==\"io.github.ingnijm.baguhelper.test\" goto package_ok\r\n"
+        "exit /b 94\r\n"
+        ":package_ok\r\n"
+        "if \"%BAGU_PIDOF_MODE%\"==\"running\" goto running\r\n"
+        "if \"%BAGU_PIDOF_MODE%\"==\"stopped\" exit /b 1\r\n"
+        "if \"%BAGU_PIDOF_MODE%\"==\"mixed\" goto mixed\r\n"
+        "if \"%BAGU_PIDOF_MODE%\"==\"exit_one_text\" goto exit_one_text\r\n"
+        "exit /b 2\r\n"
+        ":running\r\necho 123 456\r\nexit /b 0\r\n"
+        ":mixed\r\necho 123 warning\r\nexit /b 0\r\n"
+        ":exit_one_text\r\necho 123\r\nexit /b 1\r\n",
+        encoding="ascii",
+    )
+    harness = tmp_path / "pidof-contract.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + "\n\n".join(definitions)
+        + "\n$adb = $args[0]\n$packageName = 'io.github.ingnijm.baguhelper'\n"
+        "$port = 5556\n$serial = 'emulator-5556'\n"
+        "try {\n"
+        "    $env:BAGU_PIDOF_MODE = 'running'\n"
+        "    if (-not (Test-ExactPackageProcessRunning $packageName)) { throw 'running-process-missed' }\n"
+        "    if (-not (Test-ExactPackageProcessRunning ($packageName + '.test'))) { throw 'test-process-missed' }\n"
+        "    $env:BAGU_PIDOF_MODE = 'stopped'\n"
+        "    if (Test-ExactPackageProcessRunning $packageName) { throw 'stopped-process-reported-running' }\n"
+        "    foreach ($case in @(@('mixed', 'package-process-state-invalid'), @('exit_one_text', 'package-process-state-invalid'), @('failed', 'package-process-query-failed'))) {\n"
+        "        $env:BAGU_PIDOF_MODE = $case[0]\n"
+        "        try { [void](Test-ExactPackageProcessRunning $packageName); throw 'invalid-pidof-accepted' }\n"
+        "        catch { if ($_.Exception.Message -ne $case[1]) { throw } }\n"
+        "    }\n"
+        "    try { [void](Test-ExactPackageProcessRunning 'other.package'); throw 'foreign-package-accepted' }\n"
+        "    catch { if ($_.Exception.Message -ne 'package-process-name-invalid') { throw } }\n"
+        "    [Console]::Out.WriteLine('PIDOF_CONTRACT_OK')\n"
+        "} finally { Remove-Item Env:BAGU_PIDOF_MODE -ErrorAction SilentlyContinue }\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), str(fake_adb)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "PIDOF_CONTRACT_OK"
+
+
+def test_bundled_pack_avd_process_isolation_orders_stop_clear_and_scenario_cleanup(tmp_path):
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+
+    def extract_function(name):
+        match = re.search(rf"(?ms)^function {name}\b.*?^}}\s*$", source)
+        assert match, f"runner function missing: {name}"
+        return match.group(0)
+
+    definitions = [extract_function(name) for name in (
+        "Wait-TestProcessesStopped", "Stop-TestProcesses", "Clear-TargetData", "Invoke-InstrumentationScenario",
+    )]
+    harness = tmp_path / "process-isolation.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + "\n\n".join(definitions)
+        + "\n$packageName = 'io.github.ingnijm.baguhelper'\n"
+        "$script:events = New-Object Collections.Generic.List[string]\n"
+        "function Invoke-ScopedAdbMutation([string[]]$Arguments, [string]$FailureCode) {\n"
+        "    $script:events.Add(($Arguments -join ' '))\n"
+        "    if ($Arguments -contains 'instrument') { return 'OK (1 test)' }\n"
+        "    if ($Arguments -contains 'clear') { return 'Success' }\n"
+        "    return ''\n"
+        "}\n"
+        "function Test-ExactPackageProcessRunning([string]$TargetPackage) { $script:events.Add('pidof ' + $TargetPackage); return $false }\n"
+        "function Add-ScenarioResult([string]$Name, [string]$Status) { $script:events.Add('result ' + $Name + ' ' + $Status) }\n"
+        "Clear-TargetData\n"
+        "$expectedClear = @(\n"
+        "    'shell am force-stop io.github.ingnijm.baguhelper',\n"
+        "    'shell am force-stop io.github.ingnijm.baguhelper.test',\n"
+        "    'pidof io.github.ingnijm.baguhelper', 'pidof io.github.ingnijm.baguhelper.test',\n"
+        "    'shell pm clear io.github.ingnijm.baguhelper',\n"
+        "    'pidof io.github.ingnijm.baguhelper', 'pidof io.github.ingnijm.baguhelper.test'\n"
+        ")\n"
+        "if (($script:events -join '|') -ne ($expectedClear -join '|')) { throw 'clear-order-invalid' }\n"
+        "$script:events.Clear()\n"
+        "Invoke-InstrumentationScenario 'methodOne' 'scenario-one'\n"
+        "$joined = $script:events -join '|'\n"
+        "if ($joined -notmatch '^shell am instrument .*\\|shell am force-stop io.github.ingnijm.baguhelper\\|shell am force-stop io.github.ingnijm.baguhelper.test\\|pidof io.github.ingnijm.baguhelper\\|pidof io.github.ingnijm.baguhelper.test\\|result scenario-one passed$') { throw 'scenario-stop-order-invalid' }\n"
+        "$script:events.Clear()\n"
+        "function Test-ExactPackageProcessRunning([string]$TargetPackage) { throw 'package-process-query-failed' }\n"
+        "try { Stop-TestProcesses; throw 'stop-failure-was-ignored' }\n"
+        "catch { if ($_.Exception.Message -ne 'package-process-query-failed') { throw } }\n"
+        "[Console]::Out.WriteLine('PROCESS_ISOLATION_OK')\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "PROCESS_ISOLATION_OK"
+
+
 def test_bundled_pack_avd_runner_reports_only_safe_bounded_fields():
     source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
     assert "question_text" not in source

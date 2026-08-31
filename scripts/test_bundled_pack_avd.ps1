@@ -127,6 +127,26 @@ function Get-ScopedAdb([string[]]$Arguments) {
     return $result.Output
 }
 
+function Test-ExactPackageProcessRunning([string]$TargetPackage) {
+    if ($TargetPackage -notin @($packageName, "$packageName.test")) {
+        Stop-Gate 'package-process-name-invalid'
+    }
+    if ($serial -ne "emulator-$port") { Stop-Gate 'emulator-serial-mismatch' }
+    $result = Invoke-NativeQuietResult $adb @('-s', $serial, 'shell', 'pidof', $TargetPackage)
+    $output = $result.Output.Trim()
+    if ($result.ExitCode -eq 0) {
+        if ($output -notmatch '^[1-9][0-9]*(?:[ \t\r\n]+[1-9][0-9]*)*$') {
+            Stop-Gate 'package-process-state-invalid'
+        }
+        return $true
+    }
+    if ($result.ExitCode -eq 1) {
+        if (-not [string]::IsNullOrWhiteSpace($output)) { Stop-Gate 'package-process-state-invalid' }
+        return $false
+    }
+    Stop-Gate 'package-process-query-failed'
+}
+
 function Get-DeviceProperty([string]$Name) {
     return Get-ScopedAdb @('shell', 'getprop', $Name)
 }
@@ -338,6 +358,29 @@ function Add-ScenarioResult([string]$Name, [string]$Status) {
     $scenarioResults.Add([ordered]@{ api = $api; name = $Name; status = $Status })
 }
 
+function Wait-TestProcessesStopped {
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $running = $false
+        foreach ($targetPackage in @($packageName, "$packageName.test")) {
+            if (Test-ExactPackageProcessRunning $targetPackage) { $running = $true }
+        }
+        if (-not $running) { return }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    Stop-Gate 'package-process-stop-timeout'
+}
+
+function Stop-TestProcesses {
+    foreach ($targetPackage in @($packageName, "$packageName.test")) {
+        $failureCode = if ($targetPackage -eq $packageName) {
+            'target-process-force-stop-failed'
+        } else { 'test-process-force-stop-failed' }
+        [void](Invoke-ScopedAdbMutation @('shell', 'am', 'force-stop', $targetPackage) $failureCode)
+    }
+    Wait-TestProcessesStopped
+}
+
 function Invoke-InstrumentationScenario([string]$Method, [string]$Name) {
     $target = "$packageName.BundledPackAcceptanceTest#$Method"
     $output = Invoke-ScopedAdbMutation @('shell', 'am', 'instrument', '-w', '-r', '-e', 'class', $target,
@@ -345,6 +388,7 @@ function Invoke-InstrumentationScenario([string]$Method, [string]$Name) {
     if ($output -notmatch '(?m)^OK \(' -or $output -match '(?m)FAILURES|INSTRUMENTATION_FAILED') {
         Stop-Gate ('scenario-' + $Name + '-failed')
     }
+    Stop-TestProcesses
     Add-ScenarioResult $Name 'passed'
 }
 
@@ -354,8 +398,10 @@ function Install-TestPair([string]$TargetApk, [string]$TestApk) {
 }
 
 function Clear-TargetData {
+    Stop-TestProcesses
     $output = Invoke-ScopedAdbMutation @('shell', 'pm', 'clear', $packageName) 'target-clear-failed'
     if ($output -notmatch '(?i)success') { Stop-Gate 'target-clear-not-confirmed' }
+    Wait-TestProcessesStopped
 }
 
 function Stop-OwnedQemuProcess {
@@ -453,7 +499,6 @@ function Run-ApiGate([int]$TargetApi, [string]$TargetApk, [string]$TestApk) {
         Invoke-InstrumentationScenario 'recreationOpenSessionAndOperationsNeverImplicitlyInstall' 'lifecycle-session-operation-gates'
         Clear-TargetData
         Invoke-InstrumentationScenario 'processDeathStagePersistsOnlyPromptMarker' 'process-death-stage'
-        [void](Invoke-ScopedAdbMutation @('shell', 'am', 'force-stop', $packageName) 'process-death-force-stop-failed')
         Invoke-InstrumentationScenario 'processDeathRestartDoesNotRestoreBytesOrReprompt' 'process-death-restart'
 
         if ([string]::IsNullOrWhiteSpace($Beta5ApkPath)) {
