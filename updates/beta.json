@@ -2,17 +2,17 @@
   "schema_version": 1,
   "channel": "beta",
   "release": {
-    "versionName": "0.1.0-beta.5",
-    "versionCode": 5,
+    "versionName": "0.1.0-beta.6",
+    "versionCode": 6,
     "distribution": "public",
     "packageName": "io.github.ingnijm.baguhelper",
     "minSdk": 29,
     "abi": "arm64-v8a",
-    "apkUrl": "https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.5/bagu-0.1.0-beta.5-public-arm64-v8a.apk",
-    "size": 30031937,
-    "sha256": "e64f60598fc2451f3f568befecd123845c5c43c00eb5fcc9a5e3529cb40ce1e9",
-    "releaseUrl": "https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.5",
-    "publishedAt": "2026-08-30T16:29:21Z",
-    "notes": "# 八股助手 0.1.0-beta.5\n\n面经题包与专题模拟版本。本文件描述已完成本地验证、等待公开发布的内容，不表示 Release 已经公开。\n\n## 主要变化\n\n- 增加本地 `.bagu-pack` 检查、明确确认安装、增量升级和日常复习开关。\n- 练习页增加“面经模拟”，支持按专题整套或章节顺序练习。\n- `prepare` 准备项只记录已准备或跳过，不调用模型，也不修改间隔调度。\n- `.bagu-backup` v3 保存题包结构、启用偏好和稳定 ID 进度；继续兼容 v1/v2。\n\n## 正式题包附件\n\n- `2026 秋招面经库` revision 1 是独立 Release 附件，APK 不内置题包，也不会自动下载或更新题包。\n- 题包答案由 AI 生成，并由维护者接受为已复核参考答案；它们不是原帖作者或面试公司的标准答案。\n- 题包内容仅供个人学习及在八股助手中使用，内容权利保留；应用源码的 MIT 许可证不适用于题包内容。\n\n## 安全与数据\n\n- public APK 仍使用空题库；题包必须下载后在题库管理中检查预览并明确确认导入。\n- 更新清单仍只描述 APK，不包含题包下载地址或自动更新字段。\n- 有进行中的练习时不能安装或升级题包；已有学习进度按稳定 ID 保留。"
+    "apkUrl": "https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.6/bagu-0.1.0-beta.6-public-arm64-v8a.apk",
+    "size": 30244809,
+    "sha256": "6645d973348b30ad7ffcba3c89d05b74e2b6fe11b1107b37aa406caf231eeb22",
+    "releaseUrl": "https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.6",
+    "publishedAt": "2026-08-31T10:06:27Z",
+    "notes": "# 八股助手 0.1.0-beta.6 发布说明（待发布）\n\n本文固定 beta.6 的公开附件契约，不代表 Release、APK、更新清单或设备验收已经完成；已发布的 beta.5 及其 Tag、附件和更新记录保持不变。\n\n## 面经题包交付\n\n- public ARM64 APK 仍使用空 SQLite 种子，但会携带 descriptor 精确绑定的 r1 面经题包 Asset。\n- 首次可用时，Android 只会在原生确认框显示题包预览；只有点击“确认安装”才会写入本地数据库。取消、校验失败或进程死亡后，同一哈希不会再次自动提示；“设置 → 面经题包 → 安装内置题包”始终可手动重新打开预览。\n- 同一份 `ai-bagu-2026-autumn-interviews-r1.bagu-pack` 仍是 Release 独立附件，供桌面端和 Android 手动导入。更新清单与 Beta Pages 只描述 APK，不包含题包下载或自动更新字段。\n- Release 恰有七个外部附件：public ARM64 APK、独立题包、`SHA256SUMS`、证书指纹、`INSTALL.md`、`RELEASE_NOTES.md` 和 `update.json`。Stable 清单保持 `release:null`。\n\n## 题包说明\n\n题包为 `2026 秋招面经库`：`pack_id=autumn-recruit-interviews-2026`、revision 1、显示版本 `2026.08.30-r1`、27 个专题、748 题，SHA-256 为 `47aa6b28768be85322924df4a7c17199bf248660997cd10247066821d6d23864`。\n\n答案由 AI 生成，维护者接受为已复核参考答案；它们不是原帖作者或面试公司的标准答案。题包内容仅供个人学习及在八股助手中使用，内容权利保留，应用源码的 MIT 许可证不适用于题包内容。"
   }
 }
