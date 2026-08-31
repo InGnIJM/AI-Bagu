@@ -1365,9 +1365,10 @@ def test_bundled_pack_avd_runner_requires_java17_and_has_an_executable_default()
     source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
     assert "[string]$JavaHome = 'C:\\Program Files\\Java\\jdk-17.0.10'" in source
     assert "bin\\java.exe" in source
-    assert "-version" in source
+    assert "& $java --version" in source
+    assert "& $java -version" not in source
     assert "jdk17-version-invalid" in source
-    assert re.search(r"(?s)javaVersion.*?17", source)
+    assert re.search(r"\(\?:java\|openjdk\) 17\(\?:\\\.\|\\s\|\$\)", source)
 
 
 def test_bundled_pack_avd_runner_waits_for_owned_process_shutdown_before_cleanup():
@@ -1392,6 +1393,43 @@ def test_bundled_pack_avd_runtime_validation_is_independent_of_caller_cwd():
     assert "sys.path.insert" in validator.group(1)
     assert "sys.argv[2]" in validator.group(1)
     assert re.search(r"& \$BuildPython -c \$validation \$Destination \$repoRoot", source)
+
+
+def test_bundled_pack_avd_runner_writes_ps5_safe_status_for_missing_apk(tmp_path):
+    output_path = tmp_path / "status.json"
+    missing_apk = tmp_path / "missing.apk"
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts/test_bundled_pack_avd.ps1"),
+            "-ApkPath",
+            str(missing_apk),
+            "-OutputPath",
+            str(output_path),
+            "-BuildPython",
+            sys.executable,
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert output_path.is_file(), result.stderr
+    status = json.loads(output_path.read_text(encoding="utf-8"))
+    assert status["overall_status"] == "failed"
+    assert status["failure_code"] == "apk-missing"
+    assert status["api_results"] == []
+    assert status["scenario_results"] == []
+    assert "Argument types do not match" not in result.stderr
 
 
 def test_bundled_pack_acceptance_instrumentation_is_content_free_and_real_bridge_bound():

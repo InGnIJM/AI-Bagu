@@ -302,8 +302,8 @@ function Write-SafeStatus([string]$OverallStatus, [string]$FailureCode) {
         schema_version = 1
         overall_status = $OverallStatus
         failure_code = $FailureCode
-        api_results = @($apiResults)
-        scenario_results = @($scenarioResults)
+        api_results = $apiResults.ToArray()
+        scenario_results = $scenarioResults.ToArray()
     }
     [IO.File]::WriteAllText($fullOutput, ($payload | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
 }
@@ -322,10 +322,10 @@ try {
     if ([string]::IsNullOrWhiteSpace($JavaHome)) { Stop-Gate 'jdk17-missing' }
     $java = Join-Path $JavaHome 'bin\java.exe'
     Require-File $java 'jdk17-missing'
-    $javaVersionLines = & $java -version 2>&1
+    $javaVersionLines = & $java --version
     if ($LASTEXITCODE -ne 0) { Stop-Gate 'jdk17-version-invalid' }
     $javaVersion = (@($javaVersionLines) -join "`n")
-    if ($javaVersion -notmatch '(?m)^(?:java|openjdk) version "17(?:\.|"|\s)') {
+    if ($javaVersion -notmatch '(?m)^(?:java|openjdk) 17(?:\.|\s|$)') {
         Stop-Gate 'jdk17-version-invalid'
     }
     $env:JAVA_HOME = $JavaHome
