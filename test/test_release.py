@@ -55,6 +55,21 @@ def test_beta6_public_release_contract_is_canonical_and_has_seven_assets():
     assert descriptor.bundled_confirm and not descriptor.external_only
 
 
+@pytest.mark.parametrize("descriptor", [
+    "docs/releases/0.1.0-beta.5-question-pack.json",
+    "docs/releases/0.1.0-beta.6-question-pack.json",
+])
+def test_question_pack_descriptors_pin_lf_checkout_bytes(descriptor):
+    result = subprocess.run(
+        ["git", "check-attr", "text", "eol", "--", descriptor],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        f"{descriptor}: text: set",
+        f"{descriptor}: eol: lf",
+    ]
+
 
 def test_metadata_uses_exact_tag_url_and_public_version(tmp_path):
     release = load_release()
