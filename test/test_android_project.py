@@ -260,9 +260,10 @@ def test_setup_signing_rejects_an_isolated_partial_identity(tmp_path):
 def test_verify_rejects_missing_companion_metadata_before_sdk_tools(tmp_path):
     """Catches Verify accepting a delivery set that omits the promised certificate/install metadata."""
     root = make_isolated_release_script_root(tmp_path)
-    delivery = root / "dist/android/0.1.0-beta.5/public"
+    version_name = json.loads((root / "version.json").read_text(encoding="utf-8"))["versionName"]
+    delivery = root / f"dist/android/{version_name}/public"
     delivery.mkdir(parents=True)
-    apk = delivery / "bagu-0.1.0-beta.5-public-arm64-v8a.apk"
+    apk = delivery / f"bagu-{version_name}-public-arm64-v8a.apk"
     apk.write_bytes(b"test-apk")
     (delivery / "SHA256SUMS").write_text(
         f"{hashlib.sha256(apk.read_bytes()).hexdigest()} *{apk.name}\n", encoding="utf-8"
@@ -1280,6 +1281,95 @@ def test_android_build_graph_declares_bounded_generated_sources():
         assert required in source
     assert "applicationIdSuffix" not in source
     assert "srcDirs = [repoRoot]" not in source
+
+
+def test_bundled_pack_avd_runner_requires_isolated_emulator_safety_gates():
+    path = ROOT / "scripts/test_bundled_pack_avd.ps1"
+    assert path.is_file(), "disposable bundled-pack AVD runner not implemented"
+    source = path.read_text(encoding="utf-8")
+
+    for required in (
+        "ApkPath", "OutputPath", "Beta5ApkPath", "ANDROID_AVD_HOME",
+        "ANDROID_USER_HOME", "Guid]::NewGuid", "system-images;android-29;google_apis;x86_64",
+        "system-images;android-36;google_apis;x86_64", "ro.kernel.qemu",
+        "ro.build.version.sdk", "ro.product.manufacturer", "ro.product.model",
+        "ro.product.device", "vivo", "V2309A", "emulator-", "finally",
+    ):
+        assert required in source, f"runner missing safety/contract marker: {required}"
+    for required in (
+        "Assert-DisposableEmulator", "Invoke-ScopedAdbMutation", "ro.boot.qemu.avd_name",
+        "emulatorProcess.Id", "Start-Process", "-WindowStyle", "Hidden",
+        "ConvertTo-Json", "scenario_results", "overall_status", "x86_64",
+        "assemblePublicReleaseAndroidTest", "am", "instrument", "force-stop",
+    ):
+        assert required in source, f"runner missing enforced lifecycle marker: {required}"
+    assert re.search(r"(?i)platform-tools[\\/]adb\.exe", source), "runner must resolve the SDK adb executable"
+    assert "kill-server" not in source.lower()
+    assert "disconnect" not in source.lower()
+    assert "adb devices" not in source.lower(), "device enumeration cannot select a mutation target"
+    assert not re.search(r"(?im)^\s*&\s*\$adb\s+(?!-s\s+)", source), \
+        "mutating ADB commands must not be bare or globally targeted"
+    mutation_helper = re.search(
+        r"(?s)function Invoke-ScopedAdbMutation.*?^}", source, re.MULTILINE
+    )
+    assert mutation_helper, "runner must centralize all ADB mutations"
+    assert "Assert-DisposableEmulator" in mutation_helper.group(0)
+    assert re.search(r"&\s*\$adb\s+-s\s+\$serial", mutation_helper.group(0))
+    for command in ("install", "pm', 'clear", "am', 'instrument", "am', 'force-stop"):
+        assert command in source, f"runner missing serial-scoped mutation: {command}"
+    assert re.search(r"Invoke-ScopedAdbMutation[^\r\n]*'emu'\s*,\s*'kill'", source), \
+        "cleanup may stop only the verified launched emulator"
+    assert re.search(r"Remove-Item\s+-LiteralPath\s+\$runRoot\s+-Recurse", source), \
+        "cleanup must be limited to the resolved per-run directory"
+
+
+def test_bundled_pack_avd_runner_reverifies_identity_before_every_mutation():
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    helper = re.search(r"(?s)function Invoke-ScopedAdbMutation.*?^}", source, re.MULTILINE)
+    assert helper
+    body = helper.group(0)
+    assert body.index("Assert-DisposableEmulator") < body.index("& $adb -s $serial")
+    identity = re.search(r"(?s)function Assert-DisposableEmulator.*?^}", source, re.MULTILINE)
+    assert identity
+    for marker in (
+        "emulator-$port", "ro.kernel.qemu", "ro.build.version.sdk",
+        "ro.product.manufacturer", "ro.product.model", "ro.product.device",
+        "ro.boot.qemu.avd_name", "vivo|v2309a", "emulatorProcess.HasExited",
+    ):
+        assert marker in identity.group(0), f"identity proof missing: {marker}"
+
+
+def test_bundled_pack_avd_runner_reports_only_safe_bounded_fields():
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    assert "question_text" not in source
+    assert "answer_text" not in source
+    assert "pack_bytes" not in source
+    assert "private_path" not in source
+    assert "prompted_sha256" not in source
+    assert "credential" not in source.lower()
+    assert "failure_code" in source and "scenario_results" in source
+    assert "$_.Exception.ToString()" not in source
+    assert "$_.ScriptStackTrace" not in source
+
+
+def test_bundled_pack_acceptance_instrumentation_is_content_free_and_real_bridge_bound():
+    path = ANDROID / "app/src/androidTest/java/io/github/ingnijm/baguhelper/BundledPackAcceptanceTest.java"
+    assert path.is_file(), "bundled-pack acceptance instrumentation not implemented"
+    source = path.read_text(encoding="utf-8")
+    for required in (
+        "class BundledPackAcceptanceTest", "hasBundledInterviewPack",
+        "importBundledInterviewPack", "autumn-recruit-interviews-2026",
+        "748", "27", "pack-import", "scenario.recreate",
+        "RuntimeHost.hasOpenSession", "session_items", "question_packs",
+        "experience_items", "BUNDLED_AUTO_PROMPT", "BUNDLED_SETTINGS",
+        "include_in_review", "times_seen", "next_due", "pressBack",
+        "checkForUpdate", "importInterviewPack", "processDeath",
+    ):
+        assert required in source, f"instrumentation missing acceptance assertion: {required}"
+    assert "PRIVATE_PACK_ANSWER_SENTINEL" not in source
+    assert not re.search(r"(?i)(question|answer)[_-]?(text|body|content)", source)
+    assert "getAssets().open(BundledPackController.ASSET_PATH)" not in source, \
+        "acceptance must exercise the real bridge instead of inspecting asset bytes itself"
 
 
 def test_android_cleartext_exception_is_only_loopback():

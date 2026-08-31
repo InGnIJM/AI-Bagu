@@ -2,7 +2,7 @@
 
 [文档导航](README.md) · [架构与数据](architecture.md) · [HTTP API](api.md) · [Android Beta](android-beta.md) · [验收记录](validation.md)
 
-本文描述当前公开 beta.5（code 5）及当前源码使用的入口与验证方法。beta.5 已包含题包/专题、SQLite/备份 v3；历史 beta.4（源码 `ac53f34`）使用 SQLite/备份 v2，不包含这些能力。具体源码、构建产物和设备安装/验收结论分开记录，某次测试通过不自动证明其他工作树、APK 或设备已安装或通过验收。
+本文描述当前 beta.6（code 6）候选源码及当前公开版本使用的入口与验证方法。beta.5 已包含题包/专题、SQLite/备份 v3；历史 beta.4（源码 `ac53f34`）使用 SQLite/备份 v2，不包含这些能力。具体源码、构建产物和设备安装/验收结论分开记录，某次测试通过不自动证明其他工作树、APK 或设备已安装或通过验收。
 
 ## 环境分层
 
@@ -57,6 +57,21 @@ Java 源码包为 `io/github/ingnijm/baguhelper/`：`MainActivity` 管理页面�
 回归入口为 `python -m pytest test -q` 和 `node --test test/speech_input.test.cjs`。项目工具链就绪并获准使用已有签名配置后，以 **Windows PowerShell** 执行 `scripts/android.ps1 -Mode Check`，运行 `:app:testPublicDebugUnitTest` 与 `:app:lintPublicRelease`，不会生成正式签名 APK。当前脚本的整数校验不兼容 PowerShell 7 `ConvertFrom-Json` 返回的 Int64；不要因此修改 `version.json`。
 
 `DiagnosticAcceptanceTest` 用于隔离设备上的启动、导出及隐私验证；仅编译它不能证明设备行为。API 29 与较新 Android 上的真实文件选择器、写入失败、旋转、进程终止及 WebView/Python 启动失败需单独验收。设备安装与签名交付遵循原有授权流程，结果记录在 [验收记录](validation.md)，不能用历史 APK 的通过结果代替。
+
+### beta.6 内置题包隔离 AVD 门禁
+
+`scripts/test_bundled_pack_avd.ps1` 是公开发布前的设备门禁，不是日常单元测试。它接受显式的、使用稳定证书签名的 public x86_64 QA APK 和状态输出路径，在本机已有的 `google_apis/x86_64` API 29、API 36 镜像上依次创建一次性 AVD；可选的 `-Beta5ApkPath` 用于覆盖 beta.5 已安装／未安装题包两种升级场景。ARM64 Release 附件用于真实 ARM64 设备，不能冒充 x86_64 模拟器 QA APK，脚本会拒绝 ABI、包名、版本、签名或内置题包身份不匹配的输入。
+
+```powershell
+.\scripts\test_bundled_pack_avd.ps1 `
+  -ApkPath <beta6-public-x86_64-qa.apk> `
+  -Beta5ApkPath <beta5-public-x86_64-qa.apk> `
+  -OutputPath <隔离临时目录\bundled-pack-avd-status.json>
+```
+
+脚本只使用已安装镜像，不下载系统镜像，也不发布或修改更新源。每次执行创建唯一 `ANDROID_AVD_HOME`／`ANDROID_USER_HOME` 和 AVD 名，启动时选择空闲 emulator 端口；每次安装、清数据、进程终止、instrumentation 和关闭模拟器前都重新核对精确 `emulator-NNNN`、脚本创建的进程、`ro.kernel.qemu=1`、目标 API、AVD 名及 manufacturer/model/device，并明确拒绝 `vivo`／`V2309A`。所有改变状态的 ADB 调用都带经过复核的 `-s`，不使用设备枚举结果、`adb kill-server` 或全局清理。最终清理仅停止本次启动的模拟器并删除本次解析后的临时 AVD 目录。
+
+状态 JSON 只记录 schema、API、模拟器 serial、固定场景名及 passed/failed/skipped 状态；不会记录题目、答案、题包字节、私有偏好哈希、凭据或源文件路径。未提供 beta.5 QA APK 时，两项升级场景会明确标为 `skipped_beta5_apk_not_supplied`，正式发布门禁必须提供它并要求零跳过。仅运行 pytest 或编译 `BundledPackAcceptanceTest` 仍不能声明 API 29/API 36 已通过；必须在发布任务中实际运行该脚本并检查机器可读结果。
 
 更新诊断复用该存储：`UpdateFailure` 负责固定错误码，`UpdateDiagnostic` 是操作上下文绑定的不可变事件，`UpdateCheckSummary` 负责最多 4 KiB 的检查历史与中断恢复。新增字段仅开放给 `native.update`，同时验证落盘与 ZIP 重过滤；`getUpdateState()`／`bagu-update` 不变，扩展契约见 [API 文档](api.md#android-更新状态与诊断)。不要将最近检查编号、当前下载／安装编号与桥接 operationId 混为一谈。
 
