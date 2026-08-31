@@ -232,7 +232,7 @@ public final class BundledPackAcceptanceTest {
         python("import bagu, android_runtime\n"
             + "c=android_runtime._connection()\n"
             + "try:\n"
-            + " q=bagu.create_question(c,{'category':'qa-upgrade','question':'qa-progress','answer':'qa-local','url':''})\n"
+            + " q=bagu.create_question(c,{'category':'qa-upgrade','question':'qa-progress','answer':'qa-local','url':''})['id']\n"
             + " c.execute(\"UPDATE questions SET level=1,times_seen=2,times_right=1,next_due='2030-01-01' WHERE id=?\",(q,))\n"
             + " c.commit()\n"
             + "finally:c.close()\n");
