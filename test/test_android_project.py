@@ -1819,26 +1819,80 @@ def test_bundled_pack_avd_native_boundary_normalizes_ps5_stderr_and_keeps_exit_c
     assert "RemoteException" not in result.stderr
 
 
-def test_bundled_pack_result_allowlist_covers_main_activity_fixed_fields():
+_PACK_RESULT_FIXED_PATTERN = re.compile(
+    r'if \("pack-import"\.equals\(operation\)\)\s*\{\s*'
+    r'for \(String key : new String\[]\{([^}]+)\}\)',
+)
+_PACK_RESULT_ACCEPTANCE_PATTERN = re.compile(
+    r'Object\.keys\(window\.__qaPackResult\).*?return \[([^]]+)\]\.includes\(k\)', re.S,
+)
+_PACK_RESULT_CORE_FIELDS = {"operation", "status", "message", "operation_id"}
+_PACK_RESULT_FIXED_FIELDS = {"pack_id", "name", "revision", "question_count", "experience_count"}
+_PACK_RESULT_ALLOWED_FIELDS = _PACK_RESULT_CORE_FIELDS | _PACK_RESULT_FIXED_FIELDS | {
+    "display_version", "installed_revision",
+}
+_VALID_PACK_RESULT_FIXED_SOURCE = (
+    'if ("pack-import".equals(operation)) { for (String key : new String[]{'
+    '"pack_id", "name", "revision", "question_count", "experience_count"}) {} }'
+)
+_VALID_PACK_RESULT_ACCEPTANCE_SOURCE = (
+    "Object.keys(window.__qaPackResult).every(function(k){return "
+    "['operation','status','message','operation_id','pack_id','name','revision',"
+    "'display_version','question_count','experience_count','installed_revision'].includes(k);})"
+)
+
+
+def _assert_bundled_pack_result_contract(activity, acceptance):
+    fixed_matches = _PACK_RESULT_FIXED_PATTERN.findall(activity)
+    allowed_matches = _PACK_RESULT_ACCEPTANCE_PATTERN.findall(acceptance)
+    assert len(fixed_matches) == 1, f"expected one pack-import fixed result array, found {len(fixed_matches)}"
+    assert len(allowed_matches) == 1, f"expected one pack-result acceptance allowlist, found {len(allowed_matches)}"
+    fixed_values = re.findall(r'"([a-z_]+)"', fixed_matches[0])
+    allowed_values = re.findall(r"'([a-z_]+)'", allowed_matches[0])
+    assert len(fixed_values) == len(set(fixed_values)), "pack-import fixed result array has duplicate fields"
+    assert len(allowed_values) == len(set(allowed_values)), "pack-result acceptance allowlist has duplicate fields"
+    fixed = set(fixed_values)
+    allowed = set(allowed_values)
+    assert fixed == _PACK_RESULT_FIXED_FIELDS, (
+        f"pack-import fixed result fields differ: missing={sorted(_PACK_RESULT_FIXED_FIELDS - fixed)}, "
+        f"extra={sorted(fixed - _PACK_RESULT_FIXED_FIELDS)}"
+    )
+    assert allowed == _PACK_RESULT_ALLOWED_FIELDS, (
+        f"pack-result acceptance fields differ: missing={sorted(_PACK_RESULT_ALLOWED_FIELDS - allowed)}, "
+        f"extra={sorted(allowed - _PACK_RESULT_ALLOWED_FIELDS)}"
+    )
+
+
+def test_bundled_pack_result_allowlist_is_exact_and_unique():
     activity = (ANDROID / "app/src/main/java/io/github/ingnijm/baguhelper/MainActivity.java").read_text(encoding="utf-8")
     acceptance = (ANDROID / "app/src/androidTest/java/io/github/ingnijm/baguhelper/BundledPackAcceptanceTest.java").read_text(encoding="utf-8")
 
-    result_method = activity[activity.index("void result(String operation"):activity.index("@Override public void onCreate")]
-    fixed_match = re.search(
-        r'if \("pack-import"\.equals\(operation\)\).*?new String\[]\{([^}]+)\}',
-        result_method,
-        re.S,
-    )
-    allowed_match = re.search(
-        r'Object\.keys\(window\.__qaPackResult\).*?return \[([^]]+)\]\.includes\(k\)',
-        acceptance,
-        re.S,
-    )
-    assert fixed_match and allowed_match, "pack-import result contract or acceptance allowlist missing"
-    fixed = set(re.findall(r'"([a-z_]+)"', fixed_match.group(1)))
-    allowed = set(re.findall(r"'([a-z_]+)'", allowed_match.group(1)))
-    required = {"operation", "status", "message", "operation_id"} | fixed
-    assert required <= allowed, f"acceptance result allowlist misses fixed native fields: {sorted(required - allowed)}"
+    _assert_bundled_pack_result_contract(activity, acceptance)
+
+
+@pytest.mark.parametrize(("activity", "acceptance"), [
+    (
+        _VALID_PACK_RESULT_FIXED_SOURCE.replace('"experience_count"', '"experience_count", "answer"'),
+        _VALID_PACK_RESULT_ACCEPTANCE_SOURCE.replace("'installed_revision'", "'installed_revision','answer'"),
+    ),
+    (
+        _VALID_PACK_RESULT_FIXED_SOURCE,
+        _VALID_PACK_RESULT_ACCEPTANCE_SOURCE.replace("'installed_revision'", "'installed_revision','path'"),
+    ),
+    (
+        _VALID_PACK_RESULT_FIXED_SOURCE,
+        _VALID_PACK_RESULT_ACCEPTANCE_SOURCE.replace("'installed_revision'", "'installed_revision','body'"),
+    ),
+    (
+        _VALID_PACK_RESULT_FIXED_SOURCE,
+        _VALID_PACK_RESULT_ACCEPTANCE_SOURCE.replace("'installed_revision'", "'installed_revision','content'"),
+    ),
+    (_VALID_PACK_RESULT_FIXED_SOURCE * 2, _VALID_PACK_RESULT_ACCEPTANCE_SOURCE),
+    (_VALID_PACK_RESULT_FIXED_SOURCE, _VALID_PACK_RESULT_ACCEPTANCE_SOURCE * 2),
+], ids=("answer", "path", "body", "content", "duplicate-fixed", "duplicate-acceptance"))
+def test_bundled_pack_result_contract_rejects_unapproved_or_ambiguous_source(activity, acceptance):
+    with pytest.raises(AssertionError):
+        _assert_bundled_pack_result_contract(activity, acceptance)
 
 
 def test_bundled_pack_acceptance_instrumentation_is_content_free_and_real_bridge_bound():
