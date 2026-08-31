@@ -185,6 +185,10 @@ public final class BundledPackAcceptanceTest {
             assertEquals(PendingImport.Source.BUNDLED_AUTO_PROMPT, automatic.source());
             cancelPreview();
         }
+        // cancelImport clears pendingImport before it releases the shared file
+        // lease. Drain main/worker again so an immediate settings request cannot
+        // observe that transient half-cancelled state as native_busy.
+        settleNativeWorker();
         requestBundledFromRealBridge();
     }
 
