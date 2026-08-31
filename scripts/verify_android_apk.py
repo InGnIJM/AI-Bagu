@@ -12,8 +12,15 @@ import json
 from pathlib import Path, PurePosixPath
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import zipfile
+
+# The verifier is also loaded directly by release-contract tests, where the
+# scripts directory is not necessarily on sys.path.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
 
 import release_metadata
 
