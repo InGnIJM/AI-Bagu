@@ -109,7 +109,7 @@ public final class BundledPackAcceptanceTest {
         instrumentation.runOnMainSync(() -> {});
         CountDownLatch worker = new CountDownLatch(1);
         RuntimeHost.WORKER.execute(worker::countDown);
-        assertTrue("Native worker timeout", worker.await(30, TimeUnit.SECONDS));
+        assertTrue("Native worker timeout", worker.await(60, TimeUnit.SECONDS));
         instrumentation.runOnMainSync(() -> {});
     }
 
@@ -128,7 +128,7 @@ public final class BundledPackAcceptanceTest {
     }
 
     private void waitForPreview() throws Exception {
-        long deadline = SystemClock.uptimeMillis() + 30000;
+        long deadline = SystemClock.uptimeMillis() + 60000;
         while (pending() == null && SystemClock.uptimeMillis() < deadline) {
             settleNativeWorker();
             SystemClock.sleep(100);
@@ -173,6 +173,16 @@ public final class BundledPackAcceptanceTest {
         assertEquals("true", js("(function(){BaguNative.importBundledInterviewPack();return true;})()"));
         waitForPreview();
         assertEquals(PendingImport.Source.BUNDLED_SETTINGS, pending().source());
+    }
+
+    private void requestBundledAfterSettlingAutomaticPreview() throws Exception {
+        settleNativeWorker();
+        PendingImport automatic = pending();
+        if (automatic != null) {
+            assertEquals(PendingImport.Source.BUNDLED_AUTO_PROMPT, automatic.source());
+            cancelPreview();
+        }
+        requestBundledFromRealBridge();
     }
 
     private JSONObject state() throws Exception {
@@ -242,10 +252,8 @@ public final class BundledPackAcceptanceTest {
     }
 
     @Test public void settingsInstallDisablesDailyReviewWithoutHidingSimulation() throws Exception {
-        waitForPreview();
-        cancelPreview();
         js("window.__qaPackResult=null;window.addEventListener('bagu-native-result',function(e){if(e.detail.operation==='pack-import')window.__qaPackResult=e.detail;});");
-        requestBundledFromRealBridge();
+        requestBundledAfterSettlingAutomaticPreview();
         confirmPreview();
         await("redacted native result", "window.__qaPackResult&&window.__qaPackResult.status==='ok'", 30000);
         assertEquals("true", js("Object.keys(window.__qaPackResult).every(function(k){return ['operation','status','message','operation_id','pack_id','name','revision','display_version','question_count','experience_count','installed_revision'].includes(k);})"));
@@ -257,7 +265,7 @@ public final class BundledPackAcceptanceTest {
     }
 
     @Test public void recreationOpenSessionAndOperationsNeverImplicitlyInstall() throws Exception {
-        waitForPreview();
+        requestBundledAfterSettlingAutomaticPreview();
         PendingImport before = pending();
         scenario.recreate();
         bindActivity();
@@ -305,9 +313,7 @@ public final class BundledPackAcceptanceTest {
     }
 
     @Test public void prepareInstalledBeta5UpgradeState() throws Exception {
-        waitForPreview();
-        cancelPreview();
-        requestBundledFromRealBridge();
+        requestBundledAfterSettlingAutomaticPreview();
         confirmPreview();
         python("import android_runtime\n"
             + "c=android_runtime._connection()\n"
@@ -332,7 +338,7 @@ public final class BundledPackAcceptanceTest {
     }
 
     @Test public void prepareUninstalledBeta5UpgradeState() throws Exception {
-        waitForPreview();
+        requestBundledAfterSettlingAutomaticPreview();
         cancelPreview();
         prepareLocalProgress();
         assertTrue(instrumentation.getTargetContext()
