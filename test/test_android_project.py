@@ -1424,6 +1424,93 @@ def test_bundled_pack_avd_runner_resolves_only_exact_lock_owned_qemu():
         "process enumeration must never select an emulator owner"
 
 
+def test_bundled_pack_avd_runner_reads_live_lock_with_bounded_shared_helper():
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    reader = re.search(r"(?s)function Read-SharedAvdPidText.*?^}", source, re.MULTILINE)
+    assert reader, "shared live-lock reader missing"
+    body = reader.group(0)
+    for marker in (
+        "FileStream", "FileAccess]::Read", "FileShare]::ReadWrite", "FileShare]::Delete",
+        "UTF8Encoding", "32", "emulator-lock-pid-retry", "emulator-lock-pid-invalid",
+    ):
+        assert marker in body, f"shared live-lock reader missing: {marker}"
+    resolver = re.search(r"(?s)function Resolve-OwnedQemuProcess.*?^}", source, re.MULTILINE)
+    assert resolver
+    assert resolver.group(0).count("Read-SharedAvdPidText") == 2
+    assert "ReadAllText" not in resolver.group(0)
+    run_gate = re.search(r"(?s)function Run-ApiGate.*?^}", source, re.MULTILINE)
+    assert run_gate and "'emulator-lock-pid-retry'" in run_gate.group(0)
+    mutation = re.search(r"(?s)function Invoke-ScopedAdbMutation.*?^}", source, re.MULTILINE)
+    assert mutation and "Assert-DisposableEmulator" in mutation.group(0)
+    assert "emulator-lock-pid-retry" not in mutation.group(0), \
+        "mutation must fail closed instead of consuming startup retry codes"
+
+
+def test_bundled_pack_avd_live_lock_reader_handles_writer_and_classifies_transients(tmp_path):
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+
+    def extract_function(name, required=True):
+        match = re.search(rf"(?ms)^function {name}\b.*?^}}\s*$", source)
+        if required:
+            assert match, f"runner function missing: {name}"
+        return match.group(0) if match else ""
+
+    definitions = [extract_function("Stop-Gate"), extract_function("Get-ExactAvdLockPidPath")]
+    reader = extract_function("Read-SharedAvdPidText", required=False)
+    if reader:
+        definitions.append(reader)
+    definitions.append(extract_function("Resolve-OwnedQemuProcess"))
+    harness = tmp_path / "shared-lock.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + "\n\n".join(definitions)
+        + "\n$avdName = 'bagu-shared-lock-test'\n"
+        "$env:ANDROID_AVD_HOME = $args[0]\n"
+        "$ownedQemuProcess = $null\n$ownedQemuPid = 0\n"
+        "$current = Get-Process -Id $PID -ErrorAction Stop\n"
+        "$qemuExecutablePaths = @($current.Path)\n"
+        "$emulatorLaunchUtc = [DateTime]::UtcNow\n"
+        "$lock = Join-Path (Join-Path $env:ANDROID_AVD_HOME ($avdName + '.avd')) 'hardware-qemu.ini.lock\\pid'\n"
+        "[IO.Directory]::CreateDirectory((Split-Path -Parent $lock)) | Out-Null\n"
+        "[IO.File]::WriteAllText($lock, [string]$PID, [Text.Encoding]::ASCII)\n"
+        "$share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete\n"
+        "$writer = New-Object IO.FileStream($lock, [IO.FileMode]::Open, [IO.FileAccess]::Write, $share)\n"
+        "try {\n"
+        "    $resolved = Resolve-OwnedQemuProcess\n"
+        "    if ($resolved.Id -ne $PID) { throw 'shared-writer-owner-invalid' }\n"
+        "    $writer.SetLength(0); $writer.Flush()\n"
+        "    try { [void](Resolve-OwnedQemuProcess); throw 'empty-lock-accepted' }\n"
+        "    catch { if ($_.Exception.Message -ne 'emulator-lock-pid-retry') { throw } }\n"
+        "    $writer.SetLength(0); $writer.WriteByte(255); $writer.Flush()\n"
+        "    try { [void](Resolve-OwnedQemuProcess); throw 'invalid-utf8-lock-accepted' }\n"
+        "    catch { if ($_.Exception.Message -ne 'emulator-lock-pid-invalid') { throw } }\n"
+        "    $tooLong = [Text.Encoding]::ASCII.GetBytes(('1' * 33))\n"
+        "    $writer.SetLength(0); $writer.Write($tooLong, 0, $tooLong.Length); $writer.Flush()\n"
+        "    try { [void](Resolve-OwnedQemuProcess); throw 'oversized-lock-accepted' }\n"
+        "    catch { if ($_.Exception.Message -ne 'emulator-lock-pid-invalid') { throw } }\n"
+        "} finally { $writer.Dispose() }\n"
+        "$exclusive = New-Object IO.FileStream($lock, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)\n"
+        "try {\n"
+        "    try { [void](Resolve-OwnedQemuProcess); throw 'sharing-conflict-accepted' }\n"
+        "    catch { if ($_.Exception.Message -ne 'emulator-lock-pid-retry') { throw } }\n"
+        "} finally { $exclusive.Dispose() }\n"
+        "[Console]::Out.WriteLine('SHARED_LOCK_OK')\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), str(tmp_path / "avd-home")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "SHARED_LOCK_OK"
+
+
 def test_bundled_pack_avd_runner_accepts_empty_boot_name_but_rejects_mismatch(tmp_path):
     source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
 
@@ -1434,7 +1521,7 @@ def test_bundled_pack_avd_runner_accepts_empty_boot_name_but_rejects_mismatch(tm
         return match.group(0) if match else ""
 
     definitions = [extract_function("Stop-Gate")]
-    for name in ("Get-ExactAvdLockPidPath", "Resolve-OwnedQemuProcess"):
+    for name in ("Get-ExactAvdLockPidPath", "Read-SharedAvdPidText", "Resolve-OwnedQemuProcess"):
         function = extract_function(name, required=False)
         if function:
             definitions.append(function)

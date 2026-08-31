@@ -139,10 +139,48 @@ function Get-ExactAvdLockPidPath {
     return Join-Path $avdDirectory 'hardware-qemu.ini.lock\pid'
 }
 
+function Read-SharedAvdPidText([string]$Path) {
+    $stream = $null
+    $buffer = $null
+    try {
+        $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+        $stream = New-Object IO.FileStream(
+            $Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share
+        )
+        $length = $stream.Length
+        if ($length -eq 0) { Stop-Gate 'emulator-lock-pid-retry' }
+        if ($length -gt 32) { Stop-Gate 'emulator-lock-pid-invalid' }
+        $buffer = New-Object byte[] ([int]$length)
+        $offset = 0
+        while ($offset -lt $buffer.Length) {
+            $read = $stream.Read($buffer, $offset, $buffer.Length - $offset)
+            if ($read -le 0) { Stop-Gate 'emulator-lock-pid-retry' }
+            $offset += $read
+        }
+        if ($stream.Length -ne $length) { Stop-Gate 'emulator-lock-pid-retry' }
+    } catch {
+        if ($_.Exception.Message -match '^emulator-lock-pid-(?:retry|invalid)$') { throw }
+        $cause = $_.Exception
+        if ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+        if ($cause -is [IO.IOException]) { Stop-Gate 'emulator-lock-pid-retry' }
+        Stop-Gate 'emulator-lock-pid-invalid'
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+    try {
+        $decoder = New-Object Text.UTF8Encoding($false, $true)
+        $text = $decoder.GetString($buffer)
+    } catch { Stop-Gate 'emulator-lock-pid-invalid' }
+    if ($text -notmatch '^[0-9 \t\r\n]+$') { Stop-Gate 'emulator-lock-pid-invalid' }
+    $pidText = $text.Trim()
+    if ([string]::IsNullOrWhiteSpace($pidText)) { Stop-Gate 'emulator-lock-pid-retry' }
+    return $pidText
+}
+
 function Resolve-OwnedQemuProcess {
     $lockPath = Get-ExactAvdLockPidPath
     if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { Stop-Gate 'emulator-lock-pid-missing' }
-    $lockPidText = [IO.File]::ReadAllText($lockPath).Trim()
+    $lockPidText = Read-SharedAvdPidText $lockPath
     if ($lockPidText -notmatch '^[1-9][0-9]*$') { Stop-Gate 'emulator-lock-pid-invalid' }
     $lockPidValue = [int64]$lockPidText
     if ($lockPidValue -gt [int]::MaxValue) { Stop-Gate 'emulator-lock-pid-invalid' }
@@ -169,7 +207,7 @@ function Resolve-OwnedQemuProcess {
         Stop-Gate 'emulator-process-name-invalid'
     }
     if ($startUtc -lt $emulatorLaunchUtc.AddSeconds(-10)) { Stop-Gate 'emulator-process-start-invalid' }
-    $confirmedPidText = [IO.File]::ReadAllText($lockPath).Trim()
+    $confirmedPidText = Read-SharedAvdPidText $lockPath
     if ($confirmedPidText -ne $lockPidText) { Stop-Gate 'emulator-lock-pid-changed' }
     if ($ownedQemuPid -eq 0) { $script:ownedQemuPid = $lockPid }
     return $process
@@ -379,25 +417,32 @@ function Run-ApiGate([int]$TargetApi, [string]$TargetApk, [string]$TestApk) {
         ) -PassThru -WindowStyle Hidden
         $deadline = [DateTime]::UtcNow.AddMinutes(4)
         $ready = $false
+        $ownershipStartupRetryCodes = @(
+            'emulator-lock-pid-missing', 'emulator-lock-pid-retry',
+            'emulator-process-not-found', 'emulator-process-inspection-failed'
+        )
         while ([DateTime]::UtcNow -lt $deadline) {
             Start-Sleep -Milliseconds 1000
-            if ($null -eq $ownedQemuProcess) {
-                try { $script:ownedQemuProcess = Resolve-OwnedQemuProcess }
-                catch {
-                    if ($_.Exception.Message -notin @(
-                            'emulator-lock-pid-missing', 'emulator-process-not-found',
-                            'emulator-process-inspection-failed')) { throw }
-                    continue
-                }
+            try { $script:ownedQemuProcess = Resolve-OwnedQemuProcess }
+            catch {
+                if ($_.Exception.Message -notin $ownershipStartupRetryCodes) { throw }
+                continue
             }
             try {
                 $ready = (Get-ScopedAdb @('get-state')) -eq 'device' -and
                     (Get-DeviceProperty 'sys.boot_completed') -eq '1'
             } catch { $ready = $false }
-            if ($ready) { break }
+            if ($ready) {
+                try { Assert-DisposableEmulator }
+                catch {
+                    if ($_.Exception.Message -notin $ownershipStartupRetryCodes) { throw }
+                    $ready = $false
+                    continue
+                }
+                break
+            }
         }
         if (-not $ready) { Stop-Gate "emulator-$TargetApi-timeout" }
-        Assert-DisposableEmulator
         Install-TestPair $TargetApk $TestApk
 
         Clear-TargetData
