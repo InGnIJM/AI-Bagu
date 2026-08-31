@@ -6,6 +6,8 @@
 
 beta.5 已加入 `.bagu-pack`、SQLite/`.bagu-backup` v3 和 Android 同字节题包导入。public APK 保持空种子，正式题包作为同一 Release 的独立附件；七附件、匿名下载与 Beta Pages 已验证，但 APK 尚未安装到设备，设备生命周期边界仍按下文限制理解。
 
+当前源码的 beta.6/code 6 是待发布候选，不改变 beta.5 的公开 Tag、附件或 Pages 字节。beta.6 继续保持 public SQLite 种子为空，并以 schema-v2 描述将同一正式题包同时绑定为 Android 固定 Asset 和独立 Release 附件；只有原生预览后的明确确认才会把它写入数据库。
+
 ## 已上线的版本与更新清单
 
 截至 2026-08-31，[beta.5 Release](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.5) 已公开为预发布版，code 为 `5`，提供 [public ARM64 空题库 APK](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.5/bagu-0.1.0-beta.5-public-arm64-v8a.apk) 和独立的 [2026 秋招面经题包](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.5/ai-bagu-2026-autumn-interviews-r1.bagu-pack)，下载不需要登录。
@@ -59,7 +61,7 @@ beta.5 的 v3 对本地题继续使用上述身份；题包题改按 `pack_id + 
 
 ## 本地面经题包
 
-`.bagu-pack` 是“安装/升级内容来源”，`.bagu-backup` 是两端迁移已安装状态；两者不能互换。仓库、APK 与 public/internal 种子不含真实题包；正式 revision 1 已通过私有冻结/审校流程，以 beta.5 的独立 Release 附件提供 27 专题／748 题。原始 Markdown、私有 catalog、稳定 ID 映射和审校材料仍不上传。
+`.bagu-pack` 是“安装/升级内容来源”，`.bagu-backup` 是两端迁移已安装状态；两者不能互换。beta.5 的仓库、APK 与 public/internal 种子不含真实题包；正式 revision 1 已通过私有冻结/审校流程，以 beta.5 的独立 Release 附件提供 27 专题／748 题。beta.6 的待发布 schema-v2 public APK 只允许完全相同的固定 Asset，public/internal SQLite 种子仍不含题包题或专题。原始 Markdown、私有 catalog、稳定 ID 映射和审校材料仍不上传。
 
 ### 显式安装流程
 
@@ -67,6 +69,8 @@ beta.5 的 v3 对本地题继续使用上述身份；题包题改按 `pack_id + 
 2. 选择本地 `.bagu-pack`。桌面读取一次并缓存同一 base64；Android 原生读取一次受限字节，JS 不接收正文。
 3. 完整校验后核对 pack ID、名称、显示版本、revision、题数、专题数和 `new|upgrade|installed|downgrade|conflict` 状态；Android 的网页预览不接收 hash 或正文。
 4. 明确确认后安装刚才预览的同一份字节。Activity 配置重建可重新显示确认但不会自动执行；进程死亡后要求重选。结果未知时先核对题包列表和 revision，不直接反复覆盖。
+
+beta.6 的 Android 内置入口没有系统文件选择器：在页面可信加载、前台且空闲时可对新题包显示一次原生预览，或由“设置 → 面经题包 → 安装内置题包”随时手动打开。自动预览在显示前记录该题包哈希；取消、失败或进程死亡不会安装，也不会再次自动弹出同一哈希。手动重开不受该记录限制。网页仍只收到脱敏结果，正文、哈希和预览不进入 JS。
 
 首次安装默认加入日常复习。更高 revision 按稳定 ID 更新并保留题目主键、调度、历史答案快照和本地开关；同 revision/同内容幂等，相同 revision/不同内容或降级拒绝。遗漏旧 ID 不删除，显式 `retired` 才停止新抽题。关闭日常开关后不进入日常统计/抽题，但仍可模拟且进度保留。
 
@@ -121,7 +125,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\android.ps1 -Mode 
 
 发布用稳定签名不得重新生成；`.signing/` 中 keystore、密码和属性文件保持私有，只能发布公开证书指纹。`SetupSigning` 不是修复丢失签名的步骤。internal 包和源题库不得出现在公开附件中。
 
-public 交付目录是 `dist/android/<versionName>/public/`。历史无题包描述的版本必须恰有 APK、`SHA256SUMS`、`certificate-sha256.txt`、`update.json`、`INSTALL.md`、`RELEASE_NOTES.md` 六个附件；beta.5 这类存在版本化题包描述的版本再加入精确 `.bagu-pack`，恰为七个。APK 的实际清单、签名、空种子、资源允许列表、原生库及对齐和哈希都需要核对，不能只检查 `version.json`。
+public 交付目录是 `dist/android/<versionName>/public/`。历史无题包描述的版本必须恰有 APK、`SHA256SUMS`、`certificate-sha256.txt`、`update.json`、`INSTALL.md`、`RELEASE_NOTES.md` 六个附件；beta.5/6 这类存在版本化题包描述的版本再加入精确 `.bagu-pack`，恰为七个。beta.6 的 schema-v2 APK 还必须仅含固定 `assets/question-pack/bundled.bagu-pack`，其字节与 descriptor、独立附件完全一致，而 public SQLite 种子保持为空。APK 的实际清单、签名、空种子、资源允许列表、原生库及对齐和哈希都需要核对，不能只检查 `version.json`。
 
 ## 维护者：独立初始化更新源
 
@@ -204,7 +208,7 @@ python .\scripts\release_github.py feed --execute --confirm-repository InGnIJM/A
 
 ## 许可、隐私与验收记录
 
-应用自有源码按 [MIT License](../LICENSE) 提供；这不把抓取或导入的题目、答案以及第三方素材／依赖变成本项目可再授权的内容。公开 APK 必须为空题库且不内置题包/专题/私有 catalog；beta.5 的题包是具有单独内容授权的独立附件，internal 也不能把它当作授权种子捷径。不因源码采用 MIT 就改变题包权利或重新分发个人学习进度。
+应用自有源码按 [MIT License](../LICENSE) 提供；这不把抓取或导入的题目、答案以及第三方素材／依赖变成本项目可再授权的内容。公开 APK 必须使用空 SQLite 题库，不能内置题包题、专题或私有 catalog；beta.5 的题包是具有单独内容授权的独立附件。beta.6 的 schema-v2 APK 仅允许 descriptor 绑定的未安装题包 Asset，仍不能把它或 internal 内容当作种子捷径。不因源码采用 MIT 就改变题包权利或重新分发个人学习进度。
 
 第三方字体、图标和 Android／Python／Chaquopy 等运行时或依赖保留各自许可证。已有字体声明位于 [assets/fonts](../assets/fonts/)；发布时应核对随包依赖与所需声明，不用项目 MIT 替代它们。不得提交或上传 `.env`、模型配置、真实数据库、备份、草稿、签名私钥或密码。
 

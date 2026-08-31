@@ -2,7 +2,7 @@
 
 一个在电脑和 Android 手机上使用的面试复习工具。抽一轮题，用自己的话回答，查看反馈，再按掌握程度安排下一次复习。
 
-公开 beta.5 已增加独立的「面经模拟」和本地 `.bagu-pack` 题包：`category` 继续表示 MySQL、网络等知识分类，面经则按方向、公司、岗位和章节选择，不会被塞进普通分类。APK 与题包是 Release 中的两个独立附件，APK 仍为空种子，不内置或自动下载题包。
+已发布 beta.5 增加了独立的「面经模拟」和本地 `.bagu-pack` 题包：`category` 继续表示 MySQL、网络等知识分类，面经则按方向、公司、岗位和章节选择，不会被塞进普通分类。当前源码准备的 beta.6 会让 public APK 在**空 SQLite 种子**之外携带同一份题包 Asset；它只在原生预览后、由用户明确确认安装，且该题包仍会作为桌面端可下载的独立 Release 附件。beta.5 的 APK 不内置题包这一历史事实不变。
 
 [快速开始](#快速开始) · [下载 Android beta.5](https://github.com/InGnIJM/AI-Bagu/releases/tag/v0.1.0-beta.5) · [使用指南](docs/user-guide.md) · [数据迁移与更新](docs/data-transfer-and-updates.md) · [全部文档](docs/README.md)
 
@@ -38,7 +38,7 @@ python bagu.py serve
 
 保持终端运行，在浏览器打开 [http://127.0.0.1:8765](http://127.0.0.1:8765)。日常使用不需要安装 pytest、Node.js 或 Android 开发工具。
 
-初次打开没有题目时，可从空题库页导入另一端的 `.bagu-backup`，也可以进入「题库管理」新增题目或导入 CSV。beta.5 还可在设置中选择本地 `.bagu-pack`，先核对完整校验后的预览，再明确确认安装；正式题包作为 Release 独立附件提供，不在仓库或程序中内置。想从项目已配置的公开来源抓题，也可以另开终端执行：
+初次打开没有题目时，可从空题库页导入另一端的 `.bagu-backup`，也可以进入「题库管理」新增题目或导入 CSV。beta.5 可在设置中选择本地 `.bagu-pack`，先核对完整校验后的预览，再明确确认安装；正式题包作为 Release 独立附件提供。beta.6 发布后，Android 可从 APK 内的同一题包打开原生预览，但桌面端仍从 Release 下载独立附件，二者都不自动写入题库。想从项目已配置的公开来源抓题，也可以另开终端执行：
 
 ```bash
 python bagu.py import
@@ -58,7 +58,7 @@ python bagu.py import
 
 *Android 实际使用截图，由用户提供；未据此认定安装包版本或设备验收范围。*
 
-APK 放在 GitHub Releases，不提交到源码目录。公开包首次安装仍为空题库，可导入自己的 CSV 或 `.bagu-backup`；不要把截图中的 408 题理解为默认附带。面经题包需另外下载 [ai-bagu-2026-autumn-interviews-r1.bagu-pack](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.5/ai-bagu-2026-autumn-interviews-r1.bagu-pack)，再在「设置 → 面经题包」中预览并确认导入；APK 不内置、也不会自动下载它。**更新不要先卸载**，同包名、同签名覆盖升级保留原有本地数据。安装与构建方式见 [Android 指南](docs/android-beta.md)。beta.5 尚未执行设备安装或仪器测试，不能据此承诺具体机型上的安装与运行表现。
+APK 放在 GitHub Releases，不提交到源码目录。当前已发布的 beta.5 首次安装仍为空题库，可导入自己的 CSV 或 `.bagu-backup`；不要把截图中的 408 题理解为默认附带。面经题包需另外下载 [ai-bagu-2026-autumn-interviews-r1.bagu-pack](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.5/ai-bagu-2026-autumn-interviews-r1.bagu-pack)，再在「设置 → 面经题包」中预览并确认导入；beta.5 APK 不内置、也不会自动下载它。beta.6 的待发布 APK 会内置同一份 Asset，但仍保持空种子：原生预览只有在明确确认后才安装；取消、失败或进程死亡会抑制同一哈希的再次自动提示，设置中的“安装内置题包”可随时手动重新打开。**更新不要先卸载**，同包名、同签名覆盖升级保留原有本地数据。安装与构建方式见 [Android 指南](docs/android-beta.md)。
 
 已有更新入口的 beta.2～beta.4 可在「设置 → 应用更新 → 检查更新」发现 beta.5，点击下载、校验后再确认安装；自动检查不等于自动下载或安装，也不会下载题包。旧 internal 包没有更新入口时，先手动下载本版覆盖安装。Beta 清单已提供 beta.5，Stable 清单仍为空通道，空通道不是错误，详见[更新清单与当前版本](docs/data-transfer-and-updates.md#已上线的版本与更新清单)。
 

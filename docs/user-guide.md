@@ -2,7 +2,7 @@
 
 [返回首页](../README.md) · [文档导航](README.md) · [Android 安装与更新](android-beta.md)
 
-这里按实际操作介绍练习、模型、题库和备份。首次启动请先看[快速开始](../README.md#快速开始)。公开 beta.5 已包含面经模拟、本地题包导入、SQLite／备份 v3，以及原有的双模式导出、诊断和应用内更新。下载入口与版本边界见[版本与文档范围](README.md#版本与文档范围)。
+这里按实际操作介绍练习、模型、题库和备份。首次启动请先看[快速开始](../README.md#快速开始)。已发布 beta.5 包含面经模拟、本地题包导入、SQLite／备份 v3，以及原有的双模式导出、诊断和应用内更新；待发布 beta.6 增加 APK 内置题包的原生明确确认入口。下载入口与版本边界见[版本与文档范围](README.md#版本与文档范围)。
 
 ## 练习与复习
 
@@ -110,6 +110,8 @@ beta.5 的题目列表会额外显示题包名、稳定题号、`review|prepare`
 ## 面经模拟与题包
 
 本节适用于公开 beta.5。正式首包是 Release 中与 APK 分开的 [ai-bagu-2026-autumn-interviews-r1.bagu-pack](https://github.com/InGnIJM/AI-Bagu/releases/download/v0.1.0-beta.5/ai-bagu-2026-autumn-interviews-r1.bagu-pack) 附件；仓库和 APK 均不内置题包，应用也没有在线商店或自动题包下载。本次发布尚未执行设备安装或仪器测试，具体机型上的文件选择、确认与安装表现仍需在目标设备验证。
+
+beta.6 发布后，Android public APK 会携带 descriptor 绑定的同一题包 Asset，但 SQLite 种子仍为空。首次自动提示和设置中的“安装内置题包”都只打开原生预览，用户确认才安装；取消、校验失败或进程死亡后，同一哈希不再自动提示，但设置入口可再次打开。桌面端仍下载 Release 的独立题包，更新清单不会下载或更新题包。
 
 ### 安装或升级本地题包
 

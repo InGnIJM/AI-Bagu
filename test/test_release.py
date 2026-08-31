@@ -8,6 +8,19 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+BETA6_VERSION = {"versionName": "0.1.0-beta.6", "versionCode": 6, "channel": "beta"}
+BETA6_PACK = {
+    "schema_version": 2,
+    "versionName": "0.1.0-beta.6",
+    "file_name": "ai-bagu-2026-autumn-interviews-r1.bagu-pack",
+    "sha256": "47aa6b28768be85322924df4a7c17199bf248660997cd10247066821d6d23864",
+    "pack_id": "autumn-recruit-interviews-2026",
+    "revision": 1,
+    "display_version": "2026.08.30-r1",
+    "question_count": 748,
+    "experience_count": 27,
+    "android_delivery": "bundled_confirm",
+}
 
 
 def load_release():
@@ -29,6 +42,18 @@ def test_version_rejects_invalid_channel_code_and_name(tmp_path):
         path.write_text(json.dumps(version), encoding="utf-8")
         with pytest.raises(ValueError):
             release.load_version(path)
+
+
+def test_beta6_public_release_contract_is_canonical_and_has_seven_assets():
+    release = load_release()
+
+    assert release.load_version(ROOT / "version.json") == BETA6_VERSION
+    descriptor_path = ROOT / "docs/releases/0.1.0-beta.6-question-pack.json"
+    descriptor_bytes = descriptor_path.read_bytes()
+    assert descriptor_bytes == release.json_bytes(BETA6_PACK)
+    descriptor = release.parse_question_pack_descriptor(descriptor_bytes, BETA6_VERSION)
+    assert descriptor.bundled_confirm and not descriptor.external_only
+
 
 
 def test_metadata_uses_exact_tag_url_and_public_version(tmp_path):
@@ -102,8 +127,8 @@ def test_public_build_plan_never_invokes_internal_seed_or_old_version():
     ], cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stderr
     plan = json.loads(result.stdout)
-    assert plan["versionCode"] == 5
+    assert plan["versionCode"] == 6
     assert plan["flavor"] == "public"
     assert plan["tasks"] == [":app:assemblePublicRelease", ":app:testPublicDebugUnitTest", ":app:lintPublicRelease"]
-    assert plan["deliveryName"] == "bagu-0.1.0-beta.5-public-arm64-v8a.apk"
+    assert plan["deliveryName"] == "bagu-0.1.0-beta.6-public-arm64-v8a.apk"
     assert "questionPack" not in plan

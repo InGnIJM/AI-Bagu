@@ -167,6 +167,43 @@ def test_v2_descriptor_keeps_seven_external_assets_in_release_dry_run(
     assert descriptor["file_name"] in announcement["assets"]
 
 
+def test_beta6_release_contract_leaves_feed_apk_only_and_beta5_history_external_only(
+        tmp_path, monkeypatch, capsys):
+    module = publisher()
+    version = {"versionName": "0.1.0-beta.6", "versionCode": 6, "channel": "beta"}
+    descriptor_path = ROOT / "docs/releases/0.1.0-beta.6-question-pack.json"
+    descriptor, _ = module.meta.read_question_pack_descriptor(descriptor_path, version)
+    assert descriptor.android_delivery == "bundled_confirm"
+
+    monkeypatch.setattr(module, "local_preflight", lambda: (version, "a" * 40))
+    monkeypatch.setattr(sys, "argv", ["release_github.py", "preflight"])
+    assert module.main() == 0
+    announcement = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert set(announcement["assets"]) == {
+        module.meta.apk_name(version), descriptor["file_name"], "SHA256SUMS",
+        "certificate-sha256.txt", "INSTALL.md", "RELEASE_NOTES.md", "update.json",
+    }
+
+    apk = tmp_path / module.meta.apk_name(version)
+    apk.write_bytes(b"synthetic beta6 APK")
+    feed = module.meta.make_feed(version, apk, "beta6 notes", "2026-08-31T00:00:00Z")
+    assert set(feed["release"]) == {
+        "versionName", "versionCode", "distribution", "packageName", "minSdk", "abi",
+        "apkUrl", "size", "sha256", "releaseUrl", "publishedAt", "notes",
+    }
+
+    stable_bytes = b'{"schema_version":1,"channel":"stable","release":null}\n'
+    merged = module.merge_feed_files({".nojekyll": b"", "updates/stable.json": stable_bytes}, feed)
+    assert merged["updates/stable.json"] == stable_bytes
+
+    beta5_descriptor = json.loads(
+        (ROOT / "docs/releases/0.1.0-beta.5-question-pack.json").read_text(encoding="utf-8")
+    )
+    assert beta5_descriptor["schema_version"] == 1 and "android_delivery" not in beta5_descriptor
+    history = (ROOT / "docs/releases/0.1.0-beta.5.md").read_text(encoding="utf-8")
+    assert "APK 不内置题包" in history and "不会内置" in history
+
+
 def test_prepare_receipt_records_bundled_delivery_without_source_path(tmp_path, monkeypatch):
     module = publisher()
     version = {"versionName": "0.1.0-beta.6", "versionCode": 6, "channel": "beta"}

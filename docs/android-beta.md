@@ -20,6 +20,8 @@
 
 public APK 首次启动仍为空题库，可新增题目、导入自己的 CSV、另一端的 `.bagu-backup`，或明确选择 Release 中单独下载的 `.bagu-pack`。beta.5 使用 SQLite/备份 v3 并支持面经专题，但题包不内置 APK、种子或更新 feed；历史 internal Beta 的种子题也不属于本次公开附件。已有应用数据不会被种子覆盖。题库、配置、进度与草稿位于应用私有目录，不自动同步电脑。
 
+待发布的 beta.6/code 6 保持 public SQLite 种子为空，并会在 APK 固定 Asset 中携带 descriptor 绑定的 r1 题包。它不是预装题库：首次自动提示和设置中的“安装内置题包”只显示原生预览，用户点击确认后才安装。取消、校验失败或进程死亡会使相同哈希不再自动提示；设置入口始终可以手动重开。相同字节仍作为 Release 独立附件，供桌面端和手动导入使用；更新清单只描述 APK。
+
 已有题库的背题、自评与已保存答案可离线使用；远程图片和 AI 评卷需要网络。模型地址仅允许 HTTPS，模型请求会发送题目、回答及参考资料。语音可用性取决于安装包是否包含该功能，以及系统是否提供识别服务。
 
 ### 更新前保护数据
@@ -32,7 +34,7 @@ public APK 首次启动仍为空题库，可新增题目、导入自己的 CSV�
 
 ### 本地面经题包
 
-beta.5 在设置中提供 `.bagu-pack` 选择入口；正式 r1 题包是 Release 的独立附件，但没有内置首包、在线商店或自动题包下载。流程复用系统 SAF：原生 Activity 只读取一次不超过 20 MiB 的文件并持有不可变副本，调用本地 canonical 校验器；allowlist 预览留在原生状态并只显示于原生确认框。JS/WebView 不接收这份预览，也不接收 raw/body/archive/base64/hash、题目、答案或准备提示；操作完成后只接收 allowlist 过滤、脱敏的结果状态/字段。
+beta.5 在设置中提供 `.bagu-pack` 选择入口；正式 r1 题包是 Release 的独立附件，没有内置首包、在线商店或自动题包下载。beta.6 的待发布 public APK 则额外提供“安装内置题包”：原生层从固定 Asset 读取一次不超过 20 MiB 的字节并走同一检查、预览与确认流程，不经过系统文件选择器，也不把正文交给 JS。外部导入仍复用系统 SAF：原生 Activity 只读取一次不超过 20 MiB 的文件并持有不可变副本，调用本地 canonical 校验器；allowlist 预览留在原生状态并只显示于原生确认框。JS/WebView 不接收这份预览，也不接收 raw/body/archive/base64/hash、题目、答案或准备提示；操作完成后只接收 allowlist 过滤、脱敏的结果状态/字段。
 
 用户在原生确认框明确确认后，原生层才把同一缓存字节交给安装核心；不会重读 URI，也不允许 JS 替换正文。取消、返回、校验/版本冲突或完成会消费/清理待处理状态。Activity 因配置变化重建时可保留内存快照并重新显示确认，但不会隐式安装；进程死亡后只识别到未完成标记并取消，必须重新选择文件。旧 WebView/宿主没有 `importInterviewPack()` 时页面只提示更新，不退回 JS 文件读取。
 
@@ -92,13 +94,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\android.ps1 -Mode 
 
 ### 本地构建
 
-工具链、缓存和既有签名完整后，为存在版本化题包描述的 beta.5 构建空题库 public 包及独立七附件目录：
+工具链、缓存和既有签名完整后，为 schema-v2 版本化题包描述的 beta.6 构建空 SQLite 种子 public 包、APK 内固定 Asset 及独立七附件目录：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\android.ps1 -Mode Build -QuestionPack "<正式题包路径>"
 ```
 
-`<正式题包路径>` 是待替换的本地文件路径，不应原样执行；脚本先校验题包身份、revision、数量和哈希，题包只作为独立附件复制，不会嵌入 APK。没有版本化题包描述的历史版本可省略此参数。经授权需要内部题库时，显式使用 `-Mode BuildInternal`；它不接受题包参数。当前脚本按版本和 flavor 分目录，目标 APK 已存在时拒绝覆盖，应检查已有交付物，而不是删除它后强行重建。不要套用旧文档中“一次构建两种包、覆盖固定中文文件名”的步骤。
+`<正式题包路径>` 是待替换的本地文件路径，不应原样执行；脚本先校验题包身份、revision、数量和哈希，再将同一快照字节写入 APK 固定 Asset 和独立附件。public SQLite 种子仍不得含题包题、专题或学习进度。没有版本化题包描述的历史版本可省略此参数。经授权需要内部题库时，显式使用 `-Mode BuildInternal`；它不接受题包参数。当前脚本按版本和 flavor 分目录，目标 APK 已存在时拒绝覆盖，应检查已有交付物，而不是删除它后强行重建。不要套用旧文档中“一次构建两种包、覆盖固定中文文件名”的步骤。
 
 beta.5 的公开发布准备阶段使用了 `release_github.py prepare --execute --question-pack "<正式题包路径>"`，建立精确 commit、题包／描述身份和七附件哈希回执；若同类准备自己产生的目录被中断，会保留为 `public.interrupted-<UUID>` 后重建，而不是直接认证中断文件。未经该流程拥有的目录会停止并要求人工检查。完整 dry-run、gh 登录前提、明确发布确认和 feed 重试见[维护者发布指南](data-transfer-and-updates.md#维护者发布预检准备与执行)。
 
@@ -115,7 +117,7 @@ dist/android/<versionName>/public/
 └── RELEASE_NOTES.md
 ```
 
-以上为 beta.5 七附件路径模板；具体题包名称来自版本化公开描述，历史无题包版本仍使用六附件。题包不进入 APK 或更新 feed。具体名称与文件完整性以实际脚本和产物为准。internal 输出位于相应 `internal/` 目录，不生成可公开发布的元数据。
+以上为 beta.6 七附件路径模板；具体题包名称来自版本化公开描述，历史无题包版本仍使用六附件。schema v2 只允许同一字节位于 APK 的 `assets/question-pack/bundled.bagu-pack`；更新 feed 不包含题包字段。internal 输出位于相应 `internal/` 目录，不生成可公开发布的元数据。
 
 ### 验证已有 public 交付物
 
@@ -126,7 +128,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\android.ps1 -Mode 
 构建与校验检查包括：
 
 - public 空种子；internal 清洁本地题不含复习进度、会话或评分；两者均须没有题包题、`question_packs`、来源、专题、章节或关系行。
-- 显式允许的网页、品牌、字体/许可证和应用 Python 模块；不包含 `.env`、`settings.json`、签名材料、原始工作站数据库、任何 `.bagu-pack`、精确私有 catalog 或本目录文档截图。校验器扫描 APK 全部 ZIP member，不只检查 assets。
+- schema v1／无描述时 APK 不得含任何 `.bagu-pack`；schema v2 public 只允许 descriptor 绑定的 `assets/question-pack/bundled.bagu-pack`，并核对其哈希与 runtime 身份。仍不包含 `.env`、`settings.json`、签名材料、原始工作站数据库、私有 catalog 或本目录文档截图。校验器扫描 APK 全部 ZIP member，不只检查 assets。
 - 外层、Chaquopy bootstrap-native 及嵌套 `.imy` 原生库符合已审阅清单，检查 GNU_RELRO 与 16 KiB ELF LOAD 对齐。
 - APK 证书、包名、版本、ABI、`zipalign -c -P 16 4`、SHA-256 和发布元数据相符。
 
