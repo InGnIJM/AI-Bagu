@@ -159,8 +159,11 @@ public final class BundledPackAcceptanceTest {
     private void confirmPreview() throws Exception {
         assertTrue(device.findObject(By.text("确认安装")) != null);
         device.findObject(By.text("确认安装")).click();
-        // Process the click on main, then enqueue behind the exact install task.
-        // Only inspect SQLite after that worker has completed its transaction.
+        long deadline = SystemClock.uptimeMillis() + 10000;
+        while (pending() != null && SystemClock.uptimeMillis() < deadline) SystemClock.sleep(100);
+        assertNull("Confirm click was not processed", pending());
+        // The click has enqueued the install. Wait behind that exact worker task,
+        // then inspect SQLite only after its transaction and main-thread result.
         settleNativeWorker();
         JSONObject current = state();
         assertEquals(1, current.getInt("packs"));
