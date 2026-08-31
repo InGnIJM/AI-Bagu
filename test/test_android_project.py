@@ -1314,7 +1314,7 @@ def test_bundled_pack_avd_runner_requires_isolated_emulator_safety_gates():
     )
     assert mutation_helper, "runner must centralize all ADB mutations"
     assert "Assert-DisposableEmulator" in mutation_helper.group(0)
-    assert re.search(r"&\s*\$adb\s+-s\s+\$serial", mutation_helper.group(0))
+    assert "Invoke-NativeQuietResult" in mutation_helper.group(0)
     for command in ("install", "pm', 'clear", "am', 'instrument", "am', 'force-stop"):
         assert command in source, f"runner missing serial-scoped mutation: {command}"
     assert re.search(r"Invoke-ScopedAdbMutation[^\r\n]*'emu'\s*,\s*'kill'", source), \
@@ -1328,7 +1328,7 @@ def test_bundled_pack_avd_runner_reverifies_identity_before_every_mutation():
     helper = re.search(r"(?s)function Invoke-ScopedAdbMutation.*?^}", source, re.MULTILINE)
     assert helper
     body = helper.group(0)
-    assert body.index("Assert-DisposableEmulator") < body.index("& $adb -s $serial")
+    assert body.index("Assert-DisposableEmulator") < body.index("Invoke-NativeQuietResult")
     identity = re.search(r"(?s)function Assert-DisposableEmulator.*?^}", source, re.MULTILINE)
     assert identity
     for marker in (
@@ -1337,6 +1337,26 @@ def test_bundled_pack_avd_runner_reverifies_identity_before_every_mutation():
         "ro.boot.qemu.avd_name", "vivo|v2309a", "emulatorProcess.HasExited",
     ):
         assert marker in identity.group(0), f"identity proof missing: {marker}"
+
+
+def test_bundled_pack_avd_runner_routes_native_stderr_through_one_ps5_boundary():
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+    native = re.search(r"(?s)function Invoke-NativeQuietResult.*?^}", source, re.MULTILINE)
+    assert native, "runner must define one PowerShell 5 native-process boundary"
+    native_body = native.group(0)
+    for marker in (
+        "$ErrorActionPreference = 'Continue'", "$global:LASTEXITCODE", "finally",
+        "$ErrorActionPreference = $previousErrorActionPreference", "2>$null",
+        "& $Tool @Arguments", "native-process-invocation-failed",
+    ):
+        assert marker in native_body, f"native boundary missing: {marker}"
+
+    for name in ("Invoke-Quiet", "Get-ScopedAdb", "Invoke-ScopedAdbMutation", "Get-FreeEmulatorPort"):
+        function = re.search(rf"(?s)function {name}.*?^}}", source, re.MULTILINE)
+        assert function, f"runner function missing: {name}"
+        assert "Invoke-NativeQuietResult" in function.group(0), f"{name} bypasses native boundary"
+    assert not re.search(r"&\s*\$adb\b", source), "ADB must never bypass the native boundary"
+    assert source.count("& $Tool @Arguments") == 1
 
 
 def test_bundled_pack_avd_runner_reports_only_safe_bounded_fields():
@@ -1430,6 +1450,77 @@ def test_bundled_pack_avd_runner_writes_ps5_safe_status_for_missing_apk(tmp_path
     assert status["api_results"] == []
     assert status["scenario_results"] == []
     assert "Argument types do not match" not in result.stderr
+
+
+def test_bundled_pack_avd_native_boundary_normalizes_ps5_stderr_and_keeps_exit_codes(tmp_path):
+    source = (ROOT / "scripts/test_bundled_pack_avd.ps1").read_text(encoding="utf-8")
+
+    def extract_function(name):
+        match = re.search(rf"(?ms)^function {name}\b.*?^}}\s*$", source)
+        assert match, f"runner function missing: {name}"
+        return match.group(0)
+
+    native = re.search(r"(?ms)^function Invoke-NativeQuietResult\b.*?^}\s*$", source)
+    definitions = [extract_function("Stop-Gate")]
+    if native:
+        definitions.append(native.group(0))
+    definitions.append(extract_function("Invoke-Quiet"))
+
+    success_cmd = tmp_path / "warning-success.cmd"
+    success_cmd.write_text(
+        "@echo off\r\necho payload\r\necho sdk xml warning 1>&2\r\nexit /b 0\r\n",
+        encoding="ascii",
+    )
+    failure_cmd = tmp_path / "warning-failure.cmd"
+    failure_cmd.write_text(
+        "@echo off\r\necho rejected 1>&2\r\nexit /b 7\r\n",
+        encoding="ascii",
+    )
+    harness = tmp_path / "native-boundary.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + "\n\n".join(definitions)
+        + "\ntry {\n"
+        "    $output = Invoke-Quiet $args[0] @() 'native-fixed-failure'\n"
+        "    if ($output -ne 'payload') { throw 'native-stdout-invalid' }\n"
+        "    try {\n"
+        "        [void](Invoke-Quiet $args[1] @() 'native-fixed-failure')\n"
+        "        throw 'native-nonzero-accepted'\n"
+        "    } catch {\n"
+        "        if ($_.Exception.Message -ne 'native-fixed-failure') { throw 'native-failure-code-invalid' }\n"
+        "    }\n"
+        "    $missing = Join-Path ([IO.Path]::GetTempPath()) 'bagu-native-definitely-missing.exe'\n"
+        "    try {\n"
+        "        [void](Invoke-NativeQuietResult $missing @())\n"
+        "        throw 'native-missing-accepted'\n"
+        "    } catch {\n"
+        "        if ($_.Exception.Message -ne 'native-process-invocation-failed') { throw 'native-invocation-failure-swallowed' }\n"
+        "    }\n"
+        "    [Console]::Out.WriteLine('NATIVE_QUIET_OK')\n"
+        "} catch {\n"
+        "    [Console]::Error.WriteLine($_.Exception.GetType().FullName + ':' + $_.Exception.Message)\n"
+        "    exit 1\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(harness), str(success_cmd), str(failure_cmd),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "NATIVE_QUIET_OK"
+    assert "sdk xml warning" not in result.stderr
+    assert "RemoteException" not in result.stderr
 
 
 def test_bundled_pack_acceptance_instrumentation_is_content_free_and_real_bridge_bound():

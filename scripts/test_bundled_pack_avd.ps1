@@ -54,17 +54,43 @@ function Require-File([string]$Path, [string]$Code) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { Stop-Gate $Code }
 }
 
+function Invoke-NativeQuietResult([string]$Tool, [string[]]$Arguments) {
+    if ([string]::IsNullOrWhiteSpace($Tool) -or -not (Test-Path -LiteralPath $Tool -PathType Leaf)) {
+        Stop-Gate 'native-process-invocation-failed'
+    }
+    $previousErrorActionPreference = $ErrorActionPreference
+    $previousLastExitCode = $global:LASTEXITCODE
+    $lines = $null
+    $exitCode = $null
+    try {
+        # Windows PowerShell 5 surfaces successful native stderr as ErrorRecord objects.
+        # Continue is scoped to this external process only; invocation failures remain fatal.
+        $ErrorActionPreference = 'Continue'
+        $global:LASTEXITCODE = $null
+        $lines = & $Tool @Arguments 2>$null
+        $exitCode = $global:LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        $global:LASTEXITCODE = $previousLastExitCode
+    }
+    if ($null -eq $exitCode) { Stop-Gate 'native-process-invocation-failed' }
+    return [pscustomobject]@{
+        Output = (@($lines) -join "`n").Trim()
+        ExitCode = [int]$exitCode
+    }
+}
+
 function Invoke-Quiet([string]$Tool, [string[]]$Arguments, [string]$FailureCode) {
-    $lines = & $Tool @Arguments 2>$null
-    if ($LASTEXITCODE -ne 0) { Stop-Gate $FailureCode }
-    return (@($lines) -join "`n").Trim()
+    $result = Invoke-NativeQuietResult $Tool $Arguments
+    if ($result.ExitCode -ne 0) { Stop-Gate $FailureCode }
+    return $result.Output
 }
 
 function Get-ScopedAdb([string[]]$Arguments) {
     if ([string]::IsNullOrWhiteSpace($serial)) { Stop-Gate 'serial-not-selected' }
-    $lines = & $adb -s $serial @Arguments 2>$null
-    if ($LASTEXITCODE -ne 0) { Stop-Gate 'adb-read-failed' }
-    return (@($lines) -join "`n").Trim()
+    $result = Invoke-NativeQuietResult $adb (@('-s', $serial) + $Arguments)
+    if ($result.ExitCode -ne 0) { Stop-Gate 'adb-read-failed' }
+    return $result.Output
 }
 
 function Get-DeviceProperty([string]$Name) {
@@ -93,20 +119,24 @@ function Assert-DisposableEmulator {
 function Invoke-ScopedAdbMutation([string[]]$Arguments, [string]$FailureCode) {
     # The identity proof is intentionally repeated immediately before every mutation.
     Assert-DisposableEmulator
-    $lines = & $adb -s $serial @Arguments 2>$null
-    if ($LASTEXITCODE -ne 0) { Stop-Gate $FailureCode }
-    return (@($lines) -join "`n").Trim()
+    $result = Invoke-NativeQuietResult $adb (@('-s', $serial) + $Arguments)
+    if ($result.ExitCode -ne 0) { Stop-Gate $FailureCode }
+    return $result.Output
 }
 
 function Get-FreeEmulatorPort {
     for ($candidate = 5556; $candidate -le 5680; $candidate += 2) {
         $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $candidate)
+        try { $listener.Start() }
+        catch {
+            $listener.Stop()
+            continue
+        }
         try {
-            $listener.Start()
             $probeSerial = "emulator-$candidate"
-            & $adb -s $probeSerial get-state 1>$null 2>$null
-            if ($LASTEXITCODE -ne 0) { return $candidate }
-        } catch { }
+            $result = Invoke-NativeQuietResult $adb @('-s', $probeSerial, 'get-state')
+            if ($result.ExitCode -ne 0) { return $candidate }
+        }
         finally { $listener.Stop() }
     }
     Stop-Gate 'no-free-emulator-port'
